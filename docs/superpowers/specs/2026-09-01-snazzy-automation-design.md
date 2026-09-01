@@ -113,7 +113,7 @@ R2 stores:
 - generated 4-in-1 images
 - failed-group source images
 
-Airtable may hold attachment copies or references, but R2 remains the durable source.
+Airtable attachment fields receive copies fetched from short-lived HMAC-signed Worker asset URLs for staff usability. The Worker verifies path, expiry, and signature before streaming the matching private R2 object. R2 remains durable source and recovery copy; signed URLs are never stored as durable identifiers.
 
 ### External integrations stay behind narrow adapters
 
@@ -135,7 +135,8 @@ Responsibilities:
 - `/upload` and `/docs` workflow triggers
 - LINE webhook verification and routing
 - signed R2 attachment URLs
-- health and setup checks
+- health, setup, and usage checks
+- constant-time bearer verification for direct operator routes `/upload`, `/docs`, `/setup`, and `/usage`; LINE handlers call the same trigger services only after webhook signature and allowlisted-group validation
 
 ### Workflows
 
@@ -151,27 +152,26 @@ Workflows provide step retries, persisted progress, and safe resume after Worker
 Minimal tables:
 
 - `sequences` — atomic next Product ID number
-- `import_runs` — one row per album snapshot/import trigger
-- `photo_assets` — Apple photo ID, content hash, R2 key, import state
+- `import_runs` — one row per album snapshot/import trigger; a partial unique index permits only one `running` row per source album
+- `import_checkpoints` — explicit last finalized snapshot position per safe source-album digest
+- `photo_assets` — source album ID, Apple photo ID, content hash, R2 key, import state
 - `product_groups` — ordered asset range, allocated Product ID, state, Airtable row ID, failure details
 - `publication_jobs` — Airtable publication-run ID, Google document ID, state, validation result
 - `line_commands` — pending/approved/rejected/expired command payloads and one-time tokens
 - `audit_events` — append-only actor, action, before value, after value, timestamp, and correlation ID
 
-Required indexes cover Apple photo ID, content hash, Product ID, Airtable row ID, publication date/run ID, LINE event ID, and command state.
+Required indexes cover `(source album ID, Apple photo ID)`, content hash, Product ID, Airtable row ID, publication date/run ID, LINE event ID, and command state.
 
 ### R2
 
 Private bucket layout:
 
 ```text
-imports/<import-run-id>/<apple-photo-id>/original.jpg
-products/<product-id>/source/<sequence>.jpg
+assets/<sha256>.<extension>
 products/<product-id>/collage/1080x1080.jpg
-failed/<import-run-id>/<group-id>/<sequence>.jpg
 ```
 
-Exact file extension follows detected media type. Signed access URLs are short-lived and never logged.
+Each original exists once under content hash. D1 maps source album/photo IDs and product-group order to asset key; failed groups and marker photos use same asset store rather than copied objects. Exact extension follows detected media type. Signed access URLs are short-lived and never logged.
 
 ### Images binding
 
@@ -203,7 +203,7 @@ Before production implementation continues, a Cloudflare-based probe must prove:
 7. Endpoint redirects, timeouts, and transient errors recover through retries.
 8. Album token, derivative URLs, and signed R2 URLs never enter logs.
 9. Public Shared Album quality is acceptable: photos are reduced by Apple to 2048 px on the long edge and may lose metadata.
-10. Album rotation is operationally possible before Apple's 5,000-item Shared Album limit is reached.
+10. Album rotation is rehearsed before Apple's 5,000-item limit: staff creates a new active Shared Album, updates the Cloudflare secret, runs setup validation with a new cutoff date, and leaves the previous album unchanged as an archive. `sourceAlbumId` is the stable SHA-256 digest of the secret album token, never the raw token. D1 keys source assets by `(sourceAlbumId, Apple photo ID)` so identifiers cannot collide across rotations without persisting the sensitive token.
 
 ### Gate result
 
@@ -216,7 +216,7 @@ Before production implementation continues, a Cloudflare-based probe must prove:
 
 1. Cron runs after the documented 30-minute upload cutoff.
 2. `/upload` starts or resumes the same workflow manually.
-3. Workflow reads latest D1 checkpoint.
+3. Workflow reads the explicit D1 checkpoint. Partially persisted `photo_assets` never advance it.
 4. Connector fetches one stable album snapshot.
 5. Already recorded Apple photo IDs are skipped.
 6. Content hashes provide second-layer duplicate protection.
@@ -226,9 +226,10 @@ Before production implementation continues, a Cloudflare-based probe must prove:
 1. Stream each unseen image directly to R2.
 2. Record Apple ID, content hash, order, and R2 key in D1.
 3. Detect explicit marker photos.
-4. Discard marker images from Product image lists while retaining diagnostic copies where useful.
-5. Build ordered product groups from each marker to the next marker.
-6. No human review screen is created.
+4. Flag marker originals as `is_marker` in D1 and retain them in R2, but never attach them to Product rows.
+5. Build ordered product groups from each marker to next marker; final marker group ends at stable snapshot boundary.
+6. Photos before first marker in snapshot are invalid input for that run: retain them in R2, mark run validation failure, and report source range to LINE without creating Product row.
+7. No human review screen is created.
 
 ### Product creation
 
@@ -236,16 +237,17 @@ For each group:
 
 1. Set state to `pending`, then `importing`.
 2. Allocate next `A-<NUMBER>` atomically in D1.
-3. Continue sequence from highest valid existing Airtable Product ID during initial setup.
-4. Never reuse an allocated number, including failed imports.
-5. Build complete Airtable payload before creating row.
-6. Create Product row once.
-7. Verify required system fields and image references.
-8. Mark D1 group `succeeded` only after verification.
+3. Bootstrap sequence once during setup while imports are disabled: scan valid existing Airtable Product IDs, set D1 to one greater than maximum, and record bootstrap completion. If no valid ID exists, start at configured initial number.
+4. After bootstrap, D1 is sole sequence authority. Airtable Product ID is system-owned; setup and health checks fail if later Airtable maximum equals or exceeds D1's next value, and operator must advance D1 before imports resume.
+5. Never reuse an allocated number, including failed imports.
+6. Build complete Airtable payload before creating row.
+7. Create Product row once.
+8. Verify required system fields and image references.
+9. Mark D1 group `succeeded` only after verification.
 
 ### Retry and rollback
 
-- Retry transient failures up to five attempts with exponential backoff.
+- Retry transient failures up to five times after the initial attempt, with exponential backoff.
 - Successful Product rows remain untouched when another group fails.
 - On exhausted group failure:
   - delete any partial Airtable row;
@@ -256,12 +258,12 @@ For each group:
   - report failed group position, source photo range, attempted Product ID, reason, and Airtable/import link to LINE.
 - A later `/upload`:
   - skips `succeeded` groups;
-  - retries `failed` groups with a fresh five-attempt cycle;
+  - retries `failed` groups with a fresh cycle of one initial attempt plus up to five retries;
   - processes genuinely new groups.
 
 ### Checkpoint finalization
 
-Checkpoint advances after every group in snapshot reaches terminal `succeeded` or `failed` state. Terminal failures remain explicitly retryable and cannot be mistaken for unseen photos.
+Checkpoint advances to the stable snapshot boundary only after every reconstructed group reaches terminal `succeeded` or `failed` state. D1 updates the run status and explicit `import_checkpoints` row in one transactional `batch()`. Terminal failures remain explicitly retryable from stored assets and cannot be mistaken for unseen photos.
 
 ## 9. Airtable model
 
@@ -274,7 +276,6 @@ System-owned fields:
 - `Upload Date`
 - `Product Images`
 - `Inventory Status` — `In | Out`
-- `Import Result` — `Imported | Failed`
 - `4-in-1 Image`
 - `Publication Run`
 - `Sold Price`
@@ -327,9 +328,10 @@ One row per publication date:
 4. Workflow validates every linked Product before any document is created.
 5. If any required field is missing:
    - create no Google Doc;
-   - return run to `Draft` or mark `Failed` with validation details;
+   - return Publication Run to `Draft` and store validation details in `Error Summary`;
    - send LINE report grouped by Product ID and missing fields;
-   - include Airtable link and instruction to run `/docs` after correction.
+   - include Airtable link and instruct staff to correct data, set run to `Ready`, then run `/docs`.
+6. Reserve `Failed` for non-validation workflow errors that exhaust the initial attempt plus up to five retries, such as persistent image, Claude, Airtable, or Google API failure.
 
 ### Collage generation
 
@@ -338,15 +340,17 @@ For each valid Product:
 1. Read first four ordered images.
 2. Generate deterministic 1080×1080 2×2 collage.
 3. Save output to R2.
-4. Store/reference output in Airtable.
+4. Update Airtable `4-in-1 Image` attachment by giving Airtable a short-lived signed R2 URL; R2 object remains durable source.
 
 ### Caption generation
 
 - Claude API receives verified Airtable text only; no images.
-- One structured request covers whole publication run where practical.
+- Default model is Claude Opus 5 (`claude-opus-5`); model remains configuration so pricing or model lifecycle can change without workflow changes.
+- At expected 22–24 products, one structured request covers whole Publication Run. If token counting exceeds configured request limit, split deterministically by Product ID into smallest number of batches and merge by Product ID before document generation.
 - Output schema returns exactly three Thai caption drafts keyed by Product ID.
 - Every returned Product ID must match requested set.
-- Invalid or missing output retries only affected product where possible.
+- When response parses and identifies only specific Product IDs with missing or invalid captions, retry those products only.
+- When whole request fails or cannot be parsed—network error, rate limit, malformed top-level response, or mismatched Product ID set—retry all products whose valid captions are not already stored.
 - Captions remain editable drafts; no automatic social publication occurs.
 
 ### Google Docs template
@@ -359,7 +363,7 @@ Customer maintains one master template containing:
 - editable global suffix
 - placeholders such as `{{PUBLICATION_DATE}}` and `{{PRODUCTS}}`
 
-System copies template for each publication date. Template edits affect future documents only.
+Workflow copies template once when run enters `Generating`; that copy is immutable input for rest of run. Retries of same run reuse copied template. Template edits made afterward affect future Publication Runs only.
 
 Each Product section contains:
 
@@ -406,10 +410,9 @@ Returns:
 - Inventory Status
 - Upload Date
 - Product ID
-- Airtable row link where possible
-- optional iCloud date link only if Phase 0 proves stable link construction
+- Airtable row link
 
-Unknown Product ID returns explicit Thai not-found message.
+Unknown Product ID returns explicit Thai not-found message. iCloud date link is excluded from first release because public Shared Albums do not guarantee a stable per-date URL.
 
 #### `/upload`
 
@@ -461,7 +464,7 @@ Parser behavior:
 - Missing Product ID or price returns incomplete-data error.
 - Ambiguous Product ID or price returns explicit format guidance.
 - Failed extraction never sends confirmation buttons.
-- Product already `Out` is rejected without overwrite; response shows existing Sold Price, Sold At, and Airtable row link.
+- Product already `Out` is rejected without overwrite; response shows existing Sold Price, Sold At, Sold By, and Airtable row link. Any missing sale field is shown as `ไม่พบข้อมูลเดิม` rather than inferred or overwritten; staff corrects legacy data directly in Airtable.
 
 Confirmation flow:
 
@@ -531,8 +534,8 @@ LINE success messages include:
 - date in Thai locale
 - action name
 - count
-- Product IDs where useful
-- output or Airtable link
+- imported or published Product IDs for import/publication success
+- relevant output or Airtable link
 
 LINE failure messages include:
 
@@ -576,6 +579,8 @@ LINE_CHANNEL_ACCESS_TOKEN
 GOOGLE_SERVICE_ACCOUNT_JSON
 ANTHROPIC_API_KEY
 ICLOUD_SHARED_ALBUM_TOKEN
+ASSET_URL_SIGNING_SECRET
+ADMIN_ROUTE_TOKEN
 ```
 
 ### Non-secret configuration
@@ -587,13 +592,17 @@ AIRTABLE_PUBLICATION_RUNS_TABLE_ID
 LINE_ALLOWED_GROUP_ID
 GOOGLE_DRIVE_FOLDER_ID
 GOOGLE_TEMPLATE_DOC_ID
+PUBLIC_BASE_URL
 TIME_ZONE=Asia/Bangkok
 IMPORT_CRON
 PUBLICATION_CRON
 UPLOAD_CUTOFF_MINUTES=30
-IMPORT_MAX_ATTEMPTS=5
-PUBLICATION_MAX_ATTEMPTS=5
+IMPORT_RETRY_LIMIT=5
+PUBLICATION_RETRY_LIMIT=5
 PRODUCT_ID_PREFIX=A
+PRODUCT_ID_INITIAL_NUMBER=1
+CLAUDE_MODEL=claude-opus-5
+CLAUDE_REQUEST_INPUT_TOKEN_LIMIT=150000
 SOLDOUT_CONFIRMATION_ENABLED=true
 FIRST_IMPORT_CUTOFF_DATE
 ```
@@ -606,9 +615,10 @@ A setup command must verify:
 
 - D1 migrations applied
 - R2 access
+- HMAC-signed private asset route using `PUBLIC_BASE_URL` and `ASSET_URL_SIGNING_SECRET`
 - Images binding
 - Airtable base/table/field mappings
-- highest existing Product ID
+- one-time Product ID bootstrap or ongoing D1/Airtable sequence consistency
 - LINE webhook signature and group ID
 - Google template/folder permissions
 - Claude API credential
@@ -654,7 +664,7 @@ Cost controls:
 
 - deterministic image transformations
 - no AI vision input
-- one structured caption request per publication run where practical
+- one structured caption request per Publication Run at expected volume, with deterministic token-limit batching only when required
 - output token limits and schema validation
 - usage alarms
 - Batch API at 50% token pricing if caption spend approaches budget
@@ -787,7 +797,7 @@ Expected total for one experienced developer: 4–7 weeks. iCloud feasibility an
 - Airtable uses Products and Publication Runs tables.
 - Incomplete publication blocks whole Google Doc.
 - One Google Doc per publication date.
-- Claude uses verified text fields only and returns three Thai drafts.
+- Claude Opus 5 (`claude-opus-5`) is initial caption model; it uses verified text fields only and returns three Thai drafts.
 - `/soldout` accepts one Product ID and required whole-baht price.
 - Everyone in allowlisted LINE admin group may run commands.
 - Already-Out Product is never overwritten.
@@ -797,7 +807,7 @@ Expected total for one experienced developer: 4–7 weeks. iCloud feasibility an
 
 ## 21. References
 
-- Apple Shared Albums: https://support.apple.com/en-mide/108314
+- Apple Shared Albums: https://support.apple.com/en-us/108314
 - Apple PhotoKit cloud-shared assets: https://developer.apple.com/documentation/photos/phassetsourcetype/typecloudshared
 - Cloudflare Workers limits: https://developers.cloudflare.com/workers/platform/limits/
 - Cloudflare Workers pricing: https://developers.cloudflare.com/workers/platform/pricing/

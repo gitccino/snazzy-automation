@@ -1,0 +1,701 @@
+<title>Snazzy Automation Blueprint</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Sans+3:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap');
+
+  :root {
+    --ground: #f4f7fb;
+    --surface: #ffffff;
+    --surface-raised: #edf3f9;
+    --ink: #102a43;
+    --muted: #526d82;
+    --faint: #71889a;
+    --line: #cfdae5;
+    --line-strong: #a9bbcc;
+    --blue: #2f80ed;
+    --blue-soft: #e8f1fe;
+    --teal: #137f74;
+    --teal-soft: #e2f3f0;
+    --amber: #b86008;
+    --amber-soft: #fff0d8;
+    --red: #b42318;
+    --red-soft: #fce8e6;
+    --navy: #0b2339;
+    --code: #eaf0f6;
+    --shadow: 0 16px 44px rgba(16, 42, 67, 0.08);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #091722;
+      --surface: #102431;
+      --surface-raised: #162f3e;
+      --ink: #e7f0f7;
+      --muted: #acc0cf;
+      --faint: #839baa;
+      --line: #294453;
+      --line-strong: #426174;
+      --blue: #75aef5;
+      --blue-soft: #163453;
+      --teal: #66c4b8;
+      --teal-soft: #163c3a;
+      --amber: #f2b35f;
+      --amber-soft: #422f18;
+      --red: #ff8e85;
+      --red-soft: #452421;
+      --navy: #e7f0f7;
+      --code: #193140;
+      --shadow: 0 18px 48px rgba(0, 0, 0, 0.24);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #091722;
+    --surface: #102431;
+    --surface-raised: #162f3e;
+    --ink: #e7f0f7;
+    --muted: #acc0cf;
+    --faint: #839baa;
+    --line: #294453;
+    --line-strong: #426174;
+    --blue: #75aef5;
+    --blue-soft: #163453;
+    --teal: #66c4b8;
+    --teal-soft: #163c3a;
+    --amber: #f2b35f;
+    --amber-soft: #422f18;
+    --red: #ff8e85;
+    --red-soft: #452421;
+    --navy: #e7f0f7;
+    --code: #193140;
+    --shadow: 0 18px 48px rgba(0, 0, 0, 0.24);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "Source Sans 3", ui-sans-serif, system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.62;
+  }
+  a { color: var(--blue); text-underline-offset: 3px; }
+  a:hover { text-decoration-thickness: 2px; }
+  a:focus-visible, summary:focus-visible {
+    outline: 3px solid var(--blue);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+  code, .mono {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.88em;
+    font-variant-numeric: tabular-nums;
+  }
+  code {
+    background: var(--code);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.08rem 0.32rem;
+  }
+  h1, h2, h3, h4 {
+    font-family: "Archivo", ui-sans-serif, system-ui, sans-serif;
+    color: var(--navy);
+    line-height: 1.12;
+    text-wrap: balance;
+    margin: 0;
+  }
+  h1 { font-size: clamp(2.55rem, 5.8vw, 5.7rem); letter-spacing: -0.055em; max-width: 10ch; }
+  h2 { font-size: clamp(1.85rem, 3.2vw, 2.9rem); letter-spacing: -0.035em; }
+  h3 { font-size: 1.18rem; letter-spacing: -0.015em; }
+  p { margin: 0; }
+  ul, ol { margin: 0; padding-left: 1.25rem; }
+  li + li { margin-top: 0.35rem; }
+  .shell {
+    display: grid;
+    grid-template-columns: 15rem minmax(0, 1fr);
+    max-width: 96rem;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+  .rail {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    padding: 2rem 1.4rem;
+    border-right: 1px solid var(--line);
+    background: color-mix(in srgb, var(--ground) 92%, transparent);
+    backdrop-filter: blur(14px);
+    overflow-y: auto;
+  }
+  .rail-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    font-family: "Archivo", sans-serif;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    margin-bottom: 2rem;
+  }
+  .rail-mark {
+    width: 1.75rem;
+    height: 1.75rem;
+    background: var(--blue);
+    border-radius: 50%;
+    box-shadow: inset 0 0 0 0.38rem var(--blue-soft);
+  }
+  .rail-label, .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    color: var(--faint);
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .rail nav { display: grid; gap: 0.2rem; margin-top: 0.65rem; }
+  .rail nav a {
+    color: var(--muted);
+    text-decoration: none;
+    font-weight: 600;
+    padding: 0.38rem 0.55rem;
+    border-left: 2px solid transparent;
+  }
+  .rail nav a:hover { color: var(--blue); border-left-color: var(--blue); }
+  .rail-meta {
+    display: grid;
+    gap: 0.5rem;
+    margin-top: 2rem;
+    padding-top: 1.2rem;
+    border-top: 1px solid var(--line);
+    color: var(--faint);
+    font-size: 0.83rem;
+  }
+  main { min-width: 0; }
+  .hero {
+    min-height: 38rem;
+    padding: clamp(3rem, 8vw, 7rem) clamp(1.4rem, 6vw, 6.5rem) 4rem;
+    display: grid;
+    align-content: space-between;
+    gap: 4.5rem;
+    border-bottom: 1px solid var(--line);
+    background:
+      linear-gradient(110deg, transparent 0 67%, color-mix(in srgb, var(--blue-soft) 68%, transparent) 67% 100%),
+      var(--surface);
+  }
+  .hero-copy { display: grid; gap: 1.45rem; }
+  .hero-deck {
+    color: var(--muted);
+    font-size: clamp(1.12rem, 2vw, 1.42rem);
+    line-height: 1.5;
+    max-width: 42rem;
+  }
+  .hero-strip {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+  }
+  .metric { background: var(--surface); padding: 1.15rem; }
+  .metric strong {
+    display: block;
+    font-family: "Archivo", sans-serif;
+    font-size: 1.35rem;
+    color: var(--navy);
+    line-height: 1.2;
+  }
+  .metric span { color: var(--faint); font-size: 0.83rem; }
+  .content { padding: 0 clamp(1.4rem, 6vw, 6.5rem) 6rem; }
+  .section {
+    padding: clamp(4rem, 8vw, 7rem) 0;
+    border-bottom: 1px solid var(--line);
+    display: grid;
+    gap: 2.1rem;
+  }
+  .section:last-child { border-bottom: 0; }
+  .section-head {
+    display: grid;
+    grid-template-columns: minmax(12rem, 0.42fr) minmax(20rem, 1fr);
+    gap: clamp(2rem, 6vw, 6rem);
+    align-items: end;
+  }
+  .section-intro { color: var(--muted); font-size: 1.08rem; max-width: 46rem; }
+  .decision-grid, .card-grid, .phase-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+  }
+  .decision, .card, .phase {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: 1.35rem;
+    display: grid;
+    gap: 0.75rem;
+  }
+  .decision { border-top: 3px solid var(--teal); }
+  .decision p, .card p, .phase p { color: var(--muted); }
+  .status {
+    width: fit-content;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    border: 1px solid currentColor;
+    border-radius: 99rem;
+    padding: 0.15rem 0.58rem;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.67rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .status::before { content: ""; width: 0.42rem; height: 0.42rem; border-radius: 50%; background: currentColor; }
+  .status.good { color: var(--teal); }
+  .status.warn { color: var(--amber); }
+  .status.block { color: var(--red); }
+  .risk-panel {
+    background: var(--amber-soft);
+    border: 1px solid color-mix(in srgb, var(--amber) 48%, var(--line));
+    border-left: 0.5rem solid var(--amber);
+    padding: clamp(1.5rem, 3vw, 2.3rem);
+    display: grid;
+    grid-template-columns: minmax(12rem, 0.5fr) minmax(20rem, 1fr);
+    gap: 2rem;
+  }
+  .risk-panel h3 { color: var(--amber); font-size: 1.55rem; }
+  .risk-panel p, .risk-panel li { color: var(--ink); }
+  .flow {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(8.5rem, 1fr));
+    align-items: stretch;
+    gap: 0.7rem;
+    overflow-x: auto;
+    padding: 0.2rem 0 0.8rem;
+  }
+  .flow-node {
+    position: relative;
+    min-width: 8.5rem;
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    padding: 1.1rem;
+    display: grid;
+    align-content: start;
+    gap: 0.42rem;
+  }
+  .flow-node:not(:last-child)::after {
+    content: "→";
+    position: absolute;
+    right: -0.62rem;
+    top: 50%;
+    z-index: 2;
+    transform: translateY(-50%);
+    width: 1.1rem;
+    height: 1.1rem;
+    background: var(--ground);
+    color: var(--blue);
+    font-weight: 800;
+    display: grid;
+    place-items: center;
+  }
+  .flow-node strong { font-family: "Archivo", sans-serif; line-height: 1.25; }
+  .flow-node small { color: var(--faint); line-height: 1.35; }
+  .split {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+  }
+  .list-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: 1.4rem;
+    display: grid;
+    gap: 1rem;
+  }
+  .list-card.system { border-top: 4px solid var(--blue); }
+  .list-card.human { border-top: 4px solid var(--teal); }
+  .field-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    list-style: none;
+    padding: 0;
+  }
+  .field-list li {
+    margin: 0;
+    background: var(--surface-raised);
+    border: 1px solid var(--line);
+    padding: 0.26rem 0.52rem;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.75rem;
+  }
+  .state-line {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    overflow-x: auto;
+  }
+  .state {
+    padding: 0.45rem 0.62rem;
+    border: 1px solid var(--line-strong);
+    background: var(--surface);
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.75rem;
+    white-space: nowrap;
+  }
+  .state.failed { border-color: var(--red); color: var(--red); }
+  .state.done { border-color: var(--teal); color: var(--teal); }
+  .arrow { color: var(--faint); font-weight: 700; }
+  .command-list { display: grid; gap: 0.65rem; }
+  details {
+    background: var(--surface);
+    border: 1px solid var(--line);
+  }
+  summary {
+    cursor: pointer;
+    padding: 1rem 1.15rem;
+    font-family: "Archivo", sans-serif;
+    font-weight: 700;
+    color: var(--navy);
+  }
+  details[open] summary { border-bottom: 1px solid var(--line); }
+  .detail-body { padding: 1rem 1.15rem 1.25rem; display: grid; gap: 0.8rem; color: var(--muted); }
+  .grammar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.7rem;
+  }
+  .grammar-box { padding: 1rem; border: 1px solid var(--line); background: var(--surface-raised); }
+  .grammar-box.accept { border-left: 4px solid var(--teal); }
+  .grammar-box.reject { border-left: 4px solid var(--red); }
+  .grammar-box strong { display: block; margin-bottom: 0.5rem; }
+  .grammar-box pre {
+    margin: 0;
+    white-space: pre-wrap;
+    color: var(--ink);
+    font: 0.82rem/1.6 "IBM Plex Mono", monospace;
+  }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--line); background: var(--surface); }
+  table { width: 100%; border-collapse: collapse; min-width: 45rem; }
+  th, td { text-align: left; padding: 0.8rem 0.9rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--faint); font: 600 0.71rem/1.3 "IBM Plex Mono", monospace; letter-spacing: 0.06em; text-transform: uppercase; }
+  td { color: var(--muted); }
+  tr:last-child td { border-bottom: 0; }
+  .phase { border-left: 4px solid var(--blue); align-content: start; }
+  .phase-time { font: 600 0.75rem/1 "IBM Plex Mono", monospace; color: var(--blue); }
+  .cost-band {
+    background: var(--navy);
+    color: var(--ground);
+    padding: clamp(1.7rem, 4vw, 2.8rem);
+    display: grid;
+    grid-template-columns: minmax(14rem, 0.7fr) minmax(20rem, 1fr);
+    gap: 2rem;
+    align-items: center;
+  }
+  .cost-band h3 { color: var(--ground); font-size: clamp(2rem, 4vw, 3.4rem); }
+  .cost-band p { color: color-mix(in srgb, var(--ground) 76%, transparent); }
+  .checklist { list-style: none; padding: 0; display: grid; gap: 0.58rem; }
+  .checklist li { margin: 0; padding-left: 1.5rem; position: relative; }
+  .checklist li::before { content: "✓"; position: absolute; left: 0; color: var(--teal); font-weight: 800; }
+  .links { display: flex; flex-wrap: wrap; gap: 0.7rem; }
+  .link-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    background: var(--blue-soft);
+    border: 1px solid color-mix(in srgb, var(--blue) 38%, var(--line));
+    color: var(--blue);
+    text-decoration: none;
+    padding: 0.65rem 0.85rem;
+    font-weight: 700;
+  }
+  .link-button:hover { background: var(--blue); color: var(--surface); }
+  .footer {
+    padding: 2.5rem clamp(1.4rem, 6vw, 6.5rem);
+    border-top: 1px solid var(--line);
+    color: var(--faint);
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  @media (max-width: 980px) {
+    .shell { grid-template-columns: 1fr; }
+    .rail { position: relative; height: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 1rem 1.4rem; }
+    .rail-brand { margin-bottom: 0.65rem; }
+    .rail nav { display: flex; overflow-x: auto; }
+    .rail nav a { white-space: nowrap; border-left: 0; border-bottom: 2px solid transparent; }
+    .rail nav a:hover { border-left-color: transparent; border-bottom-color: var(--blue); }
+    .rail-meta, .rail-label { display: none; }
+    .hero { min-height: auto; }
+  }
+  @media (max-width: 720px) {
+    .section-head, .risk-panel, .cost-band { grid-template-columns: 1fr; }
+    .decision-grid, .card-grid, .phase-grid, .split, .grammar { grid-template-columns: 1fr; }
+    .hero-strip { grid-template-columns: repeat(2, 1fr); }
+    h1 { max-width: 12ch; }
+  }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+</style>
+
+<div class="shell">
+  <aside class="rail">
+    <div class="rail-brand"><span class="rail-mark" aria-hidden="true"></span> Snazzy Automation</div>
+    <div class="rail-label">Blueprint index</div>
+    <nav aria-label="Document sections">
+      <a href="#decisions">Decisions</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#icloud">iCloud gate</a>
+      <a href="#import">Import</a>
+      <a href="#airtable">Airtable</a>
+      <a href="#publication">Publication</a>
+      <a href="#line">LINE</a>
+      <a href="#operations">Operations</a>
+      <a href="#delivery">Delivery</a>
+    </nav>
+    <div class="rail-meta">
+      <span>Approved design</span>
+      <span class="mono">2026-09-01</span>
+      <span>Asia/Bangkok</span>
+    </div>
+  </aside>
+
+  <main>
+    <header class="hero">
+      <div class="hero-copy">
+        <div class="eyebrow">Customer-owned operating blueprint</div>
+        <h1>Photos in. Products ready.</h1>
+        <p class="hero-deck">Durable product automation from iCloud Shared Album to Airtable, publication-ready Google Docs, and safe inventory commands in LINE.</p>
+        <div class="links">
+          <a class="link-button" href="https://app.excalidraw.com/s/5PnxQlNdrPe/7u26XV3cNtx" target="_blank" rel="noreferrer">Open architecture diagram ↗</a>
+          <a class="link-button" href="https://app.excalidraw.com/s/5PnxQlNdrPe/6Ez0wkDNEBF" target="_blank" rel="noreferrer">Open import workflow ↗</a>
+        </div>
+      </div>
+      <div class="hero-strip" aria-label="Key operating figures">
+        <div class="metric"><strong>100–500</strong><span>photos each day</span></div>
+        <div class="metric"><strong>22–24</strong><span>expected products</span></div>
+        <div class="metric"><strong>5 tries</strong><span>per failed step</span></div>
+        <div class="metric"><strong>฿400–800</strong><span>estimated monthly spend</span></div>
+      </div>
+    </header>
+
+    <div class="content">
+      <section class="section" id="decisions">
+        <div class="section-head">
+          <div><div class="eyebrow">01 / Control sheet</div><h2>Decisions locked</h2></div>
+          <p class="section-intro">Lean first release. Cloudflare owns automation state. Airtable owns human product data. R2 owns master images. One risky source boundary stays replaceable.</p>
+        </div>
+        <div class="decision-grid">
+          <article class="decision"><span class="status good">Approved</span><h3>Cloudflare-native TypeScript</h3><p>Workers receive events. Workflows run durable jobs. D1 controls state. R2 holds originals. Images creates deterministic collages.</p></article>
+          <article class="decision"><span class="status warn">Gate first</span><h3>iCloud remains initial source</h3><p>Undocumented public-album connector must pass Phase 0. Failure changes source adapter, not downstream system.</p></article>
+          <article class="decision"><span class="status good">Approved</span><h3>Marker-based grouping</h3><p>Explicit marker starts each product. Marker is authoritative. No AI grouping and no staff review screen.</p></article>
+          <article class="decision"><span class="status good">Approved</span><h3>Per-group recovery</h3><p>Successful products stay. Failed group rolls back partial Airtable row, keeps R2 files, burns allocated Product ID, and remains retryable.</p></article>
+          <article class="decision"><span class="status good">Approved</span><h3>One document per date</h3><p>Any incomplete product blocks whole run. No partial Google Doc. Duplicate <code>/docs</code> never creates second final document.</p></article>
+          <article class="decision"><span class="status good">Approved</span><h3>One product per soldout</h3><p><code>/soldout</code> requires one valid Product ID and one whole-baht price, then uses one-time confirmation before Airtable update.</p></article>
+        </div>
+      </section>
+
+      <section class="section" id="architecture">
+        <div class="section-head">
+          <div><div class="eyebrow">02 / System map</div><h2>Clear ownership</h2></div>
+          <p class="section-intro">Each platform does one job. External services sit behind narrow boundaries, so fragile integrations can change without rewriting workflows.</p>
+        </div>
+        <div class="flow" aria-label="System architecture flow">
+          <div class="flow-node"><strong>iCloud album</strong><small>Bulk photo source</small></div>
+          <div class="flow-node"><strong>Cloudflare</strong><small>Workers · Workflows · D1</small></div>
+          <div class="flow-node"><strong>R2 + Images</strong><small>Originals · 4-in-1</small></div>
+          <div class="flow-node"><strong>Airtable</strong><small>Enrichment · Inventory</small></div>
+          <div class="flow-node"><strong>Docs + LINE</strong><small>Publication · Commands</small></div>
+        </div>
+        <div class="card-grid">
+          <article class="card"><h3>Worker API</h3><p>Cron handlers, LINE webhook, manual workflow triggers, signed R2 URLs, setup checks.</p></article>
+          <article class="card"><h3>Cloudflare Workflows</h3><p>Two durable jobs: <code>ImportWorkflow</code> and <code>PublicationWorkflow</code>.</p></article>
+          <article class="card"><h3>D1 control plane</h3><p>Checkpoints, Product ID sequence, group states, idempotency, confirmation tokens, before/after values, audit events.</p></article>
+          <article class="card"><h3>R2 master storage</h3><p>Permanent originals, failed-group source files, deterministic 1080×1080 collages. Bucket remains private.</p></article>
+          <article class="card"><h3>Human workspace</h3><p>Airtable exposes product fields, ordered attachments, readiness, inventory, sale data, and output links.</p></article>
+          <article class="card"><h3>Output adapters</h3><p>Claude produces Thai text drafts. Google Docs creates first publication destination. LINE provides operator controls.</p></article>
+        </div>
+      </section>
+
+      <section class="section" id="icloud">
+        <div class="section-head">
+          <div><div class="eyebrow">03 / Critical dependency</div><h2>Prove iCloud first</h2></div>
+          <p class="section-intro">Apple offers no supported server API or webhook for unattended Shared Album ingestion. Cloudflare must reproduce requests used by public album webpage.</p>
+        </div>
+        <div class="risk-panel">
+          <div><span class="status block">Delivery gate</span><h3>Unsupported connector</h3></div>
+          <div>
+            <p>Do not build production import flow on assumptions. Phase 0 must prove connectivity, stable ordering, checkpoint behavior, streaming download, deduplication, and token redaction from Cloudflare.</p>
+            <ul>
+              <li>Public album URL acts like weak secret.</li>
+              <li>Images may be reduced to 2048 px long edge.</li>
+              <li>Metadata may be lost in downloaded copies.</li>
+              <li>Shared Album limit is 5,000 items; rehearse rotation before limit by creating a new active album and retaining old album as archive.</li>
+              <li>Endpoint may change without notice.</li>
+            </ul>
+          </div>
+        </div>
+        <div class="split">
+          <article class="list-card"><span class="status good">Pass</span><h3>Continue iCloud adapter</h3><p>All controlled tests pass at production-sized volume. Downstream implementation proceeds.</p></article>
+          <article class="list-card"><span class="status block">Fail</span><h3>Replace image source only</h3><p>Use direct upload or supported cloud-folder source. Keep D1, R2, Workflows, Airtable, Docs, and LINE design.</p></article>
+        </div>
+      </section>
+
+      <section class="section" id="import">
+        <div class="section-head">
+          <div><div class="eyebrow">04 / Workflow A</div><h2>Upload to Airtable</h2></div>
+          <p class="section-intro">Scheduled snapshot starts after 30-minute upload cutoff. First run starts at configured date. Later runs process unseen Apple IDs and verify content hashes.</p>
+        </div>
+        <div class="flow" aria-label="Import workflow">
+          <div class="flow-node"><strong>Snapshot</strong><small>Cron or <code>/upload</code></small></div>
+          <div class="flow-node"><strong>Stream</strong><small>Unseen images into R2</small></div>
+          <div class="flow-node"><strong>Group</strong><small>Marker to next marker</small></div>
+          <div class="flow-node"><strong>Allocate</strong><small>Atomic <code>A-NUMBER</code></small></div>
+          <div class="flow-node"><strong>Verify</strong><small>Airtable row + references</small></div>
+        </div>
+        <div class="state-line" aria-label="Product group states">
+          <span class="state">pending</span><span class="arrow">→</span><span class="state">importing</span><span class="arrow">→</span><span class="state done">succeeded</span><span class="arrow">or</span><span class="state failed">failed</span>
+        </div>
+        <div class="card-grid">
+          <article class="card"><h3>Product ID allocation</h3><p>Setup bootstraps D1 once from highest valid Airtable ID while imports are disabled. D1 then becomes sole authority; health checks block imports if Airtable advances outside system. Failed or deleted IDs are never reused.</p></article>
+          <article class="card"><h3>Retry behavior</h3><p>Five exponential-backoff attempts. <code>/upload</code> skips succeeded groups, retries failed groups with fresh cycle, and processes new groups.</p></article>
+          <article class="card"><h3>Failure compensation</h3><p>Delete partial Airtable row. Keep R2 originals. Preserve burned ID. Report group position, source range, attempted ID, reason, and link.</p></article>
+          <article class="card"><h3>Checkpoint</h3><p>Advance when all groups reach terminal state. Failed records remain explicit and retryable rather than becoming unseen work.</p></article>
+        </div>
+      </section>
+
+      <section class="section" id="airtable">
+        <div class="section-head">
+          <div><div class="eyebrow">05 / Human workspace</div><h2>Airtable model</h2></div>
+          <p class="section-intro">Two tables keep product data separate from publication state. Field ownership prevents automation from overwriting staff edits.</p>
+        </div>
+        <div class="split">
+          <article class="list-card system"><h3>Products · system-owned</h3><ul class="field-list"><li>Product ID</li><li>System Group ID</li><li>Upload Date</li><li>Product Images</li><li>Inventory Status</li><li>4-in-1 Image</li><li>Publication Run</li><li>Sold Price</li><li>Sold At</li><li>Sold By</li><li>Last System Update</li></ul></article>
+          <article class="list-card human"><h3>Products · human-owned</h3><ul class="field-list"><li>Brand Name</li><li>Model Name</li><li>Condition Type</li><li>Size</li><li>Description</li><li>LINE Square Price</li><li>IG Price</li><li>Image order</li></ul></article>
+        </div>
+        <div class="split">
+          <article class="list-card"><h3>Computed completeness</h3><ul class="field-list"><li>Data Complete</li><li>Missing Fields</li></ul><p>Staff sees exact gaps before marking publication run ready.</p></article>
+          <article class="list-card"><h3>Publication Runs</h3><ul class="field-list"><li>Publication Date</li><li>Status</li><li>Products</li><li>Google Doc URL</li><li>Generated At</li><li>Error Summary</li></ul></article>
+        </div>
+      </section>
+
+      <section class="section" id="publication">
+        <div class="section-head">
+          <div><div class="eyebrow">06 / Workflow B</div><h2>Publication package</h2></div>
+          <p class="section-intro">Ready run is validated before side effects. Any missing field blocks whole document and returns exact corrections to LINE.</p>
+        </div>
+        <div class="flow" aria-label="Publication workflow">
+          <div class="flow-node"><strong>Validate</strong><small>Every linked Product</small></div>
+          <div class="flow-node"><strong>Compose</strong><small>First four images</small></div>
+          <div class="flow-node"><strong>Caption</strong><small>Three Thai drafts</small></div>
+          <div class="flow-node"><strong>Copy</strong><small>Master Docs template</small></div>
+          <div class="flow-node"><strong>Verify</strong><small>Every Product ID present</small></div>
+        </div>
+        <div class="card-grid">
+          <article class="card"><h3>4-in-1 image</h3><p>1080×1080, 2×2, <code>contain</code> fit, white padding, first four Airtable-ordered images. Deterministic output stored in R2.</p></article>
+          <article class="card"><h3>Claude caption call</h3><p>Claude Opus 5 receives verified Airtable text only. No image input. Exactly three editable Thai drafts keyed by Product ID. Expected 22–24 products fit one structured request.</p></article>
+          <article class="card"><h3>Master template</h3><p>Customer controls branding, title, formatting, instructions, and suffix. Workflow copies template once at start; retries reuse that copy, while later edits affect future runs only.</p></article>
+          <article class="card"><h3>One final document</h3><p>Temporary document is verified first. D1 stores one final Google Doc ID per Publication Run. Retry reuses valid sub-results.</p></article>
+        </div>
+        <div class="risk-panel">
+          <div><span class="status block">Whole-run block</span><h3>Incomplete data</h3></div>
+          <div><p>No Google Doc is created. LINE reports every Product ID and missing field, includes Airtable link, and instructs staff to fix data, set run to <code>Ready</code>, then run <code>/docs</code>.</p></div>
+        </div>
+      </section>
+
+      <section class="section" id="line">
+        <div class="section-head">
+          <div><div class="eyebrow">07 / Operator surface</div><h2>LINE commands</h2></div>
+          <p class="section-intro">One allowlisted admin group. Every member may run commands. Worker validates signatures. D1 deduplicates webhook events and one-time callbacks.</p>
+        </div>
+        <div class="command-list">
+          <details open><summary><code>/soldout</code> — one product, required price</summary><div class="detail-body">
+            <p>Parser accepts one Product ID and one whole-baht price. Unknown, malformed, multiple, missing, or ambiguous values never reach confirmation.</p>
+            <div class="grammar">
+              <div class="grammar-box accept"><strong>Accepted</strong><pre>A-1234
+รหัส 1234
+รหัสสินค้า 1234
+
+thb 1290
+THB 1,290
+ราคา 1290
+ราคา 1,290 บาท</pre></div>
+              <div class="grammar-box reject"><strong>Rejected</strong><pre>A1234
+A 1234
+multiple Product IDs
+missing price
+ambiguous price
+decimal price</pre></div>
+            </div>
+            <p>Approve writes <code>Inventory Status = Out</code>, <code>Sold Price</code>, <code>Sold At</code>, and <code>Sold By</code>. Existing listing prices remain unchanged.</p>
+          </div></details>
+          <details><summary><code>/revert</code> — safe latest-action rollback</summary><div class="detail-body"><p>Targets latest reversible command in same group. Requires second confirmation. Runs only when current Airtable values still equal recorded after-state, preventing overwrite of newer edits.</p></div></details>
+          <details><summary><code>/search A-XXXX</code> — inventory lookup</summary><div class="detail-body"><p>Returns Product ID, inventory state, upload date, and Airtable row link. Unknown ID receives Thai not-found response.</p></div></details>
+          <details><summary><code>/upload</code> and <code>/docs</code> — manual workflow triggers</summary><div class="detail-body"><p>Start or resume durable jobs. Import skips successful groups. Publication reuses valid sub-results and never creates duplicate final document.</p></div></details>
+          <details><summary><code>/help</code> — operator reference</summary><div class="detail-body"><p>Returns commands and accepted examples in Thai.</p></div></details>
+        </div>
+        <div class="card-grid">
+          <article class="card"><h3>Why pending state exists</h3><p>Approve button is separate LINE event. D1 binds it to requester, group, Product ID, price, old values, expiry, and one-time token.</p></article>
+          <article class="card"><h3>Already sold</h3><p>Reject without overwrite. Show existing sold price, sold date, sold by, and Airtable link. Missing legacy sale data is labeled unknown for direct Airtable correction.</p></article>
+          <article class="card"><h3>Confirmation expiry</h3><p>Pending soldout and revert confirmations expire after 10 minutes. Duplicate or expired callback does nothing.</p></article>
+          <article class="card"><h3>Audit</h3><p>Immutable event records actor, action, correlation ID, before state, after state, and timestamp.</p></article>
+        </div>
+      </section>
+
+      <section class="section" id="operations">
+        <div class="section-head">
+          <div><div class="eyebrow">08 / Production controls</div><h2>Secure and observable</h2></div>
+          <p class="section-intro">Customer owns accounts and credentials. Secrets stay in Cloudflare. Logs carry enough context to act without exposing album tokens or image access URLs.</p>
+        </div>
+        <div class="split">
+          <article class="list-card"><h3>Security baseline</h3><ul class="checklist"><li>Validate LINE <code>x-line-signature</code></li><li>Restrict actions to allowlisted group</li><li>Keep R2 bucket private</li><li>Use short-lived Airtable attachment URLs</li><li>Limit Google service account to publication folder</li><li>Never log tokens, album link, signed URLs, or images</li></ul></article>
+          <article class="list-card"><h3>Initial monitoring</h3><ul class="checklist"><li>Cloudflare structured logs</li><li>D1 workflow and audit history</li><li>LINE success and actionable failure alerts</li><li>Usage alarms for R2, Images, Workflows, Claude</li><li>No Sentry until native telemetry proves insufficient</li></ul></article>
+        </div>
+        <div class="cost-band">
+          <div><div class="eyebrow">Expected monthly operating cost</div><h3>฿400–800</h3></div>
+          <p>Approximately $11–22 for Workers minimum, Claude captions, and growing R2 storage. Excludes Airtable, Google Workspace, and LINE plan. No AI vision input. Batch API becomes option only if caption spend approaches budget.</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Environment</th><th>Isolation</th><th>Required setup</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Staging</strong></td><td>Separate D1, R2 prefix, LINE group/channel, Airtable test tables, Drive folder</td><td>D1 migrations, bindings, test credentials, smoke data</td></tr>
+              <tr><td><strong>Production</strong></td><td>Customer-owned accounts and dedicated resources</td><td>Secrets, field IDs, group ID, template ID, cron, cutoff, initial Product ID bootstrap</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section" id="delivery">
+        <div class="section-head">
+          <div><div class="eyebrow">09 / Build sequence</div><h2>4–7 weeks</h2></div>
+          <p class="section-intro">Sequence retires largest risk first, then delivers upload-to-Airtable before publication and inventory commands.</p>
+        </div>
+        <div class="phase-grid">
+          <article class="phase"><span class="phase-time">2–4 days</span><h3>Phase 0 · iCloud spike</h3><p>Cloudflare connectivity, ordering, checkpoint, full-volume streaming, marker detection, deduplication, redaction.</p></article>
+          <article class="phase"><span class="phase-time">1–2 weeks</span><h3>Phase 1 · Import</h3><p>Cloudflare foundation, D1, R2, marker grouping, Product IDs, Airtable creation, LINE import logs.</p></article>
+          <article class="phase"><span class="phase-time">1–2 weeks</span><h3>Phase 2 · Publication</h3><p>Airtable completeness, collages, Claude captions, Google template, document verification, <code>/docs</code>.</p></article>
+          <article class="phase"><span class="phase-time">1 week</span><h3>Phase 3 · LINE inventory</h3><p>Webhook, help, search, one-product soldout, required price parser, confirmations, revert.</p></article>
+          <article class="phase"><span class="phase-time">1–2 weeks</span><h3>Phase 4 · Handoff</h3><p>Failure injection, ten-batch pilot, setup validator, runbook, fresh-account rehearsal, credential rotation.</p></article>
+          <article class="phase"><span class="phase-time">Acceptance</span><h3>Evidence required</h3><p>10 import batches, full-volume tests, one-document guarantee, 30 real LINE parser messages, clean customer-owned deployment.</p></article>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Test lane</th><th>Must prove</th></tr></thead>
+            <tbody>
+              <tr><td>iCloud</td><td>Stable polling, 100–500 downloads, marker detection, no duplicate assets, no secret leakage</td></tr>
+              <tr><td>Import</td><td>Correct groups, unique IDs, interrupted workflow resume, failed-group rollback, successful-row preservation</td></tr>
+              <tr><td>Publication</td><td>Whole-run validation, ordered collage, three Thai captions, template edits, one final document only</td></tr>
+              <tr><td>LINE</td><td>30 messages covering grammar, ambiguity, already-Out, Approve, Reject, expiry, duplicates, revert conflict</td></tr>
+              <tr><td>Handoff</td><td>Fresh environment deployment, smoke flows, credential rotation, reproducible setup checks</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <footer class="footer">
+      <span>Snazzy Automation · approved system design</span>
+      <span class="mono">TypeScript · Cloudflare · Asia/Bangkok</span>
+    </footer>
+  </main>
+</div>
