@@ -871,6 +871,15 @@ it("loads group member display name", async () => {
     new Response(JSON.stringify({ userId: "U1", displayName: "Mint", pictureUrl: "https://example.com/p.jpg" }), { status: 200 }) });
   expect(await client.getGroupMemberProfile("C1", "U1")).toEqual({ userId: "U1", displayName: "Mint" });
 });
+
+it("rejects a malformed group member profile", async () => {
+  const client = createLineClient({ channelAccessToken: "token", fetch: async () =>
+    new Response(JSON.stringify({ userId: "U1" }), { status: 200 }) });
+  await expect(client.getGroupMemberProfile("C1", "U1")).rejects.toMatchObject({
+    code: "line_invalid_profile_response",
+    retryable: false,
+  });
+});
 ```
 
 - [ ] **Step 2: Run test and verify failure**
@@ -882,8 +891,14 @@ Expected: FAIL because new methods do not exist.
 
 ```ts
 // src/line/client.ts
+import { z } from "zod";
 import type { Fetcher } from "../shared/http";
 import { OperationalError } from "../shared/errors";
+
+const LineProfileSchema = z.object({
+  userId: z.string().min(1),
+  displayName: z.string().min(1),
+});
 
 export interface LineButton { label: string; data: string; style?: "primary" | "secondary"; }
 export interface LineClient {
@@ -915,7 +930,16 @@ export function createLineClient(config: { channelAccessToken: string; fetch: Fe
     async getGroupMemberProfile(groupId, userId) {
       const response = await config.fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/member/${encodeURIComponent(userId)}`, { headers });
       if (!response.ok) throw new OperationalError("line_profile_failed", `LINE profile failed with status ${response.status}`, response.status === 429 || response.status >= 500);
-      const body = await response.json() as { userId: string; displayName: string };
+      let body: z.infer<typeof LineProfileSchema>;
+      try {
+        body = LineProfileSchema.parse(await response.json());
+      } catch {
+        throw new OperationalError(
+          "line_invalid_profile_response",
+          "LINE returned a malformed member profile",
+          false,
+        );
+      }
       return { userId: body.userId, displayName: body.displayName };
     },
   };
@@ -1316,7 +1340,7 @@ function deps(found: InventoryProduct | null = product) {
     resolvePending: vi.fn().mockResolvedValue(undefined),
     finalizeAction: vi.fn().mockResolvedValue({ id: "act1" }),
     latestReversible: vi.fn(),
-  } as unknown as LineRepository;
+  } satisfies LineRepository;
   return {
     inventory,
     repo,
@@ -1928,7 +1952,7 @@ function deps(found: InventoryProduct | null = product(sold)) {
     resolvePending: vi.fn().mockResolvedValue(undefined),
     finalizeAction: vi.fn().mockResolvedValue({ id: "revert1" }),
     latestReversible: vi.fn().mockResolvedValue(action),
-  } as unknown as LineRepository;
+  } satisfies LineRepository;
   return {
     inventory,
     repo,
@@ -2482,7 +2506,7 @@ function deps(): WebhookDeps {
     resolvePending: vi.fn(),
     finalizeAction: vi.fn(),
     latestReversible: vi.fn(),
-  } as unknown as LineRepository;
+  } satisfies LineRepository;
   const line = {
     pushMessage: vi.fn(),
     replyText: vi.fn().mockResolvedValue(undefined),
@@ -2498,7 +2522,7 @@ function deps(): WebhookDeps {
   } satisfies InventoryClient;
   const audit = {
     record: vi.fn().mockResolvedValue(undefined),
-  } as unknown as AuditLog;
+  } satisfies AuditLog;
   return {
     allowedGroupId: "C1",
     confirmationEnabled: true,
@@ -3147,7 +3171,7 @@ function deps(
     resolvePending: vi.fn().mockResolvedValue(undefined),
     finalizeAction: vi.fn().mockResolvedValue({ id: "action-new" }),
     latestReversible: vi.fn().mockResolvedValue(action()),
-  } as unknown as LineRepository;
+  } satisfies LineRepository;
   return {
     clock: {
       now: () =>

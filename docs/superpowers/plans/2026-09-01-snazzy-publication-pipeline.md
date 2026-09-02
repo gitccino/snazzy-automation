@@ -17,7 +17,7 @@
 - One final Google Doc per Airtable Publication Run.
 - Missing Product data blocks whole publication and creates no Google Doc.
 - Claude model defaults to `claude-opus-5`; text fields only; exactly three Thai drafts per Product ID.
-- Retry transient workflow steps five times with exponential backoff (`PUBLICATION_MAX_ATTEMPTS=5`).
+- Retry each transient Workflow stage up to five times after its initial call, with exponential backoff (`PUBLICATION_RETRY_LIMIT=5`; at most six calls per stage).
 - Never log credentials, public-album token/link, signed URLs, Product images, or raw external response bodies containing them.
 - Use native `fetch` routing; do not add a web framework.
 - Use official `@anthropic-ai/sdk`; do not call Claude through raw HTTP.
@@ -27,26 +27,24 @@
 - Every non-trivial parser, state transition, money mutation, and trust boundary starts with a failing test.
 - Every task ends with focused tests, the full test command, and a commit.
 - Anthropic client uses `maxRetries: 0`; Cloudflare Workflow `step.do()` owns durable retry count and backoff.
-- Idempotency keys: Workflow instance `publication:<airtablePublicationRunId>`; publication final output unique key is the Airtable Publication Run ID.
+- Idempotency keys: Workflow instance `publication-<airtablePublicationRunId>`; Cloudflare custom Workflow IDs do not allow colons. Publication final output unique key is the Airtable Publication Run ID.
 
 ## Assumptions Carried From the Completed Import Plan
 
 The import plan (`docs/superpowers/plans/2026-09-01-snazzy-import-pipeline.md`) is assumed complete and has already created the following, which this plan extends or imports without modification unless a task says otherwise:
 
-- `src/env.ts` exporting `Env` exactly as defined in the implementation index, already including `PUBLICATION_WORKFLOW: Workflow<PublicationWorkflowParams>`.
-- `src/config.ts` exporting `parseConfig(json: string): AppConfig` and an `AppConfig` interface covering every non-secret key in spec section 15, including `googleDriveFolderId`, `googleTemplateDocId`, `claudeModel`, `claudeRequestInputTokenLimit`, `publicationCron`, `publicationMaxAttempts`, `timeZone`.
+- `src/env.ts` exporting the import-stage `Env`; Task 2 extends it with publication-only Workflow and secret bindings after `PublicationWorkflowParams` exists.
+- `src/config.ts` exporting the import-stage `parseConfig(raw: unknown): AppConfig`; Task 2 adds publication-only Google, Claude, and cron fields while retaining import fields.
 - `src/shared/errors.ts` exporting `OperationalError` (has `code: string`, `message: string`, `retryable: boolean`) and a `RetryableError`/`NonRetryableError` pair built on it.
-- `src/shared/http.ts` exporting `jsonResponse(body, init?)` and `fetchJson<T>(fetcher: Fetcher, input, init) => Promise<T>`.
-- `src/shared/ids.ts` exporting `newCorrelationId(): string` and `sha256Hex(input: string): Promise<string>`.
-- `src/shared/time.ts` exporting `nowInBangkok(clock: Clock): Date` and `formatThaiDate(date: Date): string`.
-- `src/shared/logger.ts` exporting `createLogger(correlationId: string)` with `.info()`/`.warn()`/`.error()` methods that redact configured secret values.
-- `src/db/audit.ts` exporting `recordAuditEvent(db: D1Database, event: { actor: string; action: string; before: unknown; after: unknown; correlationId: string }): Promise<void>`.
-- `src/line/client.ts` exporting `pushTextMessage(env: Env, groupId: string, text: string): Promise<void>` (reply/push REST client built for import logs).
+- `src/shared/http.ts` exporting `Fetcher`, `SafeFetchOptions`, and `safeFetch(fetcher, input, options): Promise<Response>`.
+- `src/shared/ids.ts` exporting `newCorrelationId(): string` and `sha256Hex(data: ArrayBuffer | Uint8Array): Promise<string>`.
+- `src/shared/time.ts` exporting `nowBangkokIso(clock: Clock): string`, `bangkokDateTimeThai(clock: Clock): string`, and `todayBangkokDate(clock: Clock): string`; date-only trigger lookup uses `todayBangkokDate` and never slices a UTC ISO timestamp.
+- `src/shared/logger.ts` exporting `createLogger(base: LogFields)` with `.info()`/`.warn()`/`.error()` methods and secret-key redaction.
+- `src/db/audit.ts` exporting `createAuditLog(db, ids, clock): AuditLog`; `AuditLog.record(entry)` accepts `beforeValue`/`afterValue`, actor, action, entity, and correlation fields.
+- `src/line/client.ts` exporting `createLineClient({ channelAccessToken, fetch }): LineClient`; `LineClient.pushMessage(toGroupId, text)` sends Thai import/publication notifications.
 - `src/line/messages.ts` exporting Thai message builders used for import logs; this plan adds publication-specific builders to the same file.
 - `src/import/airtable-products.ts` exporting an Airtable REST helper pattern (auth header, base/table path construction, retry-free single-call semantics) that `publication/airtable-runs.ts` mirrors for consistency.
-- Migration `migrations/0001_initial.sql` already applied, containing `sequences`, `import_runs`, `photo_assets`, `product_groups`, `line_commands`, `audit_events`.
-
-If any assumed export has a different name or signature in the real codebase, the implementer adjusts only the import path/signature at the call site — the behavior contracts in this plan (parameter and return types defined by prior tasks in *this* plan) do not change.
+- Migration `migrations/0001_initial.sql` already applied, containing `sequences`, `import_runs`, `import_checkpoints`, `photo_assets`, `product_groups`, and `audit_events`; LINE command state arrives later in `migrations/0003_line_inventory.sql`.
 
 ---
 
@@ -133,7 +131,7 @@ If any assumed export has a different name or signature in the real codebase, th
     captionsJson: string,
   ): Promise<void>;
   ```
-  used by `publication/service.ts` and `publication/workflow.ts` (Tasks 7 and 9).
+  used by `publication/service.ts` and `publication/workflow.ts` (Tasks 9 and 10).
 
 - [ ] **Step 1: Write the failing schema/repository test**
 
@@ -252,7 +250,7 @@ CREATE INDEX idx_publication_product_cache_run ON publication_product_cache (pub
 
 - [ ] **Step 4: Apply the migration locally**
 
-Run: `npx wrangler d1 migrations apply snazzy-automation --local`
+Run: `npm run db:migrate:local`
 Expected: `0002_publication.sql` applied with no errors.
 
 - [ ] **Step 5: Write the repository implementation**
@@ -453,7 +451,7 @@ export async function putProductCaptions(
 - [ ] **Step 6: Run test to verify it passes**
 
 Run: `npx vitest run test/db/publication-repository.test.ts`
-Expected: PASS — 5 tests green.
+Expected: PASS — 6 tests green.
 
 - [ ] **Step 7: Full check and commit**
 
@@ -470,6 +468,8 @@ git commit -m "feat(publication): add D1 job lock and per-product output cache"
 ## Task 2: Airtable Publication Runs client
 
 **Files:**
+- Modify: `src/config.ts`
+- Modify: `src/env.ts`
 - Create: `src/publication/types.ts`
 - Create: `src/publication/airtable-runs.ts`
 - Test: `test/publication/airtable-runs.test.ts`
@@ -481,7 +481,7 @@ git commit -m "feat(publication): add D1 job lock and per-product output cache"
   // src/publication/types.ts
   export interface PublicationWorkflowParams {
     publicationRunId: string;
-    trigger: "cron" | "line";
+    trigger: "cron" | "line" | "admin";
   }
 
   export interface PublicationProduct {
@@ -520,25 +520,32 @@ git commit -m "feat(publication): add D1 job lock and per-product output cache"
   ```
   ```ts
   // src/publication/airtable-runs.ts
-  export async function findReadyRunForDate(
+  export type AirtablePublicationConfig = Pick<
+    AppConfig,
+    | "airtableBaseId"
+    | "airtableProductsTableId"
+    | "airtablePublicationRunsTableId"
+  >;
+
+  export async function findRunnableRunForDate(
     fetcher: Fetcher,
-    config: AppConfig,
+    config: AirtablePublicationConfig,
     token: string,
     isoDate: string,
   ): Promise<PublicationRun | null>;
 
   export async function loadRunById(
     fetcher: Fetcher,
-    config: AppConfig,
+    config: AirtablePublicationConfig,
     token: string,
     airtableRunId: string,
   ): Promise<PublicationRun>;
 
-  export async function markRunGenerating(fetcher: Fetcher, config: AppConfig, token: string, airtableRunId: string): Promise<void>;
+  export async function markRunGenerating(fetcher: Fetcher, config: AirtablePublicationConfig, token: string, airtableRunId: string): Promise<void>;
 
   export async function markRunGenerated(
     fetcher: Fetcher,
-    config: AppConfig,
+    config: AirtablePublicationConfig,
     token: string,
     airtableRunId: string,
     googleDocUrl: string,
@@ -547,7 +554,7 @@ git commit -m "feat(publication): add D1 job lock and per-product output cache"
 
   export async function markRunNeedsCorrection(
     fetcher: Fetcher,
-    config: AppConfig,
+    config: AirtablePublicationConfig,
     token: string,
     airtableRunId: string,
     errorSummary: string,
@@ -555,7 +562,7 @@ git commit -m "feat(publication): add D1 job lock and per-product output cache"
 
   export async function markRunFailed(
     fetcher: Fetcher,
-    config: AppConfig,
+    config: AirtablePublicationConfig,
     token: string,
     airtableRunId: string,
     errorSummary: string,
@@ -563,13 +570,15 @@ git commit -m "feat(publication): add D1 job lock and per-product output cache"
 
   export async function updateProductCollage(
     fetcher: Fetcher,
-    config: AppConfig,
+    config: AirtablePublicationConfig,
     token: string,
     airtableRecordId: string,
     signedCollageUrl: string,
   ): Promise<void>;
   ```
-  used by `publication/service.ts` (Task 7).
+  used by `publication/service.ts` (Task 9).
+
+`Product Images` attachment URLs are temporary Airtable delivery URLs and must never be used as R2 keys. Import Task 9 writes each attachment filename as the private object basename; this client preserves staff order and reconstructs each key as `assets/<filename>`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -577,33 +586,35 @@ git commit -m "feat(publication): add D1 job lock and per-product output cache"
 // test/publication/airtable-runs.test.ts
 import { describe, expect, it, vi } from "vitest";
 import {
-  findReadyRunForDate,
+  findRunnableRunForDate,
   markRunGenerating,
   markRunGenerated,
   markRunNeedsCorrection,
   updateProductCollage,
+  type AirtablePublicationConfig,
 } from "../../src/publication/airtable-runs";
+import type { Fetcher } from "../../src/shared/http";
 
 const config = {
   airtableBaseId: "base123",
   airtableProductsTableId: "tblProducts",
   airtablePublicationRunsTableId: "tblRuns",
-} as any;
+} satisfies AirtablePublicationConfig;
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-describe("findReadyRunForDate", () => {
-  it("returns null when no Ready run matches the date", async () => {
-    const fetcher = vi.fn().mockResolvedValue(jsonResponse({ records: [] }));
-    const result = await findReadyRunForDate(fetcher as any, config, "token", "2026-09-01");
+describe("findRunnableRunForDate", () => {
+  it("returns null when no Ready or Failed run matches the date", async () => {
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(jsonResponse({ records: [] }));
+    const result = await findRunnableRunForDate(fetcher, config, "token", "2026-09-01");
     expect(result).toBeNull();
   });
 
-  it("fetches linked products and maps fields into PublicationProduct", async () => {
+  it("fetches a Ready run, while the same query also permits retrying a Failed run", async () => {
     const fetcher = vi
-      .fn()
+      .fn<Fetcher>()
       .mockResolvedValueOnce(
         jsonResponse({
           records: [
@@ -625,7 +636,7 @@ describe("findReadyRunForDate", () => {
               id: "recProd1",
               fields: {
                 "Product ID": "A-1001",
-                "Product Images": [{ id: "attImg1", url: "https://dl.airtable.com/img1.jpg" }],
+                "Product Images": [{ id: "attImg1", url: "https://dl.airtable.com/img1.jpg", filename: "a.jpg" }],
                 "Brand Name": "Nike",
                 "Model Name": "Air Max",
                 "Condition Type": "Used",
@@ -639,45 +650,77 @@ describe("findReadyRunForDate", () => {
         }),
       );
 
-    const result = await findReadyRunForDate(fetcher as any, config, "token", "2026-09-01");
+    const result = await findRunnableRunForDate(fetcher, config, "token", "2026-09-01");
     expect(result).not.toBeNull();
     expect(result?.products).toHaveLength(1);
     expect(result?.products[0]).toMatchObject({
       airtableRecordId: "recProd1",
       productId: "A-1001",
+      orderedImageKeys: ["assets/a.jpg"],
       brandName: "Nike",
       lineSquarePrice: 1290,
       igPrice: 1390,
     });
-    const firstCallUrl = String(fetcher.mock.calls[0][0]);
+    const firstCallUrl = String(fetcher.mock.calls[0]![0]);
     expect(firstCallUrl).toContain("tblRuns");
     expect(firstCallUrl).toContain(encodeURIComponent("2026-09-01"));
+  });
+
+  it("rejects a malformed Airtable attachment before it becomes an R2 key", async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        records: [{
+          id: "recRun1",
+          fields: {
+            "Publication Date": "2026-09-01",
+            Status: "Ready",
+            Products: ["recProd1"],
+          },
+        }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        records: [{
+          id: "recProd1",
+          fields: {
+            "Product ID": "A-1001",
+            "Product Images": [{
+              id: "att1",
+              url: "https://dl.airtable.com/image.jpg",
+              filename: "../outside.jpg",
+            }],
+          },
+        }],
+      }));
+
+    await expect(
+      findRunnableRunForDate(fetcher, config, "token", "2026-09-01"),
+    ).rejects.toThrow(/invalid attachment filename/i);
   });
 });
 
 describe("status writes", () => {
   it("markRunGenerating PATCHes Status to Generating", async () => {
-    const fetcher = vi.fn().mockResolvedValue(jsonResponse({ id: "recRun1" }));
-    await markRunGenerating(fetcher as any, config, "token", "recRun1");
-    const [url, init] = fetcher.mock.calls[0];
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(jsonResponse({ id: "recRun1" }));
+    await markRunGenerating(fetcher, config, "token", "recRun1");
+    const [url, init] = fetcher.mock.calls[0]!;
     expect(String(url)).toContain("recRun1");
-    expect(init.method).toBe("PATCH");
-    expect(JSON.parse(init.body).fields.Status).toBe("Generating");
+    expect(init?.method).toBe("PATCH");
+    expect(JSON.parse(String(init?.body)).fields.Status).toBe("Generating");
   });
 
   it("markRunGenerated writes doc URL, timestamp, and Generated status", async () => {
-    const fetcher = vi.fn().mockResolvedValue(jsonResponse({ id: "recRun1" }));
-    await markRunGenerated(fetcher as any, config, "token", "recRun1", "https://docs.google.com/x", "2026-09-01T06:00:00.000Z");
-    const body = JSON.parse(fetcher.mock.calls[0][1].body);
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(jsonResponse({ id: "recRun1" }));
+    await markRunGenerated(fetcher, config, "token", "recRun1", "https://docs.google.com/x", "2026-09-01T06:00:00.000Z");
+    const body = JSON.parse(String(fetcher.mock.calls[0]![1]?.body));
     expect(body.fields.Status).toBe("Generated");
     expect(body.fields["Google Doc URL"]).toBe("https://docs.google.com/x");
     expect(body.fields["Generated At"]).toBe("2026-09-01T06:00:00.000Z");
   });
 
   it("markRunNeedsCorrection returns Status to Draft with Error Summary", async () => {
-    const fetcher = vi.fn().mockResolvedValue(jsonResponse({ id: "recRun1" }));
-    await markRunNeedsCorrection(fetcher as any, config, "token", "recRun1", "A-1001: missing Description");
-    const body = JSON.parse(fetcher.mock.calls[0][1].body);
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(jsonResponse({ id: "recRun1" }));
+    await markRunNeedsCorrection(fetcher, config, "token", "recRun1", "A-1001: missing Description");
+    const body = JSON.parse(String(fetcher.mock.calls[0]![1]?.body));
     expect(body.fields.Status).toBe("Draft");
     expect(body.fields["Error Summary"]).toBe("A-1001: missing Description");
   });
@@ -685,9 +728,9 @@ describe("status writes", () => {
 
 describe("updateProductCollage", () => {
   it("PATCHes the 4-in-1 Image attachment field with the signed URL", async () => {
-    const fetcher = vi.fn().mockResolvedValue(jsonResponse({ id: "recProd1" }));
-    await updateProductCollage(fetcher as any, config, "token", "recProd1", "https://r2.example.com/signed");
-    const body = JSON.parse(fetcher.mock.calls[0][1].body);
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(jsonResponse({ id: "recProd1" }));
+    await updateProductCollage(fetcher, config, "token", "recProd1", "https://r2.example.com/signed");
+    const body = JSON.parse(String(fetcher.mock.calls[0]![1]?.body));
     expect(body.fields["4-in-1 Image"]).toEqual([{ url: "https://r2.example.com/signed" }]);
   });
 });
@@ -698,19 +741,113 @@ describe("updateProductCollage", () => {
 Run: `npx vitest run test/publication/airtable-runs.test.ts`
 Expected: FAIL — `Cannot find module '../../src/publication/airtable-runs'`.
 
-- [ ] **Step 3: Write `src/publication/types.ts`**
+- [ ] **Step 3: Extend publication configuration**
+
+Add these fields to the existing `RawAppConfigSchema`:
+
+```ts
+PUBLICATION_CRON: z.string().min(1),
+PUBLICATION_RETRY_LIMIT: z.literal(5),
+AIRTABLE_PUBLICATION_RUNS_TABLE_ID: z.string().min(1),
+GOOGLE_DRIVE_FOLDER_ID: z.string().min(1),
+GOOGLE_TEMPLATE_DOC_ID: z.string().min(1),
+CLAUDE_MODEL: z.literal("claude-opus-5"),
+CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: z.number().int().positive().max(150_000),
+```
+
+Add matching camel-case members to `AppConfig`:
+
+```ts
+publicationCron: string;
+publicationRetryLimit: 5;
+airtablePublicationRunsTableId: string;
+googleDriveFolderId: string;
+googleTemplateDocId: string;
+claudeModel: "claude-opus-5";
+claudeRequestInputTokenLimit: number;
+```
+
+Add exact mappings to the object returned by `parseConfig`:
+
+```ts
+publicationCron: parsed.PUBLICATION_CRON,
+publicationRetryLimit: parsed.PUBLICATION_RETRY_LIMIT,
+airtablePublicationRunsTableId: parsed.AIRTABLE_PUBLICATION_RUNS_TABLE_ID,
+googleDriveFolderId: parsed.GOOGLE_DRIVE_FOLDER_ID,
+googleTemplateDocId: parsed.GOOGLE_TEMPLATE_DOC_ID,
+claudeModel: parsed.CLAUDE_MODEL,
+claudeRequestInputTokenLimit: parsed.CLAUDE_REQUEST_INPUT_TOKEN_LIMIT,
+```
+
+Append these tests to `test/config.test.ts`, reusing that file's existing complete `validRawConfig` fixture:
+
+```ts
+it("maps every publication config key", () => {
+  const config = parseConfig({
+    ...validRawConfig,
+    PUBLICATION_CRON: "30 23 * * *",
+    PUBLICATION_RETRY_LIMIT: 5,
+    AIRTABLE_PUBLICATION_RUNS_TABLE_ID: "tblRuns",
+    GOOGLE_DRIVE_FOLDER_ID: "folder-1",
+    GOOGLE_TEMPLATE_DOC_ID: "template-1",
+    CLAUDE_MODEL: "claude-opus-5",
+    CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150_000,
+  });
+  expect(config).toMatchObject({
+    publicationCron: "30 23 * * *",
+    publicationRetryLimit: 5,
+    airtablePublicationRunsTableId: "tblRuns",
+    googleDriveFolderId: "folder-1",
+    googleTemplateDocId: "template-1",
+    claudeModel: "claude-opus-5",
+    claudeRequestInputTokenLimit: 150_000,
+  });
+});
+
+it.each([
+  ["retry limit", { PUBLICATION_RETRY_LIMIT: 4 }],
+  ["model", { CLAUDE_MODEL: "claude-sonnet-5" }],
+  ["token limit", { CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150_001 }],
+])("rejects invalid publication %s", (_name, patch) => {
+  expect(() => parseConfig({
+    ...validRawConfig,
+    PUBLICATION_CRON: "30 23 * * *",
+    PUBLICATION_RETRY_LIMIT: 5,
+    AIRTABLE_PUBLICATION_RUNS_TABLE_ID: "tblRuns",
+    GOOGLE_DRIVE_FOLDER_ID: "folder-1",
+    GOOGLE_TEMPLATE_DOC_ID: "template-1",
+    CLAUDE_MODEL: "claude-opus-5",
+    CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150_000,
+    ...patch,
+  })).toThrow();
+});
+```
+
+- [ ] **Step 4: Write `src/publication/types.ts`**
 
 Use the interfaces shown in the Interfaces block above verbatim.
 
-- [ ] **Step 4: Write `src/publication/airtable-runs.ts`**
+- [ ] **Step 5: Write `src/publication/airtable-runs.ts`**
 
 ```ts
 // src/publication/airtable-runs.ts
+import { z } from "zod";
 import type { AppConfig } from "../config";
 import type { Fetcher } from "../shared/http";
-import type { PublicationProduct, PublicationRun, PublicationRunStatus } from "./types";
+import type { PublicationProduct, PublicationRun } from "./types";
 
-function airtableUrl(config: AppConfig, tableId: string, path = ""): string {
+export type AirtablePublicationConfig = Pick<
+  AppConfig,
+  | "airtableBaseId"
+  | "airtableProductsTableId"
+  | "airtablePublicationRunsTableId"
+>;
+
+function airtableUrl(
+  config: AirtablePublicationConfig,
+  tableId: string,
+  path = "",
+): string {
   return `https://api.airtable.com/v0/${config.airtableBaseId}/${tableId}${path}`;
 }
 
@@ -718,27 +855,44 @@ function authHeaders(token: string): HeadersInit {
   return { Authorization: `Bearer ${token}`, "content-type": "application/json" };
 }
 
-interface AirtableRunFields {
-  "Publication Date": string;
-  Status: PublicationRunStatus;
-  Products?: string[];
-}
+const AirtableRunRecordSchema = z.object({
+  id: z.string().min(1),
+  fields: z.object({
+    "Publication Date": z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    Status: z.enum(["Draft", "Ready", "Generating", "Generated", "Failed"]),
+    Products: z.array(z.string().min(1)).optional(),
+  }),
+});
 
-interface AirtableProductFields {
-  "Product ID": string;
-  "Product Images"?: Array<{ id: string; url: string }>;
-  "Brand Name"?: string;
-  "Model Name"?: string;
-  "Condition Type"?: string;
-  Size?: string;
-  Description?: string;
-  "LINE Square Price"?: number;
-  "IG Price"?: number;
+const AirtableProductRecordSchema = z.object({
+  id: z.string().min(1),
+  fields: z.object({
+    "Product ID": z.string().regex(/^A-\d+$/),
+    "Product Images": z.array(z.object({
+      id: z.string().min(1),
+      url: z.string().url(),
+      filename: z.string().min(1),
+    })).optional(),
+    "Brand Name": z.string().optional(),
+    "Model Name": z.string().optional(),
+    "Condition Type": z.string().optional(),
+    Size: z.string().optional(),
+    Description: z.string().optional(),
+    "LINE Square Price": z.number().optional(),
+    "IG Price": z.number().optional(),
+  }),
+});
+
+function attachmentR2Key(filename: string): string {
+  if (!/^[A-Za-z0-9._-]+$/.test(filename)) {
+    throw new Error("Airtable Product Images contains an invalid attachment filename");
+  }
+  return `assets/${filename}`;
 }
 
 async function fetchLinkedProducts(
   fetcher: Fetcher,
-  config: AppConfig,
+  config: AirtablePublicationConfig,
   token: string,
   recordIds: string[],
 ): Promise<PublicationProduct[]> {
@@ -749,11 +903,15 @@ async function fetchLinkedProducts(
   if (!response.ok) {
     throw new Error(`airtable products fetch failed with status ${response.status}`);
   }
-  const body = (await response.json()) as { records: Array<{ id: string; fields: AirtableProductFields }> };
+  const body = z.object({
+    records: z.array(AirtableProductRecordSchema),
+  }).parse(await response.json());
   return body.records.map((record) => ({
     airtableRecordId: record.id,
     productId: record.fields["Product ID"],
-    orderedImageKeys: (record.fields["Product Images"] ?? []).map((image) => image.url),
+    orderedImageKeys: (record.fields["Product Images"] ?? []).map((image) =>
+      attachmentR2Key(image.filename),
+    ),
     brandName: record.fields["Brand Name"] ?? "",
     modelName: record.fields["Model Name"] ?? "",
     conditionType: record.fields["Condition Type"] ?? "",
@@ -764,19 +922,21 @@ async function fetchLinkedProducts(
   }));
 }
 
-export async function findReadyRunForDate(
+export async function findRunnableRunForDate(
   fetcher: Fetcher,
-  config: AppConfig,
+  config: AirtablePublicationConfig,
   token: string,
   isoDate: string,
 ): Promise<PublicationRun | null> {
-  const formula = `AND({Publication Date}='${isoDate}',{Status}='Ready')`;
+  const formula = `AND({Publication Date}='${isoDate}',OR({Status}='Ready',{Status}='Failed'))`;
   const url = `${airtableUrl(config, config.airtablePublicationRunsTableId)}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=1`;
   const response = await fetcher(url, { headers: authHeaders(token) });
   if (!response.ok) {
     throw new Error(`airtable runs fetch failed with status ${response.status}`);
   }
-  const body = (await response.json()) as { records: Array<{ id: string; fields: AirtableRunFields }> };
+  const body = z.object({
+    records: z.array(AirtableRunRecordSchema),
+  }).parse(await response.json());
   const record = body.records[0];
   if (!record) return null;
 
@@ -791,7 +951,7 @@ export async function findReadyRunForDate(
 
 export async function loadRunById(
   fetcher: Fetcher,
-  config: AppConfig,
+  config: AirtablePublicationConfig,
   token: string,
   airtableRunId: string,
 ): Promise<PublicationRun> {
@@ -800,7 +960,7 @@ export async function loadRunById(
   if (!response.ok) {
     throw new Error(`airtable run fetch failed with status ${response.status}`);
   }
-  const body = (await response.json()) as { id: string; fields: AirtableRunFields };
+  const body = AirtableRunRecordSchema.parse(await response.json());
   const products = await fetchLinkedProducts(fetcher, config, token, body.fields.Products ?? []);
   return {
     airtableRunId: body.id,
@@ -812,7 +972,7 @@ export async function loadRunById(
 
 async function patchRun(
   fetcher: Fetcher,
-  config: AppConfig,
+  config: AirtablePublicationConfig,
   token: string,
   airtableRunId: string,
   fields: Record<string, unknown>,
@@ -828,13 +988,13 @@ async function patchRun(
   }
 }
 
-export async function markRunGenerating(fetcher: Fetcher, config: AppConfig, token: string, airtableRunId: string): Promise<void> {
+export async function markRunGenerating(fetcher: Fetcher, config: AirtablePublicationConfig, token: string, airtableRunId: string): Promise<void> {
   await patchRun(fetcher, config, token, airtableRunId, { Status: "Generating" });
 }
 
 export async function markRunGenerated(
   fetcher: Fetcher,
-  config: AppConfig,
+  config: AirtablePublicationConfig,
   token: string,
   airtableRunId: string,
   googleDocUrl: string,
@@ -849,7 +1009,7 @@ export async function markRunGenerated(
 
 export async function markRunNeedsCorrection(
   fetcher: Fetcher,
-  config: AppConfig,
+  config: AirtablePublicationConfig,
   token: string,
   airtableRunId: string,
   errorSummary: string,
@@ -859,7 +1019,7 @@ export async function markRunNeedsCorrection(
 
 export async function markRunFailed(
   fetcher: Fetcher,
-  config: AppConfig,
+  config: AirtablePublicationConfig,
   token: string,
   airtableRunId: string,
   errorSummary: string,
@@ -869,7 +1029,7 @@ export async function markRunFailed(
 
 export async function updateProductCollage(
   fetcher: Fetcher,
-  config: AppConfig,
+  config: AirtablePublicationConfig,
   token: string,
   airtableRecordId: string,
   signedCollageUrl: string,
@@ -886,17 +1046,33 @@ export async function updateProductCollage(
 }
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [ ] **Step 6: Extend `Env` with publication bindings**
+
+Add the type import and three publication-only members without renaming existing import bindings:
+
+```ts
+// add beside the existing Workflow import
+import type { PublicationWorkflowParams } from "./publication/types";
+
+// insert inside the existing Env interface
+PUBLICATION_WORKFLOW: Workflow<PublicationWorkflowParams>;
+GOOGLE_SERVICE_ACCOUNT_JSON: string;
+ANTHROPIC_API_KEY: string;
+```
+
+`Workflow` remains the existing `cloudflare:workers` type import. `LINE_CHANNEL_SECRET` is added later by the LINE plan, where webhook verification first needs it.
+
+- [ ] **Step 7: Run test to verify it passes**
 
 Run: `npx vitest run test/publication/airtable-runs.test.ts`
-Expected: PASS — 6 tests green.
+Expected: PASS — 7 tests green.
 
-- [ ] **Step 6: Full check and commit**
+- [ ] **Step 8: Full check and commit**
 
 Run: `npm run check`
 
 ```bash
-git add src/publication/types.ts src/publication/airtable-runs.ts test/publication/airtable-runs.test.ts
+git add src/config.ts src/env.ts src/publication/types.ts src/publication/airtable-runs.ts test/config.test.ts test/publication/airtable-runs.test.ts
 git commit -m "feat(publication): add Airtable Publication Runs client"
 ```
 
@@ -926,7 +1102,7 @@ git commit -m "feat(publication): add Airtable Publication Runs client"
 
   export function formatValidationErrorSummary(result: ValidationResult): string;
   ```
-  used by `publication/service.ts` (Task 7) and LINE message builders (Task 8).
+  used by `publication/service.ts` (Task 9) and LINE message builders (Task 8).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1106,6 +1282,7 @@ git commit -m "feat(publication): add whole-run completeness validator"
 
 **Files:**
 - Create: `src/publication/collage.ts`
+- Create: `docs/runbooks/collage-base-1080.jpg`
 - Test: `test/publication/collage.test.ts`
 
 **Interfaces:**
@@ -1135,7 +1312,7 @@ git commit -m "feat(publication): add whole-run completeness validator"
 
   export function collageR2Key(productId: string): string; // `products/<productId>/collage/1080x1080.jpg`
   ```
-  used by `publication/service.ts` (Task 7).
+  used by `publication/service.ts` (Task 9).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1151,19 +1328,36 @@ import {
 } from "../../src/publication/collage";
 import type { ImagesBinding, ImageTransformer } from "../../src/publication/collage";
 
-function fakeTransformer(calls: unknown[]): ImageTransformer {
+type ImageCall =
+  | {
+      op: "transform";
+      options: Parameters<ImageTransformer["transform"]>[0];
+    }
+  | {
+      op: "draw";
+      options: Parameters<ImageTransformer["draw"]>[1];
+    }
+  | {
+      op: "output";
+      options: Parameters<ImageTransformer["output"]>[0];
+    };
+
+function fakeTransformer(calls: ImageCall[]): ImageTransformer {
   const transformer: ImageTransformer = {
     transform(options) {
       calls.push({ op: "transform", options });
       return transformer;
     },
-    draw(overlay, options) {
+    draw(_overlay, options) {
       calls.push({ op: "draw", options });
       return transformer;
     },
     async output(options) {
       calls.push({ op: "output", options });
-      return { response: () => new Response(new Uint8Array([1, 2, 3])) };
+      return {
+        response: () =>
+          new Response(new Uint8Array([1, 2, 3])),
+      };
     },
   };
   return transformer;
@@ -1173,7 +1367,9 @@ function fakeBucket(keys: string[]): R2Bucket {
   return {
     async get(key: string) {
       if (!keys.includes(key)) return null;
-      return { body: new ReadableStream() } as any;
+      return {
+        body: new ReadableStream(),
+      } as unknown as R2ObjectBody;
     },
   } as unknown as R2Bucket;
 }
@@ -1186,7 +1382,7 @@ describe("collageR2Key", () => {
 
 describe("generateCollage", () => {
   it("throws when the base canvas asset is missing from R2", async () => {
-    const calls: unknown[] = [];
+    const calls: ImageCall[] = [];
     const images: ImagesBinding = { input: () => fakeTransformer(calls) };
     const bucket = fakeBucket([]);
     await expect(
@@ -1195,7 +1391,7 @@ describe("generateCollage", () => {
   });
 
   it("throws when a source image key is missing from R2", async () => {
-    const calls: unknown[] = [];
+    const calls: ImageCall[] = [];
     const images: ImagesBinding = { input: () => fakeTransformer(calls) };
     const bucket = fakeBucket([COLLAGE_BASE_R2_KEY, "assets/a.jpg"]);
     await expect(
@@ -1204,40 +1400,66 @@ describe("generateCollage", () => {
   });
 
   it("applies deterministic contain-fit transform and draw offsets in ordered-image order", async () => {
-    const calls: unknown[] = [];
+    const calls: ImageCall[] = [];
     const images: ImagesBinding = { input: () => fakeTransformer(calls) };
     const keys: [string, string, string, string] = ["assets/a.jpg", "assets/b.jpg", "assets/c.jpg", "assets/d.jpg"];
     const bucket = fakeBucket([COLLAGE_BASE_R2_KEY, ...keys]);
 
     await generateCollage(bucket, images, keys);
 
-    const transformCalls = calls.filter((c: any) => c.op === "transform");
+    const transformCalls = calls.filter(
+      (call): call is Extract<
+        ImageCall,
+        { op: "transform" }
+      > => call.op === "transform",
+    );
     expect(transformCalls).toHaveLength(4);
-    for (const call of transformCalls as any[]) {
-      expect(call.options).toEqual({ width: COLLAGE_CELL_SIZE, height: COLLAGE_CELL_SIZE, fit: "contain", background: "#FFFFFF" });
+    for (const call of transformCalls) {
+      expect(call.options).toEqual({
+        width: COLLAGE_CELL_SIZE,
+        height: COLLAGE_CELL_SIZE,
+        fit: "contain",
+        background: "#FFFFFF",
+      });
     }
 
-    const drawCalls = calls.filter((c: any) => c.op === "draw");
+    const drawCalls = calls.filter(
+      (call): call is Extract<ImageCall, { op: "draw" }> =>
+        call.op === "draw",
+    );
     expect(drawCalls).toHaveLength(4);
-    expect((drawCalls as any[]).map((c) => ({ top: c.options.top, left: c.options.left }))).toEqual(COLLAGE_CELL_POSITIONS);
+    expect(drawCalls.map(({ options }) => ({
+      top: options.top,
+      left: options.left,
+    }))).toEqual(COLLAGE_CELL_POSITIONS);
 
-    const outputCall = calls.find((c: any) => c.op === "output") as any;
-    expect(outputCall.options).toEqual({ format: "image/jpeg", quality: 90 });
+    const outputCall = calls.find(
+      (call): call is Extract<ImageCall, { op: "output" }> =>
+        call.op === "output",
+    );
+    expect(outputCall?.options).toEqual({
+      format: "image/jpeg",
+      quality: 90,
+    });
   });
 
   it("produces identical transform/draw call sequence across repeated runs (idempotent parameters)", async () => {
     const keys: [string, string, string, string] = ["assets/a.jpg", "assets/b.jpg", "assets/c.jpg", "assets/d.jpg"];
     const bucket = fakeBucket([COLLAGE_BASE_R2_KEY, ...keys]);
 
-    const callsA: unknown[] = [];
+    const callsA: ImageCall[] = [];
     const imagesA: ImagesBinding = { input: () => fakeTransformer(callsA) };
     await generateCollage(bucket, imagesA, keys);
 
-    const callsB: unknown[] = [];
+    const callsB: ImageCall[] = [];
     const imagesB: ImagesBinding = { input: () => fakeTransformer(callsB) };
     await generateCollage(bucket, imagesB, keys);
 
-    expect(callsA.filter((c: any) => c.op !== "output")).toEqual(callsB.filter((c: any) => c.op !== "output"));
+    expect(
+      callsA.filter(({ op }) => op !== "output"),
+    ).toEqual(
+      callsB.filter(({ op }) => op !== "output"),
+    );
   });
 });
 ```
@@ -1290,18 +1512,32 @@ export async function generateCollage(
     throw new Error(`collage base canvas missing from R2 at ${COLLAGE_BASE_R2_KEY}`);
   }
 
-  let pipeline = images.input(base.body as unknown as ReadableStream);
+  let pipeline = images.input(base.body);
 
-  for (let i = 0; i < 4; i += 1) {
-    const key = orderedR2Keys[i];
+  for (const [index, key] of orderedR2Keys.entries()) {
+    const position = COLLAGE_CELL_POSITIONS[index];
+    if (!position) {
+      throw new Error(`collage position missing at index ${index}`);
+    }
     const object = await bucket.get(key);
     if (!object) {
-      throw new Error(`collage source image missing from R2 at position ${i}: ${key}`);
+      throw new Error(
+        `collage source image missing from R2 at position ${index}: ${key}`,
+      );
     }
     const cell = images
-      .input(object.body as unknown as ReadableStream)
-      .transform({ width: COLLAGE_CELL_SIZE, height: COLLAGE_CELL_SIZE, fit: "contain", background: "#FFFFFF" });
-    pipeline = pipeline.draw(cell, { ...COLLAGE_CELL_POSITIONS[i], width: COLLAGE_CELL_SIZE, height: COLLAGE_CELL_SIZE });
+      .input(object.body)
+      .transform({
+        width: COLLAGE_CELL_SIZE,
+        height: COLLAGE_CELL_SIZE,
+        fit: "contain",
+        background: "#FFFFFF",
+      });
+    pipeline = pipeline.draw(cell, {
+      ...position,
+      width: COLLAGE_CELL_SIZE,
+      height: COLLAGE_CELL_SIZE,
+    });
   }
 
   const result = await pipeline.output({ format: "image/jpeg", quality: 90 });
@@ -1315,232 +1551,83 @@ export async function generateCollage(
 Run: `npx vitest run test/publication/collage.test.ts`
 Expected: PASS — 5 tests green.
 
-- [ ] **Step 5: Record the collage base asset requirement**
+- [ ] **Step 5: Generate the deterministic white base canvas**
 
-Add to `docs/runbooks/deployment.md` (append, do not restructure existing content) a short note:
+Use already-installed `jpeg-js`; no image CLI or new dependency is required:
 
-```text
-## Collage base canvas
-
-Before the first publication run, upload a solid white 1080x1080 JPEG to
-`assets/collage-base-1080.jpg` in the R2 bucket for each environment. The
-setup validator (hardening plan) checks this object exists.
+```bash
+node --input-type=module -e 'import fs from "node:fs"; import jpeg from "jpeg-js"; const width=1080; const height=1080; const data=Buffer.alloc(width*height*4,255); fs.writeFileSync("docs/runbooks/collage-base-1080.jpg", jpeg.encode({data,width,height},90).data)'
 ```
+
+Run: `node -e 'const fs=require("node:fs"); const jpeg=require("jpeg-js"); const decoded=jpeg.decode(fs.readFileSync("docs/runbooks/collage-base-1080.jpg")); if(decoded.width!==1080||decoded.height!==1080) process.exit(1)'`
+Expected: exit 0.
 
 - [ ] **Step 6: Full check and commit**
 
 Run: `npm run check`
 
 ```bash
-git add src/publication/collage.ts test/publication/collage.test.ts docs/runbooks/deployment.md
+git add src/publication/collage.ts test/publication/collage.test.ts docs/runbooks/collage-base-1080.jpg
 git commit -m "feat(publication): add deterministic 4-in-1 Cloudflare Images collage"
 ```
 
 ---
 
-## Task 4A: Private short-lived collage delivery URL
+## Task 4A: Reuse private R2 asset delivery for collages
 
 **Files:**
-- Create: `src/publication/asset-url.ts`
-- Create: `src/routes/asset.ts`
-- Create: `test/publication/asset-url.test.ts`
-- Create: `test/routes/asset.test.ts`
-- Modify: `src/config.ts` (add `publicBaseUrl`)
-- Modify: `src/env.ts` (add `ASSET_URL_SIGNING_SECRET`)
-- Modify: `src/router.ts` (register `GET /assets/collage`)
+- Modify: `test/import/asset-store.test.ts` (extend existing shared signer test)
 
 **Interfaces:**
-- Consumes: private `Env.IMAGES_BUCKET`, `Clock`, `parseConfig`, and collage keys from Task 4.
-- Produces:
-  ```ts
-  export async function signAssetUrl(key: string, baseUrl: string, secret: string, clock: Clock, ttlSeconds?: number): Promise<string>;
-  export async function verifyAssetUrl(url: URL, secret: string, clock: Clock): Promise<string | null>;
-  export async function handleAssetRoute(request: Request, env: Env): Promise<Response>;
-  ```
-  Airtable and Google fetch the returned URL during publication. The URL expires after 15 minutes, grants access only to generated collage keys, and is never logged.
+- Consumes: `createAssetStore(bucket, config, clock): AssetStore` and `AssetStore.signUrl(r2Key, ttlSeconds): Promise<string>` from Import Task 6; existing authenticated `GET /assets/:encodedKey` route from Import Task 7; `AppConfig.publicBaseUrl`; `Env.ASSET_URL_SIGNING_SECRET`.
+- Produces: no new production symbol. Publication Task 9 receives the existing `AssetStore` and calls `assets.signUrl(collageR2Key, 900)`.
 
-- [ ] **Step 1: Write failing signer/verifier tests**
+The import plan already implements HMAC signing and private R2 delivery for any persisted object key. Do not create `src/publication/asset-url.ts`, a second asset route, or any call to nonexistent `R2Bucket.createSignedUrl`. Signed URLs are temporary Airtable/Google ingestion URLs; never persist or log them.
+
+- [ ] **Step 1: Extend the existing failing signer test with a collage key**
 
 ```ts
-// test/publication/asset-url.test.ts
-import { describe, expect, it } from "vitest";
-import { signAssetUrl, verifyAssetUrl } from "../../src/publication/asset-url";
-
-const key = "products/A-1001/collage/1080x1080.jpg";
-const secret = "test-signing-secret-with-32-bytes-minimum";
-const now = new Date("2026-09-01T05:00:00.000Z");
-
-it("signs a collage URL valid for the requested TTL", async () => {
-  const signed = await signAssetUrl(key, "https://worker.example", secret, { now: () => now }, 900);
-  await expect(verifyAssetUrl(new URL(signed), secret, { now: () => new Date(now.getTime() + 899_000) })).resolves.toBe(key);
-});
-
-it("rejects expired, tampered, and non-collage URLs", async () => {
-  const signed = new URL(await signAssetUrl(key, "https://worker.example", secret, { now: () => now }, 900));
-  await expect(verifyAssetUrl(signed, secret, { now: () => new Date(now.getTime() + 901_000) })).resolves.toBeNull();
-  signed.searchParams.set("key", "assets/private-original.jpg");
-  await expect(verifyAssetUrl(signed, secret, { now: () => now })).resolves.toBeNull();
-  await expect(signAssetUrl("assets/private-original.jpg", "https://worker.example", secret, { now: () => now })).rejects.toThrow("collage key");
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `npx vitest run test/publication/asset-url.test.ts`
-Expected: FAIL — `Cannot find module '../../src/publication/asset-url'`.
-
-- [ ] **Step 3: Implement HMAC URL signing**
-
-```ts
-// src/publication/asset-url.ts
-import type { Clock } from "../shared/time";
-
-const DEFAULT_TTL_SECONDS = 900;
-const COLLAGE_KEY = /^products\/A-\d+\/collage\/1080x1080\.jpg$/;
-const encoder = new TextEncoder();
-
-function bytesToBase64Url(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-}
-
-async function signature(secret: string, value: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  return bytesToBase64Url(new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(value))));
-}
-
-function signedValue(key: string, expires: number): string {
-  return `${key}\n${expires}`;
-}
-
-export async function signAssetUrl(
-  key: string,
-  baseUrl: string,
-  secret: string,
-  clock: Clock,
-  ttlSeconds = DEFAULT_TTL_SECONDS,
-): Promise<string> {
-  if (!COLLAGE_KEY.test(key)) throw new Error("only a generated collage key may be signed");
-  if (ttlSeconds < 1 || ttlSeconds > DEFAULT_TTL_SECONDS) throw new Error("asset URL TTL must be between 1 and 900 seconds");
-  const expires = Math.floor(clock.now().getTime() / 1000) + ttlSeconds;
-  const url = new URL("/assets/collage", baseUrl);
-  url.searchParams.set("key", key);
-  url.searchParams.set("expires", String(expires));
-  url.searchParams.set("signature", await signature(secret, signedValue(key, expires)));
-  return url.toString();
-}
-
-export async function verifyAssetUrl(url: URL, secret: string, clock: Clock): Promise<string | null> {
-  const key = url.searchParams.get("key") ?? "";
-  const expires = Number(url.searchParams.get("expires"));
-  const supplied = url.searchParams.get("signature") ?? "";
-  if (!COLLAGE_KEY.test(key) || !Number.isSafeInteger(expires) || expires <= Math.floor(clock.now().getTime() / 1000)) return null;
-  const expected = await signature(secret, signedValue(key, expires));
-  if (supplied.length !== expected.length) return null;
-  let difference = 0;
-  for (let index = 0; index < supplied.length; index += 1) difference |= supplied.charCodeAt(index) ^ expected.charCodeAt(index);
-  return difference === 0 ? key : null;
-}
-```
-
-- [ ] **Step 4: Run signer tests**
-
-Run: `npx vitest run test/publication/asset-url.test.ts`
-Expected: PASS — 2 tests green.
-
-- [ ] **Step 5: Write failing private-route tests**
-
-```ts
-// test/routes/asset.test.ts
-import { describe, expect, it, vi } from "vitest";
-import { handleAssetRoute } from "../../src/routes/asset";
-import { signAssetUrl } from "../../src/publication/asset-url";
-
-const now = new Date("2026-09-01T05:00:00.000Z");
-const secret = "test-signing-secret-with-32-bytes-minimum";
-const key = "products/A-1001/collage/1080x1080.jpg";
-
-it("returns a signed private collage without making the bucket public", async () => {
-  const url = await signAssetUrl(key, "https://worker.example", secret, { now: () => now });
-  const env = {
-    ASSET_URL_SIGNING_SECRET: secret,
-    IMAGES_BUCKET: { get: vi.fn().mockResolvedValue({ body: new Uint8Array([1, 2, 3]), httpMetadata: { contentType: "image/jpeg" } }) },
-  } as any;
-  const response = await handleAssetRoute(new Request(url), env, { now: () => now });
-  expect(response.status).toBe(200);
-  expect(response.headers.get("cache-control")).toBe("private, no-store");
-  expect(env.IMAGES_BUCKET.get).toHaveBeenCalledWith(key);
-});
-
-it("rejects missing or invalid signatures before reading R2", async () => {
-  const env = { ASSET_URL_SIGNING_SECRET: secret, IMAGES_BUCKET: { get: vi.fn() } } as any;
-  const response = await handleAssetRoute(new Request(`https://worker.example/assets/collage?key=${encodeURIComponent(key)}`), env, { now: () => now });
-  expect(response.status).toBe(403);
-  expect(env.IMAGES_BUCKET.get).not.toHaveBeenCalled();
-});
-```
-
-- [ ] **Step 6: Run route tests to verify they fail**
-
-Run: `npx vitest run test/routes/asset.test.ts`
-Expected: FAIL — `Cannot find module '../../src/routes/asset'`.
-
-- [ ] **Step 7: Implement and register the asset route**
-
-```ts
-// src/routes/asset.ts
-import type { Env } from "../env";
-import type { Clock } from "../shared/time";
-import { verifyAssetUrl } from "../publication/asset-url";
-
-export async function handleAssetRoute(
-  request: Request,
-  env: Env,
-  clock: Clock = { now: () => new Date() },
-): Promise<Response> {
-  const key = await verifyAssetUrl(new URL(request.url), env.ASSET_URL_SIGNING_SECRET, clock);
-  if (!key) return new Response("Forbidden", { status: 403 });
-  const object = await env.IMAGES_BUCKET.get(key);
-  if (!object) return new Response("Not found", { status: 404 });
-  return new Response(object.body, {
-    headers: {
-      "content-type": object.httpMetadata?.contentType ?? "image/jpeg",
-      "cache-control": "private, no-store",
-      "x-content-type-options": "nosniff",
+// test/import/asset-store.test.ts — append inside the existing createAssetStore describe block
+it("signs a generated collage through the same private asset route", async () => {
+  const clock = fixedClock("2026-09-01T05:00:00.000Z");
+  const store = createAssetStore(
+    env.IMAGES_BUCKET,
+    {
+      signingSecret: "test-signing-secret",
+      publicBaseUrl: "https://worker.example",
     },
-  });
-}
+    clock,
+  );
+
+  const url = new URL(
+    await store.signUrl(
+      "products/A-1001/collage/1080x1080.jpg",
+      900,
+    ),
+  );
+
+  expect(url.origin).toBe("https://worker.example");
+  expect(decodeURIComponent(url.pathname)).toContain(
+    "products/A-1001/collage/1080x1080.jpg",
+  );
+  expect(url.searchParams.get("expires")).toBeTruthy();
+  expect(url.searchParams.get("signature")).toBeTruthy();
+});
 ```
 
-Add `publicBaseUrl: z.string().url()` to the existing `AppConfigSchema`, add `ASSET_URL_SIGNING_SECRET: string` to `Env`, and add these exact router lines beside existing route imports and dispatch branches:
+- [ ] **Step 2: Run the focused test**
 
-```ts
-import { handleAssetRoute } from "./routes/asset";
+Run: `npx vitest run test/import/asset-store.test.ts -t "generated collage"`
+Expected: PASS because shared `AssetStore.signUrl` is key-agnostic and already signs the object path plus expiry. If this fails because Import Task 6 restricts keys to `assets/`, remove that unnecessary prefix restriction while retaining path canonicalization and signature verification; add the collage case to the same test file.
 
-if (request.method === "GET" && url.pathname === "/assets/collage") {
-  return handleAssetRoute(request, env);
-}
-```
+- [ ] **Step 3: Run full check and commit**
 
-Add `publicBaseUrl: "https://worker.example"` to every `AppConfig` test fixture introduced by this and earlier plans.
-
-- [ ] **Step 8: Run focused and full checks**
-
-Run: `npx vitest run test/publication/asset-url.test.ts test/routes/asset.test.ts && npm run check`
+Run: `npm run check`
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
-
 ```bash
-git add src/publication/asset-url.ts src/routes/asset.ts src/config.ts src/env.ts src/router.ts test/publication/asset-url.test.ts test/routes/asset.test.ts
- git commit -m "feat(publication): serve private collages through expiring URLs"
+git add src/import/asset-store.ts test/import/asset-store.test.ts
+git commit -m "test(publication): reuse private asset signing for collages"
 ```
 
 ---
@@ -1548,8 +1635,18 @@ git add src/publication/asset-url.ts src/routes/asset.ts src/config.ts src/env.t
 ## Task 5: Anthropic SDK caption generation with schema validation and deterministic batching
 
 **Files:**
+- Modify: `package.json`
+- Modify: `package-lock.json`
 - Create: `src/publication/captions.ts`
 - Test: `test/publication/captions.test.ts`
+
+**Dependency setup (before Step 1):**
+
+```bash
+npm install @anthropic-ai/sdk
+```
+
+This must complete before compiling the failing test; production code imports SDK types and later constructs the official client.
 
 **Interfaces:**
 - Consumes: `CaptionSet`, `PublicationProduct` from `src/publication/types.ts`, `AppConfig` from `src/config.ts`.
@@ -1591,12 +1688,13 @@ git add src/publication/asset-url.ts src/routes/asset.ts src/config.ts src/env.t
     products: CaptionRequestProduct[],
   ): Promise<CaptionGenerationOutcome>;
   ```
-  used by `publication/service.ts` (Task 7).
+  used by `publication/service.ts` (Task 9).
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
 // test/publication/captions.test.ts
+import type Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it, vi } from "vitest";
 import {
   toCaptionRequestProducts,
@@ -1634,6 +1732,17 @@ function toolResponse(captions: Array<{ productId: string; drafts: string[] }>) 
   };
 }
 
+type CountTokensParams = Parameters<
+  Anthropic["messages"]["countTokens"]
+>[0];
+
+function sdkClient(
+  messages: Record<string, ReturnType<typeof vi.fn>>,
+): Pick<Anthropic, "messages"> {
+  // Test-only structural stub. Production always constructs official Anthropic SDK client.
+  return { messages } as unknown as Pick<Anthropic, "messages">;
+}
+
 describe("toCaptionRequestProducts", () => {
   it("maps only the text fields Claude needs, no images", () => {
     const result = toCaptionRequestProducts([product("A-1001")]);
@@ -1652,79 +1761,113 @@ describe("toCaptionRequestProducts", () => {
 
 describe("planCaptionBatches", () => {
   it("returns a single batch when the estimated token count fits the limit", async () => {
-    const client = { messages: { countTokens: vi.fn().mockResolvedValue({ input_tokens: 500 }) } } as any;
-    const products = [toCaptionRequestProducts([product("A-1001")])[0], toCaptionRequestProducts([product("A-1002")])[0]];
+    const client = sdkClient({
+      countTokens: vi.fn().mockResolvedValue({ input_tokens: 500 }),
+    });
+    const products = [toCaptionRequestProducts([product("A-1001")])[0]!, toCaptionRequestProducts([product("A-1002")])[0]!];
     const batches = await planCaptionBatches(client, "claude-opus-5", products, 1000);
     expect(batches).toEqual([products.sort((a, b) => a.productId.localeCompare(b.productId))]);
   });
 
   it("splits deterministically by sorted Product ID when over the limit", async () => {
-    const client = {
-      messages: {
-        countTokens: vi.fn().mockImplementation(async ({ messages }: any) => {
-          const text = messages[0].content as string;
-          const productCount = (text.match(/"productId"/g) ?? []).length;
-          return { input_tokens: productCount > 1 ? 2000 : 400 };
-        }),
-      },
-    } as any;
-    const products = ["A-1003", "A-1001", "A-1002", "A-1004"].map((id) => toCaptionRequestProducts([product(id)])[0]);
+    const client = sdkClient({
+      countTokens: vi.fn().mockImplementation(
+        async ({ messages }: CountTokensParams) => {
+          const text = messages[0]!.content as string;
+          const productCount =
+            (text.match(/"productId"/g) ?? []).length;
+          return {
+            input_tokens: productCount > 1 ? 2000 : 400,
+          };
+        },
+      ),
+    });
+    const products = ["A-1003", "A-1001", "A-1002", "A-1004"].map((id) => toCaptionRequestProducts([product(id)])[0]!);
     const batches = await planCaptionBatches(client, "claude-opus-5", products, 1000);
     expect(batches.every((batch) => batch.length === 1)).toBe(true);
-    expect(batches.map((b) => b[0].productId)).toEqual(["A-1001", "A-1002", "A-1003", "A-1004"]);
+    expect(batches.map((batch) => batch[0]!.productId)).toEqual(["A-1001", "A-1002", "A-1003", "A-1004"]);
   });
 });
 
 describe("requestCaptionBatch", () => {
-  it("returns three drafts per requested Product ID on a clean response", async () => {
-    const client = {
-      messages: {
-        create: vi.fn().mockResolvedValue(
-          toolResponse([{ productId: "A-1001", drafts: ["d1", "d2", "d3"] }]),
-        ),
-      },
-    } as any;
-    const outcome = await requestCaptionBatch(client, "claude-opus-5", [toCaptionRequestProducts([product("A-1001")])[0]]);
-    expect(outcome).toEqual({ captions: [{ productId: "A-1001", drafts: ["d1", "d2", "d3"] }], missingProductIds: [] });
+  it("returns three Thai drafts per requested Product ID on a clean response", async () => {
+    const create = vi.fn().mockResolvedValue(
+      toolResponse([
+        {
+          productId: "A-1001",
+          drafts: ["หนึ่ง", "สอง", "สาม"],
+        },
+      ]),
+    );
+    const client = sdkClient({ create });
+    const outcome = await requestCaptionBatch(client, "claude-opus-5", [toCaptionRequestProducts([product("A-1001")])[0]!]);
+    expect(outcome).toEqual({ captions: [{ productId: "A-1001", drafts: ["หนึ่ง", "สอง", "สาม"] }], missingProductIds: [] });
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "claude-opus-5",
+        thinking: { type: "adaptive" },
+        tool_choice: { type: "tool", name: "submit_captions" },
+      }),
+    );
+    const request = create.mock.calls[0]![0];
+    expect(JSON.stringify(request.messages)).not.toContain("orderedImageKeys");
+    expect(JSON.stringify(request.messages)).not.toContain("assets/");
   });
 
   it("marks only the Product IDs with missing or invalid captions for retry", async () => {
-    const client = {
-      messages: {
-        create: vi.fn().mockResolvedValue(
-          toolResponse([
-            { productId: "A-1001", drafts: ["d1", "d2", "d3"] },
-            { productId: "A-1002", drafts: ["only-one"] },
-          ]),
-        ),
-      },
-    } as any;
-    const requested = [toCaptionRequestProducts([product("A-1001")])[0], toCaptionRequestProducts([product("A-1002")])[0]];
+    const client = sdkClient({
+      create: vi.fn().mockResolvedValue(
+        toolResponse([
+          {
+            productId: "A-1001",
+            drafts: ["หนึ่ง", "สอง", "สาม"],
+          },
+          {
+            productId: "A-1002",
+            drafts: ["one", "two", "three"],
+          },
+        ]),
+      ),
+    });
+    const requested = [toCaptionRequestProducts([product("A-1001")])[0]!, toCaptionRequestProducts([product("A-1002")])[0]!];
     const outcome = await requestCaptionBatch(client, "claude-opus-5", requested);
-    expect(outcome.captions).toEqual([{ productId: "A-1001", drafts: ["d1", "d2", "d3"] }]);
+    expect(outcome.captions).toEqual([{ productId: "A-1001", drafts: ["หนึ่ง", "สอง", "สาม"] }]);
     expect(outcome.missingProductIds).toEqual(["A-1002"]);
   });
 
   it("marks every requested Product ID for retry when the response cannot be parsed", async () => {
-    const client = { messages: { create: vi.fn().mockResolvedValue({ content: [] }) } } as any;
-    const requested = [toCaptionRequestProducts([product("A-1001")])[0], toCaptionRequestProducts([product("A-1002")])[0]];
+    const client = sdkClient({
+      create: vi.fn().mockResolvedValue({ content: [] }),
+    });
+    const requested = [toCaptionRequestProducts([product("A-1001")])[0]!, toCaptionRequestProducts([product("A-1002")])[0]!];
     const outcome = await requestCaptionBatch(client, "claude-opus-5", requested);
     expect(outcome.captions).toEqual([]);
     expect(outcome.missingProductIds).toEqual(["A-1001", "A-1002"]);
   });
 
   it("marks every requested Product ID for retry when the tool call throws", async () => {
-    const client = { messages: { create: vi.fn().mockRejectedValue(new Error("rate limited")) } } as any;
-    const requested = [toCaptionRequestProducts([product("A-1001")])[0]];
+    const client = sdkClient({
+      create: vi
+        .fn()
+        .mockRejectedValue(new Error("rate limited")),
+    });
+    const requested = [toCaptionRequestProducts([product("A-1001")])[0]!];
     const outcome = await requestCaptionBatch(client, "claude-opus-5", requested);
     expect(outcome.missingProductIds).toEqual(["A-1001"]);
   });
 
   it("marks every requested Product ID for retry when returned IDs don't match the requested set", async () => {
-    const client = {
-      messages: { create: vi.fn().mockResolvedValue(toolResponse([{ productId: "A-9999", drafts: ["d1", "d2", "d3"] }])) },
-    } as any;
-    const requested = [toCaptionRequestProducts([product("A-1001")])[0]];
+    const client = sdkClient({
+      create: vi.fn().mockResolvedValue(
+        toolResponse([
+          {
+            productId: "A-9999",
+            drafts: ["หนึ่ง", "สอง", "สาม"],
+          },
+        ]),
+      ),
+    });
+    const requested = [toCaptionRequestProducts([product("A-1001")])[0]!];
     const outcome = await requestCaptionBatch(client, "claude-opus-5", requested);
     expect(outcome.captions).toEqual([]);
     expect(outcome.missingProductIds).toEqual(["A-1001"]);
@@ -1733,15 +1876,24 @@ describe("requestCaptionBatch", () => {
 
 describe("generateCaptionsForRun", () => {
   it("batches, requests, and merges captions keyed by Product ID across batches", async () => {
-    const client = {
-      messages: {
-        countTokens: vi.fn().mockResolvedValue({ input_tokens: 100 }),
-        create: vi
-          .fn()
-          .mockResolvedValueOnce(toolResponse([{ productId: "A-1001", drafts: ["d1", "d2", "d3"] }, { productId: "A-1002", drafts: ["e1", "e2", "e3"] }])),
-      },
-    } as any;
-    const products = ["A-1001", "A-1002"].map((id) => toCaptionRequestProducts([product(id)])[0]);
+    const client = sdkClient({
+      countTokens: vi.fn().mockResolvedValue({
+        input_tokens: 100,
+      }),
+      create: vi.fn().mockResolvedValueOnce(
+        toolResponse([
+          {
+            productId: "A-1001",
+            drafts: ["หนึ่ง", "สอง", "สาม"],
+          },
+          {
+            productId: "A-1002",
+            drafts: ["สี่", "ห้า", "หก"],
+          },
+        ]),
+      ),
+    });
+    const products = ["A-1001", "A-1002"].map((id) => toCaptionRequestProducts([product(id)])[0]!);
     const outcome = await generateCaptionsForRun(client, "claude-opus-5", 1000, products);
     expect(outcome.captions.map((c) => c.productId).sort()).toEqual(["A-1001", "A-1002"]);
     expect(outcome.missingProductIds).toEqual([]);
@@ -1801,11 +1953,21 @@ const CAPTIONS_TOOL_SCHEMA = {
   },
 };
 
+const ThaiDraftSchema = z.string()
+  .trim()
+  .min(1)
+  .max(400)
+  .regex(/[ก-๙]/);
+
 const ResponseSchema = z.object({
   captions: z.array(
     z.object({
       productId: z.string(),
-      drafts: z.array(z.string()).length(3),
+      drafts: z.tuple([
+        ThaiDraftSchema,
+        ThaiDraftSchema,
+        ThaiDraftSchema,
+      ]),
     }),
   ),
 });
@@ -1885,14 +2047,14 @@ export async function requestCaptionBatch(
   products: CaptionRequestProduct[],
 ): Promise<CaptionGenerationOutcome> {
   const requestedIds = new Set(products.map((p) => p.productId));
-  let raw: unknown;
+  let response: Anthropic.Messages.Message;
   try {
-    raw = await client.messages.create(buildRequestParams(model, products));
+    response = await client.messages.create(buildRequestParams(model, products));
   } catch {
     return { captions: [], missingProductIds: [...requestedIds] };
   }
 
-  const toolUse = (raw as Anthropic.Messages.Message).content.find(
+  const toolUse = response.content.find(
     (block): block is Anthropic.Messages.ToolUseBlock => block.type === "tool_use" && block.name === "submit_captions",
   );
   if (!toolUse) {
@@ -1905,8 +2067,11 @@ export async function requestCaptionBatch(
   }
 
   const returnedIds = new Set(parsed.data.captions.map((c) => c.productId));
-  const hasUnexpectedId = [...returnedIds].some((id) => !requestedIds.has(id));
-  if (hasUnexpectedId) {
+  const hasInvalidIdSet =
+    parsed.data.captions.length !== requestedIds.size ||
+    returnedIds.size !== requestedIds.size ||
+    [...returnedIds].some((id) => !requestedIds.has(id));
+  if (hasInvalidIdSet) {
     return { captions: [], missingProductIds: [...requestedIds] };
   }
 
@@ -1914,8 +2079,8 @@ export async function requestCaptionBatch(
   const missingProductIds: string[] = [];
   for (const productId of requestedIds) {
     const match = parsed.data.captions.find((c) => c.productId === productId);
-    if (match && match.drafts.length === 3 && match.drafts.every((d) => d.trim().length > 0)) {
-      captions.push({ productId, drafts: [match.drafts[0], match.drafts[1], match.drafts[2]] });
+    if (match) {
+      captions.push({ productId, drafts: match.drafts });
     } else {
       missingProductIds.push(productId);
     }
@@ -1956,7 +2121,7 @@ Expected: PASS — 9 tests green.
 Run: `npm run check`
 
 ```bash
-git add src/publication/captions.ts test/publication/captions.test.ts
+git add package.json package-lock.json src/publication/captions.ts test/publication/captions.test.ts
 git commit -m "feat(publication): add Anthropic SDK caption generation with schema validation and deterministic batching"
 ```
 
@@ -1995,7 +2160,7 @@ git commit -m "feat(publication): add Anthropic SDK caption generation with sche
     fetcher: Fetcher,
   ): AccessTokenProvider;
   ```
-  used by `publication/google-docs.ts` (Task 7 area, actually Task 6's own follow-on) and `publication/service.ts` (Task 7).
+  used by `publication/google-docs.ts` (Task 7) and `publication/service.ts` (Task 9).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2014,8 +2179,8 @@ beforeAll(() => {
     publicKeyEncoding: { type: "spki", format: "pem" },
     privateKeyEncoding: { type: "pkcs8", format: "pem" },
   });
-  privateKeyPem = privateKey as unknown as string;
-  const publicPem = publicKey as unknown as string;
+  privateKeyPem = privateKey;
+  const publicPem = publicKey;
   const body = publicPem.replace(/-----BEGIN PUBLIC KEY-----/, "").replace(/-----END PUBLIC KEY-----/, "").replace(/\s+/g, "");
   publicKeyDer = Uint8Array.from(atob(body), (c) => c.charCodeAt(0)).buffer;
 });
@@ -2026,9 +2191,22 @@ function base64UrlDecode(segment: string): string {
 }
 
 describe("parseServiceAccountJson", () => {
-  it("extracts client_email and private_key", () => {
-    const result = parseServiceAccountJson(JSON.stringify({ client_email: "svc@example.iam.gserviceaccount.com", private_key: "key" }));
-    expect(result).toEqual({ client_email: "svc@example.iam.gserviceaccount.com", private_key: "key" });
+  it("extracts and validates client_email and PKCS#8 private_key", () => {
+    const result = parseServiceAccountJson(JSON.stringify({
+      client_email: "svc@example.iam.gserviceaccount.com",
+      private_key: privateKeyPem,
+    }));
+    expect(result).toEqual({
+      client_email: "svc@example.iam.gserviceaccount.com",
+      private_key: privateKeyPem,
+    });
+  });
+
+  it("rejects malformed secret JSON at the configuration boundary", () => {
+    expect(() => parseServiceAccountJson(JSON.stringify({
+      client_email: "not-an-email",
+      private_key: "not-a-key",
+    }))).toThrow();
   });
 });
 
@@ -2042,6 +2220,9 @@ describe("signServiceAccountJwt", () => {
     );
 
     const [headerB64, claimsB64, signatureB64] = jwt.split(".");
+    if (!headerB64 || !claimsB64 || !signatureB64) {
+      throw new Error("JWT must contain three segments");
+    }
     const header = JSON.parse(base64UrlDecode(headerB64));
     const claims = JSON.parse(base64UrlDecode(claimsB64));
 
@@ -2068,13 +2249,19 @@ describe("signServiceAccountJwt", () => {
 describe("createGoogleAuthClient", () => {
   it("exchanges the signed JWT for an access token and caches it until near expiry", async () => {
     const clock = { now: () => new Date("2026-09-01T05:00:00.000Z") };
-    const fetcher = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ access_token: "token-1", expires_in: 3600 }), { status: 200 }),
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          access_token: "token-1",
+          expires_in: 3600,
+        }),
+        { status: 200 },
+      ),
     );
     const client = createGoogleAuthClient(
       JSON.stringify({ client_email: "svc@example.iam.gserviceaccount.com", private_key: privateKeyPem }),
       clock,
-      fetcher as any,
+      fetcher,
     );
 
     const first = await client.getAccessToken();
@@ -2089,13 +2276,13 @@ describe("createGoogleAuthClient", () => {
     let currentTime = new Date("2026-09-01T05:00:00.000Z");
     const clock = { now: () => currentTime };
     const fetcher = vi
-      .fn()
+      .fn<Fetcher>()
       .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "token-1", expires_in: 60 }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "token-2", expires_in: 3600 }), { status: 200 }));
     const client = createGoogleAuthClient(
       JSON.stringify({ client_email: "svc@example.iam.gserviceaccount.com", private_key: privateKeyPem }),
       clock,
-      fetcher as any,
+      fetcher,
     );
 
     const first = await client.getAccessToken();
@@ -2118,6 +2305,7 @@ Expected: FAIL — `Cannot find module '../../src/publication/google-auth'`.
 
 ```ts
 // src/publication/google-auth.ts
+import { z } from "zod";
 import type { Clock } from "../shared/time";
 import type { Fetcher } from "../shared/http";
 
@@ -2130,9 +2318,21 @@ export interface AccessTokenProvider {
   getAccessToken(): Promise<string>;
 }
 
+const ServiceAccountSchema = z.object({
+  client_email: z.string().email(),
+  private_key: z.string().refine(
+    (value) => value.includes("-----BEGIN PRIVATE KEY-----"),
+    "private_key must be PKCS#8 PEM",
+  ),
+});
+
+const TokenResponseSchema = z.object({
+  access_token: z.string().min(1),
+  expires_in: z.number().int().positive(),
+});
+
 export function parseServiceAccountJson(json: string): GoogleServiceAccountJson {
-  const parsed = JSON.parse(json) as { client_email: string; private_key: string };
-  return { client_email: parsed.client_email, private_key: parsed.private_key };
+  return ServiceAccountSchema.parse(JSON.parse(json));
 }
 
 function base64UrlEncode(bytes: Uint8Array): string {
@@ -2197,7 +2397,7 @@ export function createGoogleAuthClient(serviceAccountJsonText: string, clock: Cl
         throw new Error(`google token exchange failed with status ${response.status}`);
       }
 
-      const body = (await response.json()) as { access_token: string; expires_in: number };
+      const body = TokenResponseSchema.parse(await response.json());
       cachedToken = body.access_token;
       cachedExpiryMs = nowMs + (body.expires_in - TOKEN_REFRESH_SKEW_SECONDS) * 1000;
       return cachedToken;
@@ -2209,7 +2409,7 @@ export function createGoogleAuthClient(serviceAccountJsonText: string, clock: Cl
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/publication/google-auth.test.ts`
-Expected: PASS — 4 tests green.
+Expected: PASS — 5 tests green.
 
 - [ ] **Step 5: Full check and commit**
 
@@ -2242,19 +2442,58 @@ git commit -m "feat(publication): add Google service-account JWT client using We
     collageImageUrl: string;
   }
 
+  export async function findTemporaryDocument(
+    fetcher: Fetcher,
+    tokenProvider: AccessTokenProvider,
+    driveFolderId: string,
+    publicationRunId: string,
+  ): Promise<string | null>;
+
   export async function copyTemplate(
     fetcher: Fetcher,
     tokenProvider: AccessTokenProvider,
     templateDocId: string,
     driveFolderId: string,
+    publicationRunId: string,
     newTitle: string,
-  ): Promise<string>; // returns copied doc id
+  ): Promise<string>; // tags the copy with appProperties.publicationRunId and returns copied doc id
+
+  export type GoogleDocsRequest =
+    | {
+        deleteContentRange: {
+          range: { startIndex: number; endIndex: number };
+        };
+      }
+    | {
+        insertText: {
+          location: { index: number };
+          text: string;
+        };
+      }
+    | {
+        insertInlineImage: {
+          location: { index: number };
+          uri: string;
+          objectSize: {
+            width: { magnitude: number; unit: "PT" };
+            height: { magnitude: number; unit: "PT" };
+          };
+        };
+      }
+    | {
+        replaceAllText: {
+          containsText: { text: string; matchCase: boolean };
+          replaceText: string;
+        };
+      };
 
   export function buildBatchUpdateRequests(
     publicationDateText: string,
     products: DocProductContent[],
     suffixText: string,
-  ): unknown[]; // Google Docs batchUpdate `requests` array, applied in two passes internally by fillTemplate
+    insertionIndex: number,
+    deletionEndIndex: number,
+  ): GoogleDocsRequest[]; // one atomic Google Docs batchUpdate request array
 
   export async function fillTemplate(
     fetcher: Fetcher,
@@ -2280,9 +2519,9 @@ git commit -m "feat(publication): add Google service-account JWT client using We
 
   export async function deleteDocument(fetcher: Fetcher, tokenProvider: AccessTokenProvider, docId: string): Promise<void>;
   ```
-  used by `publication/service.ts` (Task 8).
+  used by `publication/service.ts` (Task 9).
 
-Template contract (documented for the customer-facing template, referenced by the setup runbook): the master template contains the literal tokens `{{PUBLICATION_DATE}}`, `{{PRODUCTS}}`, and `{{END_PRODUCTS}}`. Everything between `{{PRODUCTS}}` and `{{END_PRODUCTS}}` is one plain-text suffix block that is captured once, then repeated after every generated product section; the two marker tokens and the captured suffix text are removed and replaced by the generated content.
+Template contract (documented for the customer-facing template, referenced by the setup runbook): the master template contains the literal tokens `{{PUBLICATION_DATE}}`, `{{PRODUCTS}}`, and `{{END_PRODUCTS}}`. Each marker must remain inside one Google Docs text run. Everything between `{{PRODUCTS}}` and `{{END_PRODUCTS}}` is one plain-text suffix block captured once and repeated after every generated product section. One atomic `batchUpdate` deletes the full marker region, inserts products at that exact document index in reverse request order so final Product order stays correct, then replaces the date token.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2290,6 +2529,7 @@ Template contract (documented for the customer-facing template, referenced by th
 // test/publication/google-docs.test.ts
 import { describe, expect, it, vi } from "vitest";
 import {
+  findTemporaryDocument,
   copyTemplate,
   buildBatchUpdateRequests,
   fillTemplate,
@@ -2297,26 +2537,70 @@ import {
   finalizeDocument,
   deleteDocument,
 } from "../../src/publication/google-docs";
-import type { DocProductContent } from "../../src/publication/google-docs";
+import type {
+  DocProductContent,
+  GoogleDocsRequest,
+} from "../../src/publication/google-docs";
+import type { Fetcher } from "../../src/shared/http";
 
 function tokenProvider(token = "access-token-1") {
-  return { getAccessToken: vi.fn().mockResolvedValue(token) };
+  return {
+    getAccessToken: vi.fn().mockResolvedValue(token),
+  };
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
 }
 
-describe("copyTemplate", () => {
-  it("POSTs a Drive copy request with the target folder and title", async () => {
-    const fetcher = vi.fn().mockResolvedValue(jsonResponse({ id: "copied-doc-1" }));
-    const id = await copyTemplate(fetcher as any, tokenProvider(), "template-doc-1", "folder-1", "Publication 2026-09-01 (in progress)");
+describe("temporary document discovery and copy", () => {
+  it("finds the existing copy by parent folder and private app property", async () => {
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(jsonResponse({ files: [{ id: "copied-doc-1" }] }));
+    const id = await findTemporaryDocument(fetcher, tokenProvider(), "folder-1", "rec-run-1");
     expect(id).toBe("copied-doc-1");
-    const [url, init] = fetcher.mock.calls[0];
+    const [url] = fetcher.mock.calls[0]!;
+    const query = new URL(String(url)).searchParams.get("q");
+    expect(query).toContain("'folder-1' in parents");
+    expect(query).toContain("key='publicationRunId'");
+    expect(query).toContain("value='rec-run-1'");
+  });
+
+  it("tags a new Drive copy with the Publication Run ID", async () => {
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(jsonResponse({ id: "copied-doc-1" }));
+    const id = await copyTemplate(
+      fetcher,
+      tokenProvider(),
+      "template-doc-1",
+      "folder-1",
+      "rec-run-1",
+      "Publication 2026-09-01 (in progress)",
+    );
+    expect(id).toBe("copied-doc-1");
+    const [url, init] = fetcher.mock.calls[0]!;
     expect(String(url)).toContain("template-doc-1/copy");
-    const body = JSON.parse(init.body);
-    expect(body).toEqual({ name: "Publication 2026-09-01 (in progress)", parents: ["folder-1"] });
-    expect(init.headers.Authorization).toBe("Bearer access-token-1");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      name: "Publication 2026-09-01 (in progress)",
+      parents: ["folder-1"],
+      appProperties: { publicationRunId: "rec-run-1" },
+    });
+    expect(new Headers(init?.headers).get("Authorization")).toBe(
+      "Bearer access-token-1",
+    );
+  });
+
+  it("rejects a malformed successful Drive response", async () => {
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(jsonResponse({ id: 42 }));
+
+    await expect(
+      copyTemplate(
+        fetcher,
+        tokenProvider(),
+        "template-doc-1",
+        "folder-1",
+        "rec-run-1",
+        "Publication 2026-09-01 (in progress)",
+      ),
+    ).rejects.toThrow("google drive copy returned a malformed response");
   });
 });
 
@@ -2332,15 +2616,31 @@ const sampleProduct: DocProductContent = {
 
 describe("buildBatchUpdateRequests", () => {
   it("produces a replaceAllText request for the date and one insertText per product field", () => {
-    const requests = buildBatchUpdateRequests("1 กันยายน 2569", [sampleProduct], "-- end of listing --");
-    const dateRequest = requests.find((r: any) => r.replaceAllText?.containsText?.text === "{{PUBLICATION_DATE}}");
-    expect(dateRequest).toBeTruthy();
-    expect((dateRequest as any).replaceAllText.replaceText).toBe("1 กันยายน 2569");
+    const requests = buildBatchUpdateRequests(
+      "1 กันยายน 2569",
+      [sampleProduct],
+      "-- end of listing --",
+      32,
+      63,
+    );
+    const dateRequest = requests.find(
+      (request): request is Extract<
+        GoogleDocsRequest,
+        { replaceAllText: unknown }
+      > => "replaceAllText" in request,
+    );
+    expect(dateRequest?.replaceAllText.replaceText).toBe(
+      "1 กันยายน 2569",
+    );
 
-    const insertTextRequests = requests.filter((r: any) => r.insertInlineImage || r.insertText);
-    const combinedText = insertTextRequests
-      .filter((r: any) => r.insertText)
-      .map((r: any) => r.insertText.text)
+    const combinedText = requests
+      .filter(
+        (request): request is Extract<
+          GoogleDocsRequest,
+          { insertText: unknown }
+        > => "insertText" in request,
+      )
+      .map(({ insertText }) => insertText.text)
       .join("");
     expect(combinedText).toContain("A-1001");
     expect(combinedText).toContain("Used");
@@ -2352,27 +2652,104 @@ describe("buildBatchUpdateRequests", () => {
     expect(combinedText).toContain("draft3");
     expect(combinedText).toContain("-- end of listing --");
 
-    const imageRequest = requests.find((r: any) => r.insertInlineImage);
-    expect((imageRequest as any).insertInlineImage.uri).toBe("https://r2.example.com/signed/A-1001.jpg");
+    const imageRequest = requests.find(
+      (request): request is Extract<
+        GoogleDocsRequest,
+        { insertInlineImage: unknown }
+      > => "insertInlineImage" in request,
+    );
+    expect(imageRequest?.insertInlineImage.uri).toBe(
+      "https://r2.example.com/signed/A-1001.jpg",
+    );
   });
 
-  it("orders multiple products in the given order in the final document", () => {
+  it("uses one delete range and reverse insertion requests so final Product order is preserved", () => {
     const requests = buildBatchUpdateRequests(
       "1 กันยายน 2569",
       [sampleProduct, { ...sampleProduct, productId: "A-1002" }],
       "suffix",
+      32,
+      63,
     );
-    const insertTexts = requests.filter((r: any) => r.insertText).map((r: any) => r.insertText.text);
-    const firstIdIndex = insertTexts.findIndex((t: string) => t.includes("A-1001"));
-    const secondIdIndex = insertTexts.findIndex((t: string) => t.includes("A-1002"));
-    expect(firstIdIndex).toBeLessThan(secondIdIndex);
+    const deleteRequest = requests[0];
+    if (!deleteRequest) {
+      throw new Error("expected delete request");
+    }
+    expect(
+      "deleteContentRange" in deleteRequest
+        ? deleteRequest.deleteContentRange.range
+        : null,
+    ).toEqual({ startIndex: 32, endIndex: 63 });
+    const productTextRequests = requests.filter(
+      (request): request is Extract<
+        GoogleDocsRequest,
+        { insertText: unknown }
+      > =>
+        "insertText" in request &&
+        request.insertText.text.includes("Product ID:"),
+    );
+    expect(productTextRequests.map(({ insertText }) =>
+      insertText.text.match(/A-\d+/)?.[0])).toEqual([
+      "A-1002",
+      "A-1001",
+    ]);
+    expect(productTextRequests.every(({ insertText }) =>
+      insertText.location.index === 32)).toBe(true);
+    const finalRequest = requests.at(-1);
+    expect(
+      finalRequest && "replaceAllText" in finalRequest
+        ? finalRequest.replaceAllText.containsText.text
+        : null,
+    ).toBe("{{PUBLICATION_DATE}}");
   });
 });
 
 describe("fillTemplate", () => {
-  it("captures the suffix between markers, then batchUpdates with a two-request-set call", async () => {
+  it("rejects template markers split across Google Docs text runs", async () => {
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(
+      jsonResponse({
+        body: {
+          content: [{ paragraph: { elements: [
+            { startIndex: 1, textRun: { content: "{{PUBLICATION_DATE}}" } },
+            { startIndex: 21, textRun: { content: "{{PRO" } },
+            { startIndex: 26, textRun: { content: "DUCTS}}" } },
+            { startIndex: 32, textRun: { content: "suffix" } },
+            { startIndex: 38, textRun: { content: "{{END_PRODUCTS}}" } },
+          ] } }],
+        },
+      }),
+    );
+
+    await expect(
+      fillTemplate(
+        fetcher,
+        tokenProvider(),
+        "doc-1",
+        "1 กันยายน 2569",
+        [sampleProduct],
+      ),
+    ).rejects.toThrow(/must remain inside one text run/);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not write again when a prior atomic batch already produced every Product ID", async () => {
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(
+      jsonResponse({
+        body: {
+          content: [{ paragraph: { elements: [{ textRun: { content: "Product ID: A-1001" } }] } }],
+        },
+      }),
+    );
+
+    await fillTemplate(fetcher, tokenProvider(), "doc-1", "1 กันยายน 2569", [sampleProduct]);
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(String(fetcher.mock.calls[0]![0])).not.toContain("batchUpdate");
+  });
+
+  it("captures the suffix between markers, then applies one atomic batchUpdate", async () => {
     const fetcher = vi
-      .fn()
+      .fn<Fetcher>()
       // 1: documents.get to read the template body and locate markers/suffix
       .mockResolvedValueOnce(
         jsonResponse({
@@ -2401,56 +2778,64 @@ describe("fillTemplate", () => {
       // 2: batchUpdate call
       .mockResolvedValueOnce(jsonResponse({ documentId: "doc-1" }));
 
-    await fillTemplate(fetcher as any, tokenProvider(), "doc-1", "1 กันยายน 2569", [sampleProduct]);
+    await fillTemplate(fetcher, tokenProvider(), "doc-1", "1 กันยายน 2569", [sampleProduct]);
 
     expect(fetcher).toHaveBeenCalledTimes(2);
-    const [, batchInit] = fetcher.mock.calls[1];
-    const body = JSON.parse(batchInit.body);
+    const [, batchInit] = fetcher.mock.calls[1]!;
+    const body = JSON.parse(String(batchInit?.body)) as {
+      requests: GoogleDocsRequest[];
+    };
     expect(Array.isArray(body.requests)).toBe(true);
-    const hasSuffixContent = body.requests.some((r: any) => r.insertText?.text?.includes("-- end of listing --"));
+    const hasSuffixContent = body.requests.some(
+      (request) =>
+        "insertText" in request &&
+        request.insertText.text.includes("-- end of listing --"),
+    );
     expect(hasSuffixContent).toBe(true);
   });
 });
 
 describe("verifyDocumentContainsProducts", () => {
   it("returns ok:true when every expected Product ID text appears in the document", async () => {
-    const fetcher = vi.fn().mockResolvedValue(
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(
       jsonResponse({
         body: { content: [{ paragraph: { elements: [{ textRun: { content: "Product ID: A-1001\nProduct ID: A-1002" } }] } }] },
       }),
     );
-    const result = await verifyDocumentContainsProducts(fetcher as any, tokenProvider(), "doc-1", ["A-1001", "A-1002"]);
+    const result = await verifyDocumentContainsProducts(fetcher, tokenProvider(), "doc-1", ["A-1001", "A-1002"]);
     expect(result).toEqual({ ok: true });
   });
 
   it("returns ok:false with the missing Product IDs when any are absent", async () => {
-    const fetcher = vi.fn().mockResolvedValue(
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(
       jsonResponse({ body: { content: [{ paragraph: { elements: [{ textRun: { content: "Product ID: A-1001" } }] } }] } }),
     );
-    const result = await verifyDocumentContainsProducts(fetcher as any, tokenProvider(), "doc-1", ["A-1001", "A-1002"]);
+    const result = await verifyDocumentContainsProducts(fetcher, tokenProvider(), "doc-1", ["A-1001", "A-1002"]);
     expect(result).toEqual({ ok: false, missingProductIds: ["A-1002"] });
   });
 });
 
 describe("finalizeDocument", () => {
   it("renames the doc via Drive and returns the canonical edit URL", async () => {
-    const fetcher = vi.fn().mockResolvedValue(jsonResponse({ id: "doc-1" }));
-    const url = await finalizeDocument(fetcher as any, tokenProvider(), "doc-1", "Publication 2026-09-01");
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(jsonResponse({ id: "doc-1" }));
+    const url = await finalizeDocument(fetcher, tokenProvider(), "doc-1", "Publication 2026-09-01");
     expect(url).toBe("https://docs.google.com/document/d/doc-1/edit");
-    const [requestUrl, init] = fetcher.mock.calls[0];
+    const [requestUrl, init] = fetcher.mock.calls[0]!;
     expect(String(requestUrl)).toContain("drive/v3/files/doc-1");
-    expect(init.method).toBe("PATCH");
-    expect(JSON.parse(init.body)).toEqual({ name: "Publication 2026-09-01" });
+    expect(init?.method).toBe("PATCH");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      name: "Publication 2026-09-01",
+    });
   });
 });
 
 describe("deleteDocument", () => {
   it("DELETEs the Drive file", async () => {
-    const fetcher = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
-    await deleteDocument(fetcher as any, tokenProvider(), "doc-1");
-    const [url, init] = fetcher.mock.calls[0];
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(new Response(null, { status: 204 }));
+    await deleteDocument(fetcher, tokenProvider(), "doc-1");
+    const [url, init] = fetcher.mock.calls[0]!;
     expect(String(url)).toContain("drive/v3/files/doc-1");
-    expect(init.method).toBe("DELETE");
+    expect(init?.method).toBe("DELETE");
   });
 });
 ```
@@ -2464,8 +2849,33 @@ Expected: FAIL — `Cannot find module '../../src/publication/google-docs'`.
 
 ```ts
 // src/publication/google-docs.ts
+import { z } from "zod";
 import type { AccessTokenProvider } from "./google-auth";
 import type { Fetcher } from "../shared/http";
+
+const DriveFilesSchema = z.object({
+  files: z.array(z.object({ id: z.string().min(1) })).optional(),
+});
+
+const DriveFileSchema = z.object({
+  id: z.string().min(1),
+});
+
+const GoogleDocSchema = z.object({
+  body: z.object({
+    content: z.array(z.object({
+      paragraph: z.object({
+        elements: z.array(z.object({
+          startIndex: z.number().int().optional(),
+          endIndex: z.number().int().optional(),
+          textRun: z.object({ content: z.string() }).optional(),
+        })),
+      }).optional(),
+    })),
+  }),
+});
+
+type GoogleDocBody = z.infer<typeof GoogleDocSchema>;
 
 export interface DocProductContent {
   productId: string;
@@ -2477,6 +2887,35 @@ export interface DocProductContent {
   collageImageUrl: string;
 }
 
+export type GoogleDocsRequest =
+  | {
+      deleteContentRange: {
+        range: { startIndex: number; endIndex: number };
+      };
+    }
+  | {
+      insertText: {
+        location: { index: number };
+        text: string;
+      };
+    }
+  | {
+      insertInlineImage: {
+        location: { index: number };
+        uri: string;
+        objectSize: {
+          width: { magnitude: number; unit: "PT" };
+          height: { magnitude: number; unit: "PT" };
+        };
+      };
+    }
+  | {
+      replaceAllText: {
+        containsText: { text: string; matchCase: boolean };
+        replaceText: string;
+      };
+    };
+
 const DRIVE_BASE = "https://www.googleapis.com/drive/v3";
 const DOCS_BASE = "https://docs.googleapis.com/v1";
 
@@ -2485,22 +2924,65 @@ async function authHeaders(tokenProvider: AccessTokenProvider): Promise<HeadersI
   return { Authorization: `Bearer ${token}`, "content-type": "application/json" };
 }
 
+async function parseGoogleJson<T>(
+  response: Response,
+  schema: z.ZodType<T>,
+  action: string,
+): Promise<T> {
+  try {
+    return schema.parse(await response.json());
+  } catch {
+    throw new Error(`google ${action} returned a malformed response`);
+  }
+}
+
+export async function findTemporaryDocument(
+  fetcher: Fetcher,
+  tokenProvider: AccessTokenProvider,
+  driveFolderId: string,
+  publicationRunId: string,
+): Promise<string | null> {
+  const query = [
+    `'${driveFolderId}' in parents`,
+    "trashed = false",
+    `appProperties has { key='publicationRunId' and value='${publicationRunId}' }`,
+  ].join(" and ");
+  const url = new URL(`${DRIVE_BASE}/files`);
+  url.searchParams.set("q", query);
+  url.searchParams.set("fields", "files(id)");
+  url.searchParams.set("pageSize", "2");
+  const response = await fetcher(url, { headers: await authHeaders(tokenProvider) });
+  if (!response.ok) {
+    throw new Error(`google drive lookup failed with status ${response.status}`);
+  }
+  const body = await parseGoogleJson(response, DriveFilesSchema, "drive lookup");
+  if ((body.files?.length ?? 0) > 1) {
+    throw new Error(`multiple temporary documents found for ${publicationRunId}`);
+  }
+  return body.files?.[0]?.id ?? null;
+}
+
 export async function copyTemplate(
   fetcher: Fetcher,
   tokenProvider: AccessTokenProvider,
   templateDocId: string,
   driveFolderId: string,
+  publicationRunId: string,
   newTitle: string,
 ): Promise<string> {
   const response = await fetcher(`${DRIVE_BASE}/files/${templateDocId}/copy`, {
     method: "POST",
     headers: await authHeaders(tokenProvider),
-    body: JSON.stringify({ name: newTitle, parents: [driveFolderId] }),
+    body: JSON.stringify({
+      name: newTitle,
+      parents: [driveFolderId],
+      appProperties: { publicationRunId },
+    }),
   });
   if (!response.ok) {
     throw new Error(`google drive copy failed with status ${response.status}`);
   }
-  const body = (await response.json()) as { id: string };
+  const body = await parseGoogleJson(response, DriveFileSchema, "drive copy");
   return body.id;
 }
 
@@ -2522,35 +3004,50 @@ export function buildBatchUpdateRequests(
   publicationDateText: string,
   products: DocProductContent[],
   suffixText: string,
-): unknown[] {
-  const requests: unknown[] = [
-    {
-      replaceAllText: {
-        containsText: { text: "{{PUBLICATION_DATE}}", matchCase: true },
-        replaceText: publicationDateText,
+  insertionIndex: number,
+  deletionEndIndex: number,
+): GoogleDocsRequest[] {
+  const requests: GoogleDocsRequest[] = [{
+    deleteContentRange: {
+      range: {
+        startIndex: insertionIndex,
+        endIndex: deletionEndIndex,
       },
     },
-  ];
+  }];
 
-  for (const product of products) {
-    requests.push({ insertText: { location: { index: 1 }, text: productBlockText(product) } });
+  for (const product of [...products].reverse()) {
     requests.push({
-      insertInlineImage: { location: { index: 1 }, uri: product.collageImageUrl, objectSize: { width: { magnitude: 200, unit: "PT" }, height: { magnitude: 200, unit: "PT" } } },
+      insertText: {
+        location: { index: insertionIndex },
+        text: `${suffixText}\n\n`,
+      },
     });
-    requests.push({ insertText: { location: { index: 1 }, text: `${suffixText}\n\n` } });
+    requests.push({
+      insertText: {
+        location: { index: insertionIndex },
+        text: productBlockText(product),
+      },
+    });
+    requests.push({
+      insertInlineImage: {
+        location: { index: insertionIndex },
+        uri: product.collageImageUrl,
+        objectSize: {
+          width: { magnitude: 200, unit: "PT" },
+          height: { magnitude: 200, unit: "PT" },
+        },
+      },
+    });
   }
 
+  requests.push({
+    replaceAllText: {
+      containsText: { text: "{{PUBLICATION_DATE}}", matchCase: true },
+      replaceText: publicationDateText,
+    },
+  });
   return requests;
-}
-
-interface DocParagraphElement {
-  startIndex?: number;
-  endIndex?: number;
-  textRun?: { content: string };
-}
-
-interface GoogleDocBody {
-  body: { content: Array<{ paragraph?: { elements: DocParagraphElement[] } }> };
 }
 
 function extractPlainText(doc: GoogleDocBody): string {
@@ -2563,15 +3060,77 @@ function extractPlainText(doc: GoogleDocBody): string {
   return parts.join("");
 }
 
-function extractSuffixBetweenMarkers(fullText: string): string {
+interface IndexedTextRun {
+  startIndex: number;
+  content: string;
+}
+
+function indexedTextRuns(doc: GoogleDocBody): IndexedTextRun[] {
+  const runs: IndexedTextRun[] = [];
+  for (const block of doc.body.content) {
+    for (const element of block.paragraph?.elements ?? []) {
+      if (element.textRun && element.startIndex !== undefined) {
+        runs.push({
+          startIndex: element.startIndex,
+          content: element.textRun.content,
+        });
+      }
+    }
+  }
+  return runs;
+}
+
+function documentIndexAtOffset(
+  runs: IndexedTextRun[],
+  textOffset: number,
+): number {
+  let consumed = 0;
+  for (const run of runs) {
+    const next = consumed + run.content.length;
+    if (textOffset <= next) {
+      return run.startIndex + textOffset - consumed;
+    }
+    consumed = next;
+  }
+  throw new Error("template marker index is outside document text runs");
+}
+
+function findTemplateRegion(doc: GoogleDocBody): {
+  insertionIndex: number;
+  deletionEndIndex: number;
+  suffixText: string;
+} {
   const startMarker = "{{PRODUCTS}}";
   const endMarker = "{{END_PRODUCTS}}";
-  const startIdx = fullText.indexOf(startMarker);
-  const endIdx = fullText.indexOf(endMarker);
-  if (startIdx === -1 || endIdx === -1 || endIdx < startIdx) {
+  const runs = indexedTextRuns(doc);
+  for (const marker of [
+    "{{PUBLICATION_DATE}}",
+    startMarker,
+    endMarker,
+  ]) {
+    if (!runs.some((run) => run.content.includes(marker))) {
+      throw new Error(
+        `template marker ${marker} must remain inside one text run`,
+      );
+    }
+  }
+  const fullText = runs.map((run) => run.content).join("");
+  const startOffset = fullText.indexOf(startMarker);
+  const endOffset = fullText.indexOf(endMarker);
+  if (startOffset === -1 || endOffset < startOffset + startMarker.length) {
     throw new Error("template missing {{PRODUCTS}} / {{END_PRODUCTS}} markers");
   }
-  return fullText.slice(startIdx + startMarker.length, endIdx);
+  return {
+    insertionIndex: documentIndexAtOffset(runs, startOffset),
+    deletionEndIndex: documentIndexAtOffset(
+      runs,
+      endOffset + endMarker.length,
+    ),
+    suffixText: fullText.slice(
+      startOffset + startMarker.length,
+      endOffset,
+    ).trim(),
+  };
 }
 
 export async function fillTemplate(
@@ -2585,16 +3144,25 @@ export async function fillTemplate(
   if (!getResponse.ok) {
     throw new Error(`google docs get failed with status ${getResponse.status}`);
   }
-  const doc = (await getResponse.json()) as GoogleDocBody;
+  const doc = await parseGoogleJson(getResponse, GoogleDocSchema, "docs get");
   const fullText = extractPlainText(doc);
-  const suffixText = extractSuffixBetweenMarkers(fullText).trim();
-
-  const requests = [
-    ...buildBatchUpdateRequests(publicationDateText, products, suffixText),
-    { replaceAllText: { containsText: { text: "{{END_PRODUCTS}}", matchCase: true }, replaceText: "" } },
-    { replaceAllText: { containsText: { text: suffixText, matchCase: true }, replaceText: "" } },
-    { replaceAllText: { containsText: { text: "{{PRODUCTS}}", matchCase: true }, replaceText: "" } },
-  ];
+  const expectedProductIds = products.map((product) => product.productId);
+  const alreadyComplete =
+    !fullText.includes("{{PRODUCTS}}") &&
+    expectedProductIds.every((productId) =>
+      fullText.includes(`Product ID: ${productId}`),
+    );
+  if (alreadyComplete) {
+    return;
+  }
+  const region = findTemplateRegion(doc);
+  const requests = buildBatchUpdateRequests(
+    publicationDateText,
+    products,
+    region.suffixText,
+    region.insertionIndex,
+    region.deletionEndIndex,
+  );
 
   const batchResponse = await fetcher(`${DOCS_BASE}/documents/${docId}:batchUpdate`, {
     method: "POST",
@@ -2616,7 +3184,7 @@ export async function verifyDocumentContainsProducts(
   if (!response.ok) {
     throw new Error(`google docs get failed with status ${response.status}`);
   }
-  const doc = (await response.json()) as GoogleDocBody;
+  const doc = await parseGoogleJson(response, GoogleDocSchema, "docs get");
   const fullText = extractPlainText(doc);
   const missingProductIds = expectedProductIds.filter((id) => !fullText.includes(`Product ID: ${id}`));
   if (missingProductIds.length > 0) {
@@ -2656,7 +3224,7 @@ export async function deleteDocument(fetcher: Fetcher, tokenProvider: AccessToke
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/publication/google-docs.test.ts`
-Expected: PASS — 8 tests green.
+Expected: PASS — 12 tests green.
 
 - [ ] **Step 5: Full check and commit**
 
@@ -2838,276 +3406,20 @@ git commit -m "feat(line): add publication success/validation-failure/workflow-f
 
 ---
 
-## Task 9: Publication service orchestration
+## Task 9: Retry-safe publication stages
 
 **Files:**
 - Create: `src/publication/service.ts`
 - Test: `test/publication/service.test.ts`
 
 **Interfaces:**
-- Consumes: everything produced by Tasks 1–8:
-  `acquireOrResumeJob`, `setJobState`, `getProductCache`, `putProductCollage`, `putProductCaptions` (Task 1);
-  `findReadyRunForDate`, `markRunGenerating`, `markRunGenerated`, `markRunNeedsCorrection`, `markRunFailed`, `updateProductCollage` (Task 2);
-  `validateRunCompleteness`, `formatValidationErrorSummary` (Task 3);
-  `generateCollage`, `collageR2Key` (Task 4);
-  `toCaptionRequestProducts`, `generateCaptionsForRun` (Task 5);
-  `createGoogleAuthClient` (Task 6);
-  `copyTemplate`, `fillTemplate`, `verifyDocumentContainsProducts`, `finalizeDocument`, `deleteDocument` (Task 7);
-  `buildPublicationSuccessMessage`, `buildPublicationValidationFailureMessage`, `buildPublicationWorkflowFailureMessage` (Task 8);
-  `pushTextMessage` (assumed, import plan).
+- Consumes: publication repository (Task 1), Airtable client (Task 2), validator (Task 3), collage generator (Task 4), shared `AssetStore` (Import Task 6), caption generator (Task 5), Google auth (Task 6), Google Docs client (Task 7), and LINE message builders (Task 8).
 - Produces:
-  ```ts
-  export interface PublicationServiceDeps {
-    db: D1Database;
-    bucket: R2Bucket;
-    images: ImagesBinding;
-    fetcher: Fetcher;
-    anthropic: Pick<Anthropic, "messages">;
-    clock: Clock;
-    config: AppConfig;
-    airtableToken: string;
-    googleServiceAccountJson: string;
-    lineGroupId: string;
-    signCollageUrl(r2Key: string): Promise<string>; // short-lived signed R2 URL, never logged
-  }
-
-  export type PublicationOutcome =
-    | { kind: "succeeded"; result: PublicationResult }
-    | { kind: "already_succeeded"; result: PublicationResult }
-    | { kind: "validation_failed" }
-    | { kind: "no_ready_run" };
-
-  export async function runPublicationForRun(
-    deps: PublicationServiceDeps,
-    airtableRunId: string,
-    correlationId: string,
-  ): Promise<PublicationOutcome>;
-
-  export async function findAndRunTodaysPublication(
-    deps: PublicationServiceDeps,
-    correlationId: string,
-  ): Promise<PublicationOutcome>;
-  ```
-  used by `publication/workflow.ts` (Task 10) and `routes/docs.ts` (Task 11).
-
-- [ ] **Step 1: Write the failing test**
 
 ```ts
-// test/publication/service.test.ts
-import { describe, expect, it, vi, beforeEach } from "vitest";
-import { env } from "cloudflare:test";
-import { runPublicationForRun, findAndRunTodaysPublication } from "../../src/publication/service";
-import type { PublicationServiceDeps } from "../../src/publication/service";
-import { COLLAGE_BASE_R2_KEY } from "../../src/publication/collage";
-
-const clock = { now: () => new Date("2026-09-01T05:00:00.000Z") };
-
-const config = {
-  airtableBaseId: "base123",
-  airtableProductsTableId: "tblProducts",
-  airtablePublicationRunsTableId: "tblRuns",
-  claudeModel: "claude-opus-5",
-  claudeRequestInputTokenLimit: 150000,
-  googleDriveFolderId: "folder-1",
-  googleTemplateDocId: "template-doc-1",
-  timeZone: "Asia/Bangkok",
-} as any;
-
-function airtableProductFields(overrides: Record<string, unknown> = {}) {
-  return {
-    "Product ID": "A-1001",
-    "Product Images": [
-      { id: "a", url: "https://dl.airtable.com/a.jpg" },
-      { id: "b", url: "https://dl.airtable.com/b.jpg" },
-      { id: "c", url: "https://dl.airtable.com/c.jpg" },
-      { id: "d", url: "https://dl.airtable.com/d.jpg" },
-    ],
-    "Brand Name": "Nike",
-    "Model Name": "Air Max",
-    "Condition Type": "Used",
-    Size: "42",
-    Description: "Good condition",
-    "LINE Square Price": 1290,
-    "IG Price": 1390,
-    ...overrides,
-  };
-}
-
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status });
-}
-
-function buildFetcherRouter(handlers: Array<{ match: (url: string, init?: RequestInit) => boolean; respond: (url: string, init?: RequestInit) => Response }>) {
-  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input);
-    const handler = handlers.find((h) => h.match(url, init));
-    if (!handler) throw new Error(`unhandled fetch: ${init?.method ?? "GET"} ${url}`);
-    return handler.respond(url, init);
-  });
-}
-
-function fakeImages() {
-  return {
-    input: () => {
-      const t: any = {
-        transform: () => t,
-        draw: () => t,
-        output: async () => ({ response: () => new Response(new Uint8Array([1])) }),
-      };
-      return t;
-    },
-  };
-}
-
-async function fakeBucketWithCollageBase() {
-  const store = new Map<string, Uint8Array>();
-  store.set(COLLAGE_BASE_R2_KEY, new Uint8Array([1]));
-  for (const key of ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]) store.set(key, new Uint8Array([1]));
-  return {
-    async get(key: string) {
-      const value = store.get(key);
-      return value ? { body: new ReadableStream() } : null;
-    },
-    async put(key: string, value: unknown) {
-      store.set(key, value as Uint8Array);
-    },
-  } as unknown as R2Bucket;
-}
-
-describe("runPublicationForRun", () => {
-  beforeEach(async () => {
-    await env.DB.exec("DELETE FROM publication_jobs");
-    await env.DB.exec("DELETE FROM publication_product_cache");
-  });
-
-  it("blocks the whole document and reports validation failure when a product is missing required fields", async () => {
-    const fetcher = buildFetcherRouter([
-      {
-        match: (url) => url.includes("tblRuns") && !url.includes("/rec-run-1"),
-        respond: () =>
-          jsonResponse({
-            records: [{ id: "rec-run-1", fields: { "Publication Date": "2026-09-01", Status: "Ready", Products: ["rec-1001"] } }],
-          }),
-      },
-      {
-        match: (url) => url.includes("tblProducts"),
-        respond: () => jsonResponse({ records: [{ id: "rec-1001", fields: airtableProductFields({ "Brand Name": "" }) }] }),
-      },
-      {
-        match: (url, init) => url.includes("rec-run-1") && init?.method === "PATCH",
-        respond: (_url, init) => {
-          const body = JSON.parse((init as any).body);
-          expect(body.fields.Status).toBe("Draft");
-          expect(body.fields["Error Summary"]).toContain("Brand Name");
-          return jsonResponse({ id: "rec-run-1" });
-        },
-      },
-    ]);
-
-    const pushed: string[] = [];
-    const deps: PublicationServiceDeps = {
-      db: env.DB,
-      bucket: await fakeBucketWithCollageBase(),
-      images: fakeImages() as any,
-      fetcher: fetcher as any,
-      anthropic: { messages: { create: vi.fn(), countTokens: vi.fn() } } as any,
-      clock,
-      config,
-      airtableToken: "airtable-token",
-      googleServiceAccountJson: JSON.stringify({ client_email: "svc@example.com", private_key: "unused-in-this-test" }),
-      lineGroupId: "group-1",
-      signCollageUrl: async (key) => `https://r2.example.com/signed/${key}`,
-    };
-
-    // pushTextMessage is called by the service; intercept via module mock in the real test file.
-    const outcome = await runPublicationForRun(deps, "rec-run-1", "corr-1");
-    expect(outcome.kind).toBe("validation_failed");
-  });
-});
-
-describe("findAndRunTodaysPublication", () => {
-  beforeEach(async () => {
-    await env.DB.exec("DELETE FROM publication_jobs");
-    await env.DB.exec("DELETE FROM publication_product_cache");
-  });
-
-  it("returns no_ready_run when no Publication Run is Ready for today", async () => {
-    const fetcher = buildFetcherRouter([
-      { match: (url) => url.includes("tblRuns"), respond: () => jsonResponse({ records: [] }) },
-    ]);
-    const deps: PublicationServiceDeps = {
-      db: env.DB,
-      bucket: await fakeBucketWithCollageBase(),
-      images: fakeImages() as any,
-      fetcher: fetcher as any,
-      anthropic: { messages: { create: vi.fn(), countTokens: vi.fn() } } as any,
-      clock,
-      config,
-      airtableToken: "airtable-token",
-      googleServiceAccountJson: JSON.stringify({ client_email: "svc@example.com", private_key: "unused" }),
-      lineGroupId: "group-1",
-      signCollageUrl: async (key) => `https://r2.example.com/signed/${key}`,
-    };
-    const outcome = await findAndRunTodaysPublication(deps, "corr-1");
-    expect(outcome.kind).toBe("no_ready_run");
-  });
-});
-```
-
-Because `runPublicationForRun` calls `pushTextMessage` from `src/line/client.ts` as a side effect, mock that module at the top of the real test file before the imports resolve:
-
-```ts
-vi.mock("../../src/line/client", () => ({ pushTextMessage: vi.fn().mockResolvedValue(undefined) }));
-```
-
-Add this `vi.mock` call as the first statement in `test/publication/service.test.ts`, above the other imports, per Vitest hoisting rules.
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `npx vitest run test/publication/service.test.ts`
-Expected: FAIL — `Cannot find module '../../src/publication/service'`.
-
-- [ ] **Step 3: Write the implementation**
-
-```ts
-// src/publication/service.ts
-import type Anthropic from "@anthropic-ai/sdk";
-import type { AppConfig } from "../config";
-import type { Clock } from "../shared/time";
-import { formatThaiDate } from "../shared/time";
-import type { Fetcher } from "../shared/http";
-import { pushTextMessage } from "../line/client";
-import {
-  buildPublicationSuccessMessage,
-  buildPublicationValidationFailureMessage,
-  buildPublicationWorkflowFailureMessage,
-} from "../line/messages";
-import {
-  acquireOrResumeJob,
-  setJobState,
-  getProductCache,
-  putProductCollage,
-  putProductCaptions,
-} from "../db/publication-repository";
-import {
-  findReadyRunForDate,
-  loadRunById,
-  markRunGenerating,
-  markRunGenerated,
-  markRunNeedsCorrection,
-  markRunFailed,
-  updateProductCollage,
-} from "./airtable-runs";
-import { validateRunCompleteness, formatValidationErrorSummary } from "./validator";
-import { generateCollage, collageR2Key, type ImagesBinding } from "./collage";
-import { toCaptionRequestProducts, generateCaptionsForRun } from "./captions";
-import { createGoogleAuthClient } from "./google-auth";
-import { copyTemplate, fillTemplate, verifyDocumentContainsProducts, finalizeDocument, deleteDocument } from "./google-docs";
-import type { DocProductContent } from "./google-docs";
-import type { PublicationProduct, PublicationRun, PublicationResult, CaptionSet } from "./types";
-
 export interface PublicationServiceDeps {
   db: D1Database;
+  assets: AssetStore;
   bucket: R2Bucket;
   images: ImagesBinding;
   fetcher: Fetcher;
@@ -3116,881 +3428,2417 @@ export interface PublicationServiceDeps {
   config: AppConfig;
   airtableToken: string;
   googleServiceAccountJson: string;
-  lineGroupId: string;
-  signCollageUrl(r2Key: string): Promise<string>;
+  notify(text: string): Promise<void>;
 }
 
-export type PublicationOutcome =
-  | { kind: "succeeded"; result: PublicationResult }
+export interface ValidatedPublication {
+  run: PublicationRun;
+  thaiDate: string;
+}
+
+export interface PreparedProductOutput {
+  product: PublicationProduct;
+  collageR2Key: string;
+  captionDrafts: [string, string, string];
+}
+
+export interface PreparedPublication extends ValidatedPublication {
+  outputs: PreparedProductOutput[];
+}
+
+export type ValidationStageOutcome =
+  | { kind: "valid"; value: ValidatedPublication }
   | { kind: "already_succeeded"; result: PublicationResult }
-  | { kind: "validation_failed" }
-  | { kind: "no_ready_run" };
+  | {
+      kind: "validation_failed";
+      thaiDate: string;
+      validation: ValidationResult;
+    };
 
-function airtableRunUrl(config: AppConfig, airtableRunId: string): string {
-  return `https://airtable.com/${config.airtableBaseId}/${config.airtablePublicationRunsTableId}/${airtableRunId}`;
+export async function validatePublication(
+  deps: PublicationServiceDeps,
+  publicationRunId: string,
+  correlationId: string,
+): Promise<ValidationStageOutcome>;
+
+export async function notifyPublicationValidationFailure(
+  deps: PublicationServiceDeps,
+  publicationRunId: string,
+  thaiDate: string,
+  validation: ValidationResult,
+): Promise<void>;
+
+export async function preparePublicationOutputs(
+  deps: PublicationServiceDeps,
+  validated: ValidatedPublication,
+): Promise<PreparedPublication>;
+
+export async function ensureTemporaryDocument(
+  deps: PublicationServiceDeps,
+  prepared: PreparedPublication,
+): Promise<string>;
+
+export async function fillAndVerifyDocument(
+  deps: PublicationServiceDeps,
+  prepared: PreparedPublication,
+  tempDocId: string,
+): Promise<void>;
+
+export async function finalizePublication(
+  deps: PublicationServiceDeps,
+  prepared: PreparedPublication,
+  tempDocId: string,
+): Promise<PublicationResult>;
+
+export async function notifyPublicationSuccess(
+  deps: PublicationServiceDeps,
+  prepared: PreparedPublication,
+  result: PublicationResult,
+): Promise<void>;
+
+export async function failPublicationAfterExhaustion(
+  deps: PublicationServiceDeps,
+  publicationRunId: string,
+  reason: string,
+  thaiDate: string | null,
+): Promise<void>;
+```
+
+Each function is one durable Workflow stage. No function wraps the whole publication in a catch that deletes the temporary document on its first transient failure. D1 caches valid captions and collages, so a retried output stage requests only missing Product IDs. Google copy recovery first reads D1, then searches Drive by `appProperties.publicationRunId`, then copies only if neither source has a document ID.
+
+- [ ] **Step 1: Write failing stage tests**
+
+```ts
+// test/publication/service.test.ts
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { generateKeyPairSync } from "node:crypto";
+import { env } from "cloudflare:test";
+import {
+  ensureTemporaryDocument,
+  failPublicationAfterExhaustion,
+  preparePublicationOutputs,
+  validatePublication,
+  type PublicationServiceDeps,
+  type ValidatedPublication,
+} from "../../src/publication/service";
+
+let serviceAccountPrivateKey = "";
+
+beforeAll(() => {
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
+  serviceAccountPrivateKey = privateKey;
+});
+
+const clock = {
+  now: () => new Date("2026-09-01T17:30:00.000Z"),
+};
+
+function baseDeps(
+  overrides: Partial<PublicationServiceDeps> = {},
+): PublicationServiceDeps {
+  return {
+    db: env.DB,
+    assets: {
+      putOriginal: vi.fn(),
+      signUrl: vi.fn(async (key: string) =>
+        `https://worker.example/assets/${encodeURIComponent(key)}?expires=1&signature=x`,
+      ),
+    } as PublicationServiceDeps["assets"],
+    bucket: {
+      get: vi.fn(),
+      put: vi.fn(),
+    } as unknown as R2Bucket,
+    images: {} as PublicationServiceDeps["images"],
+    fetcher: vi.fn() as unknown as typeof fetch,
+    anthropic: {
+      messages: {
+        create: vi.fn(),
+        countTokens: vi.fn(),
+      },
+    } as unknown as PublicationServiceDeps["anthropic"],
+    clock,
+    config: {
+      airtableBaseId: "base123",
+      airtableProductsTableId: "tblProducts",
+      airtablePublicationRunsTableId: "tblRuns",
+      googleDriveFolderId: "folder-1",
+      googleTemplateDocId: "template-1",
+      claudeModel: "claude-opus-5",
+      claudeRequestInputTokenLimit: 150_000,
+      publicBaseUrl: "https://worker.example",
+      timeZone: "Asia/Bangkok",
+    } as PublicationServiceDeps["config"],
+    airtableToken: "airtable-token",
+    googleServiceAccountJson: JSON.stringify({
+      client_email: "svc@example.com",
+      private_key: serviceAccountPrivateKey,
+    }),
+    notify: vi.fn(),
+    ...overrides,
+  };
 }
 
-async function ensureCollage(deps: PublicationServiceDeps, product: PublicationProduct): Promise<string> {
-  const cache = await getProductCache(deps.db, product.airtableRecordId, product.productId);
+const product = {
+  airtableRecordId: "rec-product-1",
+  productId: "A-1001",
+  orderedImageKeys: ["assets/1.jpg", "assets/2.jpg", "assets/3.jpg", "assets/4.jpg"],
+  brandName: "Nike",
+  modelName: "Air Max",
+  conditionType: "Used",
+  size: "42",
+  description: "Good condition",
+  lineSquarePrice: 1290,
+  igPrice: 1390,
+};
+
+const validated: ValidatedPublication = {
+  run: {
+    airtableRunId: "rec-run-1",
+    publicationDate: "2026-09-02",
+    status: "Ready",
+    products: [product],
+  },
+  thaiDate: "2 กันยายน 2569",
+};
+
+describe("publication stages", () => {
+  beforeEach(async () => {
+    await env.DB.exec("DELETE FROM publication_product_cache");
+    await env.DB.exec("DELETE FROM publication_jobs");
+  });
+
+  it("loads the exact Airtable Publication Run requested by Workflow params", async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: "rec-run-1",
+        fields: {
+          "Publication Date": "2026-09-02",
+          Status: "Ready",
+          Products: [],
+        },
+      })));
+    const deps = baseDeps({ fetcher: fetcher as unknown as typeof fetch });
+
+    const outcome = await validatePublication(deps, "rec-run-1", "corr-1");
+
+    expect(outcome.kind).toBe("valid");
+    expect(String(fetcher.mock.calls[0]![0])).toContain("tblRuns/rec-run-1");
+  });
+
+  it("returns validation_failed before any Google, Claude, Images, or R2 side effect", async () => {
+    const invalid = {
+      ...product,
+      description: "",
+    };
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: "rec-run-1",
+        fields: {
+          "Publication Date": "2026-09-02",
+          Status: "Ready",
+          Products: ["rec-product-1"],
+        },
+      })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        records: [{ id: "rec-product-1", fields: {
+          "Product ID": invalid.productId,
+          "Product Images": invalid.orderedImageKeys.map((r2Key, index) => ({
+            id: String(index),
+            url: `https://dl.airtable.com/${index}`,
+            filename: r2Key.slice("assets/".length),
+          })),
+          "Brand Name": invalid.brandName,
+          "Model Name": invalid.modelName,
+          "Condition Type": invalid.conditionType,
+          Size: invalid.size,
+          Description: invalid.description,
+          "LINE Square Price": invalid.lineSquarePrice,
+          "IG Price": invalid.igPrice,
+        } }],
+      })))
+      .mockResolvedValue(new Response(JSON.stringify({ id: "rec-run-1" })));
+    const deps = baseDeps({ fetcher: fetcher as unknown as typeof fetch });
+
+    const outcome = await validatePublication(deps, "rec-run-1", "corr-1");
+
+    expect(outcome).toEqual({
+      kind: "validation_failed",
+      thaiDate: "2 กันยายน 2569",
+      validation: {
+        valid: false,
+        productsMissingFields: [{
+          productId: "A-1001",
+          missingFields: ["Description"],
+        }],
+      },
+    });
+    expect(deps.notify).not.toHaveBeenCalled();
+    expect(deps.anthropic.messages.create).not.toHaveBeenCalled();
+    expect(deps.bucket.put).not.toHaveBeenCalled();
+  });
+
+  it("reuses cached valid outputs and calls Claude only for an uncached Product ID", async () => {
+    await env.DB.prepare(
+      `INSERT INTO publication_jobs
+         (publication_run_id, state, correlation_id, attempt_count, created_at, updated_at)
+       VALUES (?, 'generating', ?, 0, ?, ?)`,
+    ).bind("rec-run-1", "corr-1", clock.now().toISOString(), clock.now().toISOString()).run();
+    await env.DB.prepare(
+      `INSERT INTO publication_product_cache
+         (publication_run_id, product_id, collage_r2_key, captions_json, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).bind(
+      "rec-run-1",
+      "A-1001",
+      "products/A-1001/collage/1080x1080.jpg",
+      JSON.stringify(["หนึ่ง", "สอง", "สาม"]),
+      clock.now().toISOString(),
+    ).run();
+    const deps = baseDeps();
+
+    const prepared = await preparePublicationOutputs(deps, validated);
+
+    expect(prepared.outputs[0]!.captionDrafts).toEqual(["หนึ่ง", "สอง", "สาม"]);
+    expect(deps.anthropic.messages.create).not.toHaveBeenCalled();
+    expect(deps.bucket.put).not.toHaveBeenCalled();
+  });
+
+  it("rediscovers a copied Drive document when D1 persistence was missed", async () => {
+    await env.DB.prepare(
+      `INSERT INTO publication_jobs
+         (publication_run_id, state, correlation_id, attempt_count, created_at, updated_at)
+       VALUES (?, 'generating', ?, 0, ?, ?)`,
+    ).bind("rec-run-1", "corr-1", clock.now().toISOString(), clock.now().toISOString()).run();
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "google-token",
+        expires_in: 3600,
+      })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        files: [{ id: "temp-doc-existing" }],
+      })));
+    const deps = baseDeps({ fetcher: fetcher as unknown as typeof fetch });
+
+    const id = await ensureTemporaryDocument(
+      deps,
+      { ...validated, outputs: [] },
+    );
+
+    expect(id).toBe("temp-doc-existing");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(String(fetcher.mock.calls[1]![0])).toContain("drive/v3/files");
+    const row = await env.DB.prepare(
+      "SELECT temp_doc_id FROM publication_jobs WHERE publication_run_id = ?",
+    ).bind("rec-run-1").first<{ temp_doc_id: string | null }>();
+    expect(row?.temp_doc_id).toBe("temp-doc-existing");
+  });
+
+  it("deletes the temporary document and marks Failed only when exhaustion cleanup is called", async () => {
+    await env.DB.prepare(
+      `INSERT INTO publication_jobs
+         (publication_run_id, state, correlation_id, temp_doc_id, attempt_count, created_at, updated_at)
+       VALUES (?, 'generating', ?, ?, 0, ?, ?)`,
+    ).bind("rec-run-1", "corr-1", "temp-doc-1", clock.now().toISOString(), clock.now().toISOString()).run();
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "google-token",
+        expires_in: 3600,
+      })))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "rec-run-1" })));
+    const deps = baseDeps({ fetcher: fetcher as unknown as typeof fetch });
+
+    await failPublicationAfterExhaustion(
+      deps,
+      "rec-run-1",
+      "google unavailable",
+      "2 กันยายน 2569",
+    );
+
+    expect(fetcher.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(true);
+    expect(deps.notify).toHaveBeenCalledWith(
+      expect.stringContaining("2 กันยายน 2569"),
+    );
+    const row = await env.DB.prepare(
+      "SELECT state, temp_doc_id FROM publication_jobs WHERE publication_run_id = ?",
+    ).bind("rec-run-1").first<{ state: string; temp_doc_id: string | null }>();
+    expect(row).toEqual({ state: "failed", temp_doc_id: null });
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `npx vitest run test/publication/service.test.ts`
+Expected: FAIL with `Cannot find module '../../src/publication/service'`.
+
+- [ ] **Step 3: Implement the stage functions**
+
+```ts
+// src/publication/service.ts
+import type Anthropic from "@anthropic-ai/sdk";
+import type { AppConfig } from "../config";
+import type { AssetStore } from "../import/asset-store";
+import type { Fetcher } from "../shared/http";
+import type { Clock } from "../shared/time";
+import {
+  acquireOrResumeJob,
+  getProductCache,
+  putProductCaptions,
+  putProductCollage,
+  setJobState,
+  setTempDocId,
+} from "../db/publication-repository";
+import {
+  loadRunById,
+  markRunFailed,
+  markRunGenerated,
+  markRunGenerating,
+  markRunNeedsCorrection,
+  updateProductCollage,
+} from "./airtable-runs";
+import { generateCollage, collageR2Key, type ImagesBinding } from "./collage";
+import { generateCaptionsForRun, toCaptionRequestProducts } from "./captions";
+import { createGoogleAuthClient } from "./google-auth";
+import {
+  copyTemplate,
+  deleteDocument,
+  fillTemplate,
+  finalizeDocument,
+  findTemporaryDocument,
+  verifyDocumentContainsProducts,
+  type DocProductContent,
+} from "./google-docs";
+import type {
+  PublicationProduct,
+  PublicationResult,
+  PublicationRun,
+} from "./types";
+import {
+  formatValidationErrorSummary,
+  validateRunCompleteness,
+  type ValidationResult,
+} from "./validator";
+import {
+  buildPublicationSuccessMessage,
+  buildPublicationValidationFailureMessage,
+  buildPublicationWorkflowFailureMessage,
+} from "../line/messages";
+
+export interface PublicationServiceDeps {
+  db: D1Database;
+  assets: AssetStore;
+  bucket: R2Bucket;
+  images: ImagesBinding;
+  fetcher: Fetcher;
+  anthropic: Pick<Anthropic, "messages">;
+  clock: Clock;
+  config: AppConfig;
+  airtableToken: string;
+  googleServiceAccountJson: string;
+  notify(text: string): Promise<void>;
+}
+
+export interface ValidatedPublication {
+  run: PublicationRun;
+  thaiDate: string;
+}
+
+export interface PreparedProductOutput {
+  product: PublicationProduct;
+  collageR2Key: string;
+  captionDrafts: [string, string, string];
+}
+
+export interface PreparedPublication extends ValidatedPublication {
+  outputs: PreparedProductOutput[];
+}
+
+export type ValidationStageOutcome =
+  | { kind: "valid"; value: ValidatedPublication }
+  | { kind: "already_succeeded"; result: PublicationResult }
+  | {
+      kind: "validation_failed";
+      thaiDate: string;
+      validation: ValidationResult;
+    };
+
+function thaiDate(isoDate: string): string {
+  return new Intl.DateTimeFormat(
+    "th-TH-u-ca-buddhist-nu-latn",
+    {
+      timeZone: "Asia/Bangkok",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    },
+  ).format(new Date(`${isoDate}T12:00:00.000Z`));
+}
+
+function airtableRunUrl(config: AppConfig, runId: string): string {
+  return `https://airtable.com/${config.airtableBaseId}/${config.airtablePublicationRunsTableId}/${runId}`;
+}
+
+function cachedDrafts(value: string | null): [string, string, string] | null {
+  if (!value) return null;
+  const parsed: unknown = JSON.parse(value);
+  if (
+    Array.isArray(parsed) &&
+    parsed.length === 3 &&
+    parsed.every((draft) =>
+      typeof draft === "string" &&
+      draft.trim().length > 0 &&
+      draft.length <= 400 &&
+      /[ก-๙]/.test(draft),
+    )
+  ) {
+    return [parsed[0], parsed[1], parsed[2]];
+  }
+  return null;
+}
+
+export async function validatePublication(
+  deps: PublicationServiceDeps,
+  publicationRunId: string,
+  correlationId: string,
+): Promise<ValidationStageOutcome> {
+  const acquired = await acquireOrResumeJob(
+    deps.db,
+    deps.clock,
+    publicationRunId,
+    correlationId,
+  );
+  const run = await loadRunById(
+    deps.fetcher,
+    deps.config,
+    deps.airtableToken,
+    publicationRunId,
+  );
+  if (
+    acquired.alreadySucceeded &&
+    acquired.job.googleDocId &&
+    acquired.job.googleDocUrl
+  ) {
+    return {
+      kind: "already_succeeded",
+      result: {
+        publicationRunId,
+        googleDocId: acquired.job.googleDocId,
+        googleDocUrl: acquired.job.googleDocUrl,
+        productIds: run.products.map((product) => product.productId),
+      },
+    };
+  }
+  const displayDate = thaiDate(run.publicationDate);
+  await setJobState(deps.db, deps.clock, publicationRunId, "validating");
+  const validation = validateRunCompleteness(run.products);
+  if (!validation.valid) {
+    const summary = formatValidationErrorSummary(validation);
+    await setJobState(
+      deps.db,
+      deps.clock,
+      publicationRunId,
+      "validation_failed",
+      { validationResultJson: JSON.stringify(validation) },
+    );
+    await markRunNeedsCorrection(
+      deps.fetcher,
+      deps.config,
+      deps.airtableToken,
+      publicationRunId,
+      summary,
+    );
+    return {
+      kind: "validation_failed",
+      thaiDate: displayDate,
+      validation,
+    };
+  }
+
+  return { kind: "valid", value: { run, thaiDate: displayDate } };
+}
+
+export async function notifyPublicationValidationFailure(
+  deps: PublicationServiceDeps,
+  publicationRunId: string,
+  displayDate: string,
+  validation: ValidationResult,
+): Promise<void> {
+  await deps.notify(buildPublicationValidationFailureMessage({
+    thaiDate: displayDate,
+    validation,
+    airtableRunUrl: airtableRunUrl(deps.config, publicationRunId),
+  }));
+}
+
+async function ensureCollage(
+  deps: PublicationServiceDeps,
+  publicationRunId: string,
+  product: PublicationProduct,
+): Promise<string> {
+  const cache = await getProductCache(
+    deps.db,
+    publicationRunId,
+    product.productId,
+  );
   if (cache.collageR2Key) return cache.collageR2Key;
 
-  const firstFour = product.orderedImageKeys.slice(0, 4);
-  if (firstFour.length < 4) {
-    throw new Error(`product ${product.productId} does not have four ordered images at collage time`);
+  const [first, second, third, fourth] =
+    product.orderedImageKeys;
+  if (!first || !second || !third || !fourth) {
+    throw new Error(
+      `four ordered images required for ${product.productId}`,
+    );
   }
-  const collageBytes = await generateCollage(deps.bucket, deps.images, firstFour as [string, string, string, string]);
+  const bytes = await generateCollage(
+    deps.bucket,
+    deps.images,
+    [first, second, third, fourth],
+  );
   const key = collageR2Key(product.productId);
-  await deps.bucket.put(key, collageBytes);
-  await putProductCollage(deps.db, deps.clock, product.airtableRecordId, product.productId, key);
+  await deps.bucket.put(key, bytes);
+  await putProductCollage(
+    deps.db,
+    deps.clock,
+    publicationRunId,
+    product.productId,
+    key,
+  );
   return key;
 }
 
-async function ensureCaptions(
+async function captionsForProducts(
   deps: PublicationServiceDeps,
   publicationRunId: string,
   products: PublicationProduct[],
 ): Promise<Map<string, [string, string, string]>> {
   const result = new Map<string, [string, string, string]>();
-  const toRequest: PublicationProduct[] = [];
-
+  const missing: PublicationProduct[] = [];
   for (const product of products) {
-    const cache = await getProductCache(deps.db, publicationRunId, product.productId);
-    if (cache.captionsJson) {
-      const drafts = JSON.parse(cache.captionsJson) as [string, string, string];
-      result.set(product.productId, drafts);
-    } else {
-      toRequest.push(product);
-    }
+    const cache = await getProductCache(
+      deps.db,
+      publicationRunId,
+      product.productId,
+    );
+    const drafts = cachedDrafts(cache.captionsJson);
+    if (drafts) result.set(product.productId, drafts);
+    else missing.push(product);
   }
 
-  if (toRequest.length > 0) {
-    const outcome = await generateCaptionsForRun(
+  if (missing.length > 0) {
+    const generated = await generateCaptionsForRun(
       deps.anthropic,
       deps.config.claudeModel,
       deps.config.claudeRequestInputTokenLimit,
-      toCaptionRequestProducts(toRequest),
+      toCaptionRequestProducts(missing),
     );
-    for (const captionSet of outcome.captions) {
-      await putProductCaptions(deps.db, deps.clock, publicationRunId, captionSet.productId, JSON.stringify(captionSet.drafts));
-      result.set(captionSet.productId, captionSet.drafts);
+    for (const item of generated.captions) {
+      await putProductCaptions(
+        deps.db,
+        deps.clock,
+        publicationRunId,
+        item.productId,
+        JSON.stringify(item.drafts),
+      );
+      result.set(item.productId, item.drafts);
     }
-    if (outcome.missingProductIds.length > 0) {
-      throw new Error(`caption generation incomplete for: ${outcome.missingProductIds.join(", ")}`);
+    if (generated.missingProductIds.length > 0) {
+      throw new Error(
+        `caption generation incomplete for ${generated.missingProductIds.join(", ")}`,
+      );
     }
   }
-
   return result;
 }
 
-export async function runPublicationForRun(
+export async function preparePublicationOutputs(
   deps: PublicationServiceDeps,
-  airtableRunId: string,
-  correlationId: string,
-): Promise<PublicationOutcome> {
-  const { job, alreadySucceeded } = await acquireOrResumeJob(deps.db, deps.clock, airtableRunId, correlationId);
-  if (alreadySucceeded && job.googleDocId && job.googleDocUrl) {
-    return {
-      kind: "already_succeeded",
-      result: { publicationRunId: airtableRunId, googleDocId: job.googleDocId, googleDocUrl: job.googleDocUrl, productIds: [] },
-    };
-  }
-
-  const run = await loadRunById(deps.fetcher, deps.config, deps.airtableToken, airtableRunId);
-  const thaiDate = formatThaiDate(new Date(run.publicationDate));
-
-  await setJobState(deps.db, deps.clock, airtableRunId, "validating");
-  const validation = validateRunCompleteness(run.products);
-  if (!validation.valid) {
-    await setJobState(deps.db, deps.clock, airtableRunId, "validation_failed", {
-      validationResultJson: JSON.stringify(validation),
+  validated: ValidatedPublication,
+): Promise<PreparedPublication> {
+  const runId = validated.run.airtableRunId;
+  await setJobState(deps.db, deps.clock, runId, "generating");
+  await markRunGenerating(
+    deps.fetcher,
+    deps.config,
+    deps.airtableToken,
+    runId,
+  );
+  const captions = await captionsForProducts(
+    deps,
+    runId,
+    validated.run.products,
+  );
+  const outputs: PreparedProductOutput[] = [];
+  for (const product of validated.run.products) {
+    const drafts = captions.get(product.productId);
+    if (!drafts) throw new Error(`captions missing for ${product.productId}`);
+    outputs.push({
+      product,
+      collageR2Key: await ensureCollage(deps, runId, product),
+      captionDrafts: drafts,
     });
-    await markRunNeedsCorrection(
+  }
+  return { ...validated, outputs };
+}
+
+export async function ensureTemporaryDocument(
+  deps: PublicationServiceDeps,
+  prepared: PreparedPublication,
+): Promise<string> {
+  const runId = prepared.run.airtableRunId;
+  const acquired = await acquireOrResumeJob(
+    deps.db,
+    deps.clock,
+    runId,
+    `publication-${runId}`,
+  );
+  if (acquired.job.tempDocId) return acquired.job.tempDocId;
+
+  const tokenProvider = createGoogleAuthClient(
+    deps.googleServiceAccountJson,
+    deps.clock,
+    deps.fetcher,
+  );
+  const discovered = await findTemporaryDocument(
+    deps.fetcher,
+    tokenProvider,
+    deps.config.googleDriveFolderId,
+    runId,
+  );
+  const docId = discovered ?? await copyTemplate(
+    deps.fetcher,
+    tokenProvider,
+    deps.config.googleTemplateDocId,
+    deps.config.googleDriveFolderId,
+    runId,
+    `Publication ${prepared.run.publicationDate} (in progress)`,
+  );
+  await setTempDocId(deps.db, deps.clock, runId, docId);
+  return docId;
+}
+
+export async function fillAndVerifyDocument(
+  deps: PublicationServiceDeps,
+  prepared: PreparedPublication,
+  tempDocId: string,
+): Promise<void> {
+  const tokenProvider = createGoogleAuthClient(
+    deps.googleServiceAccountJson,
+    deps.clock,
+    deps.fetcher,
+  );
+  const products: DocProductContent[] = [];
+  for (const output of prepared.outputs) {
+    const signedUrl = await deps.assets.signUrl(output.collageR2Key, 900);
+    await updateProductCollage(
       deps.fetcher,
       deps.config,
       deps.airtableToken,
-      airtableRunId,
-      formatValidationErrorSummary(validation),
+      output.product.airtableRecordId,
+      signedUrl,
     );
-    await pushTextMessage(
-      { LINE_ALLOWED_GROUP_ID: deps.lineGroupId } as any,
-      deps.lineGroupId,
-      buildPublicationValidationFailureMessage({
-        thaiDate,
-        validation,
-        airtableRunUrl: airtableRunUrl(deps.config, airtableRunId),
-      }),
-    );
-    return { kind: "validation_failed" };
+    products.push({
+      productId: output.product.productId,
+      conditionType: output.product.conditionType,
+      description: output.product.description,
+      lineSquarePrice: output.product.lineSquarePrice,
+      igPrice: output.product.igPrice,
+      captionDrafts: output.captionDrafts,
+      collageImageUrl: signedUrl,
+    });
   }
 
-  try {
-    await setJobState(deps.db, deps.clock, airtableRunId, "generating");
-    await markRunGenerating(deps.fetcher, deps.config, deps.airtableToken, airtableRunId);
-
-    const tokenProvider = createGoogleAuthClient(deps.googleServiceAccountJson, deps.clock, deps.fetcher);
-    const tempTitle = `Publication ${run.publicationDate} (in progress)`;
-    const tempDocId = await copyTemplate(deps.fetcher, tokenProvider, deps.config.googleTemplateDocId, deps.config.googleDriveFolderId, tempTitle);
-    await setJobState(deps.db, deps.clock, airtableRunId, "generating", { tempDocId });
-
-    const captionsByProductId = await ensureCaptions(deps, airtableRunId, run.products);
-
-    const docProducts: DocProductContent[] = [];
-    for (const product of run.products) {
-      const collageKey = await ensureCollage(deps, product);
-      const signedUrl = await deps.signCollageUrl(collageKey);
-      await updateProductCollage(deps.fetcher, deps.config, deps.airtableToken, product.airtableRecordId, signedUrl);
-      const drafts = captionsByProductId.get(product.productId);
-      if (!drafts) throw new Error(`missing captions for ${product.productId} after generation`);
-      docProducts.push({
-        productId: product.productId,
-        conditionType: product.conditionType,
-        description: product.description,
-        lineSquarePrice: product.lineSquarePrice,
-        igPrice: product.igPrice,
-        captionDrafts: drafts,
-        collageImageUrl: signedUrl,
-      });
-    }
-
-    await fillTemplate(deps.fetcher, tokenProvider, tempDocId, thaiDate, docProducts);
-
-    const expectedIds = run.products.map((p) => p.productId);
-    const verification = await verifyDocumentContainsProducts(deps.fetcher, tokenProvider, tempDocId, expectedIds);
-    if (!verification.ok) {
-      throw new Error(`generated document missing Product IDs: ${verification.missingProductIds.join(", ")}`);
-    }
-
-    const finalTitle = `Publication ${run.publicationDate}`;
-    const googleDocUrl = await finalizeDocument(deps.fetcher, tokenProvider, tempDocId, finalTitle);
-    const generatedAtIso = deps.clock.now().toISOString();
-    await markRunGenerated(deps.fetcher, deps.config, deps.airtableToken, airtableRunId, googleDocUrl, generatedAtIso);
-    await setJobState(deps.db, deps.clock, airtableRunId, "succeeded", { googleDocId: tempDocId, googleDocUrl });
-
-    await pushTextMessage(
-      { LINE_ALLOWED_GROUP_ID: deps.lineGroupId } as any,
-      deps.lineGroupId,
-      buildPublicationSuccessMessage({ thaiDate, productIds: expectedIds, googleDocUrl }),
+  await fillTemplate(
+    deps.fetcher,
+    tokenProvider,
+    tempDocId,
+    prepared.thaiDate,
+    products,
+  );
+  const expected = prepared.outputs.map((output) => output.product.productId);
+  const verification = await verifyDocumentContainsProducts(
+    deps.fetcher,
+    tokenProvider,
+    tempDocId,
+    expected,
+  );
+  if (!verification.ok) {
+    throw new Error(
+      `generated document missing Product IDs: ${verification.missingProductIds.join(", ")}`,
     );
-
-    return { kind: "succeeded", result: { publicationRunId: airtableRunId, googleDocId: tempDocId, googleDocUrl, productIds: expectedIds } };
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : "unknown publication error";
-    const currentJob = await acquireOrResumeJob(deps.db, deps.clock, airtableRunId, correlationId);
-    if (currentJob.job.tempDocId) {
-      const tokenProvider = createGoogleAuthClient(deps.googleServiceAccountJson, deps.clock, deps.fetcher);
-      await deleteDocument(deps.fetcher, tokenProvider, currentJob.job.tempDocId).catch(() => undefined);
-    }
-    await setJobState(deps.db, deps.clock, airtableRunId, "failed");
-    await markRunFailed(deps.fetcher, deps.config, deps.airtableToken, airtableRunId, reason);
-    await pushTextMessage(
-      { LINE_ALLOWED_GROUP_ID: deps.lineGroupId } as any,
-      deps.lineGroupId,
-      buildPublicationWorkflowFailureMessage({ thaiDate, reason, airtableRunUrl: airtableRunUrl(deps.config, airtableRunId) }),
-    );
-    throw error;
   }
 }
 
-export async function findAndRunTodaysPublication(
+export async function finalizePublication(
   deps: PublicationServiceDeps,
-  correlationId: string,
-): Promise<PublicationOutcome> {
-  const todayIso = deps.clock.now().toISOString().slice(0, 10);
-  const run = await findReadyRunForDate(deps.fetcher, deps.config, deps.airtableToken, todayIso);
-  if (!run) {
-    return { kind: "no_ready_run" };
+  prepared: PreparedPublication,
+  tempDocId: string,
+): Promise<PublicationResult> {
+  const runId = prepared.run.airtableRunId;
+  const acquired = await acquireOrResumeJob(
+    deps.db,
+    deps.clock,
+    runId,
+    `publication-${runId}`,
+  );
+  if (
+    acquired.alreadySucceeded &&
+    acquired.job.googleDocId &&
+    acquired.job.googleDocUrl
+  ) {
+    return {
+      publicationRunId: runId,
+      googleDocId: acquired.job.googleDocId,
+      googleDocUrl: acquired.job.googleDocUrl,
+      productIds: prepared.outputs.map((output) => output.product.productId),
+    };
   }
-  return runPublicationForRun(deps, run.airtableRunId, correlationId);
+
+  const tokenProvider = createGoogleAuthClient(
+    deps.googleServiceAccountJson,
+    deps.clock,
+    deps.fetcher,
+  );
+  const url = await finalizeDocument(
+    deps.fetcher,
+    tokenProvider,
+    tempDocId,
+    `Publication ${prepared.run.publicationDate}`,
+  );
+  await markRunGenerated(
+    deps.fetcher,
+    deps.config,
+    deps.airtableToken,
+    runId,
+    url,
+    deps.clock.now().toISOString(),
+  );
+  await setJobState(deps.db, deps.clock, runId, "succeeded", {
+    googleDocId: tempDocId,
+    googleDocUrl: url,
+    tempDocId,
+  });
+  return {
+    publicationRunId: runId,
+    googleDocId: tempDocId,
+    googleDocUrl: url,
+    productIds: prepared.outputs.map((output) => output.product.productId),
+  };
+}
+
+export async function notifyPublicationSuccess(
+  deps: PublicationServiceDeps,
+  prepared: PreparedPublication,
+  result: PublicationResult,
+): Promise<void> {
+  await deps.notify(buildPublicationSuccessMessage({
+    thaiDate: prepared.thaiDate,
+    productIds: result.productIds,
+    googleDocUrl: result.googleDocUrl,
+  }));
+}
+
+export async function failPublicationAfterExhaustion(
+  deps: PublicationServiceDeps,
+  publicationRunId: string,
+  reason: string,
+  thaiDate: string | null,
+): Promise<void> {
+  const acquired = await acquireOrResumeJob(
+    deps.db,
+    deps.clock,
+    publicationRunId,
+    `publication-${publicationRunId}`,
+  );
+  if (acquired.alreadySucceeded) return;
+
+  if (acquired.job.tempDocId) {
+    const tokenProvider = createGoogleAuthClient(
+      deps.googleServiceAccountJson,
+      deps.clock,
+      deps.fetcher,
+    );
+    await deleteDocument(
+      deps.fetcher,
+      tokenProvider,
+      acquired.job.tempDocId,
+    );
+    await setTempDocId(deps.db, deps.clock, publicationRunId, null);
+  }
+  await setJobState(deps.db, deps.clock, publicationRunId, "failed");
+  await markRunFailed(
+    deps.fetcher,
+    deps.config,
+    deps.airtableToken,
+    publicationRunId,
+    reason,
+  );
+  await deps.notify(buildPublicationWorkflowFailureMessage({
+    thaiDate: thaiDate ?? "ไม่สามารถอ่านวันที่รายการได้",
+    reason,
+    airtableRunUrl: airtableRunUrl(deps.config, publicationRunId),
+  }));
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run focused tests**
 
-Run: `npx vitest run test/publication/service.test.ts`
-Expected: PASS — 2 tests green.
+Run: `npx vitest run test/publication/service.test.ts test/publication/google-docs.test.ts`
+Expected: PASS.
 
-- [ ] **Step 5: Full check and commit**
+- [ ] **Step 5: Run full check and commit**
 
 Run: `npm run check`
+Expected: PASS.
 
 ```bash
-git add src/publication/service.ts test/publication/service.test.ts
-git commit -m "feat(publication): add publication service orchestration with idempotency and cleanup"
+git add src/publication/service.ts test/publication/service.test.ts src/publication/google-docs.ts test/publication/google-docs.test.ts
+git commit -m "feat(publication): add retry-safe publication stages"
 ```
 
 ---
 
-## Task 10: PublicationWorkflow with durable retries and cron/`/docs` triggers
+## Task 10: PublicationWorkflow and create/restart triggers
 
 **Files:**
 - Create: `src/publication/workflow.ts`
-- Modify: `src/scheduled.ts:1-200` (add publication cron branch; do not restructure existing import cron branch)
+- Create: `src/publication/trigger.ts`
 - Create: `src/routes/docs.ts`
-- Modify: `src/router.ts:1-200` (register `POST /docs`; do not restructure existing routes)
+- Modify: `src/router.ts`
+- Modify: `src/scheduled.ts`
+- Modify: `src/index.ts`
+- Modify: `wrangler.jsonc`
 - Test: `test/publication/workflow.test.ts`
+- Test: `test/publication/trigger.test.ts`
 - Test: `test/routes/docs.test.ts`
 
 **Interfaces:**
-- Consumes: `PublicationWorkflowParams` (Task 2), `runPublicationForRun`/`findAndRunTodaysPublication`/`PublicationServiceDeps` (Task 9), `Env` (assumed).
+- Consumes: stage functions from Task 9; `findRunnableRunForDate` from Task 2; `verifyAdminBearer` from `src/shared/admin-auth.ts`; `createAssetStore` from Import Task 6; `WorkflowInstance.restart()`, `resume()`, and `status()` from Cloudflare Workflows.
 - Produces:
-  ```ts
-  // src/publication/workflow.ts
-  export class PublicationWorkflow extends WorkflowEntrypoint<Env, PublicationWorkflowParams> {
-    async run(event: WorkflowEvent<PublicationWorkflowParams>, step: WorkflowStep): Promise<PublicationResult | null>;
-  }
 
-  export function buildPublicationServiceDeps(env: Env, clock: Clock, correlationId: string): PublicationServiceDeps;
-  ```
-  ```ts
-  // src/routes/docs.ts
-  export async function handleDocsRoute(request: Request, env: Env): Promise<Response>;
-  ```
-  used by `src/router.ts` and `src/scheduled.ts`.
+```ts
+export async function runPublicationWorkflow(
+  params: PublicationWorkflowParams,
+  step: WorkflowStep,
+  deps: PublicationServiceDeps,
+): Promise<PublicationResult | null>;
 
-- [ ] **Step 1: Write the failing workflow test**
+export class PublicationWorkflow extends WorkflowEntrypoint<
+  Env,
+  PublicationWorkflowParams
+> {
+  run(
+    event: WorkflowEvent<PublicationWorkflowParams>,
+    step: WorkflowStep,
+  ): Promise<PublicationResult | null>;
+}
+
+export type DocsTriggerResult =
+  | { status: "no_runnable_run" }
+  | { status: "already_generated"; publicationRunId: string }
+  | { status: "already_running"; publicationRunId: string }
+  | { status: "started" | "restarted" | "resumed"; publicationRunId: string };
+
+export async function handleDocsTrigger(
+  env: Env,
+  trigger: "cron" | "line" | "admin",
+  clock?: Clock,
+): Promise<DocsTriggerResult>;
+
+export async function handleDocsRoute(
+  request: Request,
+  env: Env,
+  clock?: Clock,
+): Promise<Response>;
+```
+
+Workflow custom ID is exactly `publication-<airtablePublicationRunId>`. `create()` is used only when `status()` is `unknown`. Existing `errored`, `terminated`, or `complete` instances use `restart()`; a `paused` instance uses `resume()`; active instances return `already_running`. This lets `/docs` retry a Failed Airtable run and rerun a corrected validation-failed run without attempting a duplicate Workflow ID.
+
+- [ ] **Step 1: Write failing Workflow test**
 
 ```ts
 // test/publication/workflow.test.ts
-import { describe, expect, it, vi } from "vitest";
-import { buildPublicationServiceDeps } from "../../src/publication/workflow";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../src/line/client", () => ({ pushTextMessage: vi.fn().mockResolvedValue(undefined) }));
+const stages = vi.hoisted(() => ({
+  validatePublication: vi.fn(),
+  notifyPublicationValidationFailure: vi.fn(),
+  preparePublicationOutputs: vi.fn(),
+  ensureTemporaryDocument: vi.fn(),
+  fillAndVerifyDocument: vi.fn(),
+  finalizePublication: vi.fn(),
+  notifyPublicationSuccess: vi.fn(),
+  failPublicationAfterExhaustion: vi.fn(),
+}));
 
-describe("buildPublicationServiceDeps", () => {
-  it("wires config, tokens, and a signCollageUrl function backed by R2 signed URLs", async () => {
-    const env = {
-      DB: {} as any,
-      IMAGES_BUCKET: {
-        get: vi.fn().mockResolvedValue({ body: new ReadableStream() }),
-      } as any,
-      IMAGES: {} as any,
-      AIRTABLE_TOKEN: "airtable-token",
-      GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({ client_email: "svc@example.com", private_key: "unused" }),
-      ANTHROPIC_API_KEY: "anthropic-key",
-      APP_CONFIG_JSON: JSON.stringify({
-        airtableBaseId: "base123",
-        airtableProductsTableId: "tblProducts",
-        airtablePublicationRunsTableId: "tblRuns",
-        lineAllowedGroupId: "group-1",
-        googleDriveFolderId: "folder-1",
-        googleTemplateDocId: "template-doc-1",
-        timeZone: "Asia/Bangkok",
-        importCron: "*/30 * * * *",
-        publicationCron: "0 6 * * *",
-        uploadCutoffMinutes: 30,
-        importMaxAttempts: 5,
-        publicationMaxAttempts: 5,
-        productIdPrefix: "A",
-        productIdInitialNumber: 1,
-        claudeModel: "claude-opus-5",
-        claudeRequestInputTokenLimit: 150000,
-        soldoutConfirmationEnabled: true,
-        firstImportCutoffDate: "2026-08-01",
-      }),
-    } as any;
+vi.mock("../../src/publication/service", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../src/publication/service")>(),
+  ...stages,
+}));
 
-    const clock = { now: () => new Date("2026-09-01T05:00:00.000Z") };
-    const deps = buildPublicationServiceDeps(env, clock, "corr-1");
+import { runPublicationWorkflow } from "../../src/publication/workflow";
+import type { PublicationServiceDeps } from "../../src/publication/service";
 
-    expect(deps.airtableToken).toBe("airtable-token");
-    expect(deps.lineGroupId).toBe("group-1");
-    expect(typeof deps.signCollageUrl).toBe("function");
+const params = {
+  publicationRunId: "rec-run-1",
+  trigger: "admin" as const,
+};
+const deps = {
+  config: { publicationRetryLimit: 5 },
+} as PublicationServiceDeps;
+
+function retryingStep() {
+  return {
+    do: vi.fn(async (
+      _name: string,
+      options: { retries: { limit: number } },
+      callback: () => Promise<unknown>,
+    ) => {
+      let lastError: unknown;
+      for (let call = 0; call <= options.retries.limit; call += 1) {
+        try {
+          return await callback();
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      throw lastError;
+    }),
+  };
+}
+
+describe("runPublicationWorkflow", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stages.validatePublication.mockResolvedValue({
+      kind: "valid",
+      value: { run: { airtableRunId: "rec-run-1" }, thaiDate: "2 กันยายน 2569" },
+    });
+    stages.notifyPublicationValidationFailure.mockResolvedValue(undefined);
+    stages.preparePublicationOutputs.mockResolvedValue({
+      run: { airtableRunId: "rec-run-1" },
+      thaiDate: "2 กันยายน 2569",
+      outputs: [],
+    });
+    stages.ensureTemporaryDocument.mockResolvedValue("temp-doc-1");
+    stages.fillAndVerifyDocument.mockResolvedValue(undefined);
+    stages.finalizePublication.mockResolvedValue({
+      publicationRunId: "rec-run-1",
+      googleDocId: "temp-doc-1",
+      googleDocUrl: "https://docs.google.com/document/d/temp-doc-1/edit",
+      productIds: [],
+    });
+    stages.notifyPublicationSuccess.mockResolvedValue(undefined);
+    stages.failPublicationAfterExhaustion.mockResolvedValue(undefined);
+  });
+
+  it("runs six named durable stages with retry limit five", async () => {
+    const step = retryingStep();
+
+    await runPublicationWorkflow(params, step as never, deps);
+
+    expect(step.do.mock.calls.map(([name]) => name)).toEqual([
+      "validate publication",
+      "prepare outputs",
+      "ensure temporary document",
+      "fill and verify document",
+      "finalize publication",
+      "notify publication success",
+    ]);
+    expect(step.do.mock.calls.every(([, options]) =>
+      options.retries.limit === 5)).toBe(true);
+  });
+
+  it("calls fill six times, then performs exhaustion cleanup once", async () => {
+    stages.fillAndVerifyDocument.mockRejectedValue(
+      new Error("google 503"),
+    );
+    const step = retryingStep();
+
+    await expect(
+      runPublicationWorkflow(params, step as never, deps),
+    ).rejects.toThrow("google 503");
+
+    expect(stages.fillAndVerifyDocument).toHaveBeenCalledTimes(6);
+    expect(stages.failPublicationAfterExhaustion).toHaveBeenCalledWith(
+      deps,
+      "rec-run-1",
+      "google 503",
+      "2 กันยายน 2569",
+    );
+  });
+
+  it("keeps a validation failure in Draft when LINE notification exhausts retries", async () => {
+    stages.validatePublication.mockResolvedValue({
+      kind: "validation_failed",
+      thaiDate: "2 กันยายน 2569",
+      validation: {
+        valid: false,
+        productsMissingFields: [{
+          productId: "A-1001",
+          missingFields: ["Description"],
+        }],
+      },
+    });
+    stages.notifyPublicationValidationFailure.mockRejectedValue(
+      new Error("LINE 503"),
+    );
+    const step = retryingStep();
+
+    await expect(
+      runPublicationWorkflow(params, step as never, deps),
+    ).rejects.toThrow("LINE 503");
+
+    expect(stages.notifyPublicationValidationFailure).toHaveBeenCalledTimes(6);
+    expect(stages.preparePublicationOutputs).not.toHaveBeenCalled();
+    expect(stages.failPublicationAfterExhaustion).not.toHaveBeenCalled();
+  });
+
+  it("does not downgrade a succeeded publication when success notification exhausts retries", async () => {
+    stages.notifyPublicationSuccess.mockRejectedValue(new Error("LINE 503"));
+    const step = retryingStep();
+
+    await expect(
+      runPublicationWorkflow(params, step as never, deps),
+    ).rejects.toThrow("LINE 503");
+
+    expect(stages.finalizePublication).toHaveBeenCalledTimes(1);
+    expect(stages.notifyPublicationSuccess).toHaveBeenCalledTimes(6);
+    expect(stages.failPublicationAfterExhaustion).not.toHaveBeenCalled();
   });
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run Workflow test to verify it fails**
 
 Run: `npx vitest run test/publication/workflow.test.ts`
-Expected: FAIL — `Cannot find module '../../src/publication/workflow'`.
+Expected: FAIL with missing module.
 
-- [ ] **Step 3: Write `src/publication/workflow.ts`**
+- [ ] **Step 3: Implement Workflow**
 
 ```ts
 // src/publication/workflow.ts
-import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import Anthropic from "@anthropic-ai/sdk";
+import {
+  WorkflowEntrypoint,
+  type WorkflowEvent,
+  type WorkflowStep,
+} from "cloudflare:workers";
+import { NonRetryableError } from "cloudflare:workflows";
+import { parseConfig } from "../config";
+import { createAssetStore } from "../import/asset-store";
+import { createLineClient } from "../line/client";
 import type { Env } from "../env";
 import type { Clock } from "../shared/time";
-import { parseConfig } from "../config";
-import { runPublicationForRun } from "./service";
-import type { PublicationServiceDeps } from "./service";
-import type { PublicationResult } from "./types";
-import type { PublicationWorkflowParams } from "./types";
-import { collageR2Key } from "./collage";
+import { OperationalError } from "../shared/errors";
+import {
+  ensureTemporaryDocument,
+  failPublicationAfterExhaustion,
+  fillAndVerifyDocument,
+  finalizePublication,
+  notifyPublicationSuccess,
+  notifyPublicationValidationFailure,
+  preparePublicationOutputs,
+  validatePublication,
+  type PublicationServiceDeps,
+} from "./service";
+import type {
+  PublicationResult,
+  PublicationWorkflowParams,
+} from "./types";
 
-const SIGNED_URL_TTL_SECONDS = 900;
-
-export function buildPublicationServiceDeps(env: Env, clock: Clock, correlationId: string): PublicationServiceDeps {
+function depsFor(env: Env, clock: Clock): PublicationServiceDeps {
   const config = parseConfig(env.APP_CONFIG_JSON);
-  const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, maxRetries: 0 });
-
   return {
     db: env.DB,
+    assets: createAssetStore(
+      env.IMAGES_BUCKET,
+      {
+        signingSecret: env.ASSET_URL_SIGNING_SECRET,
+        publicBaseUrl: config.publicBaseUrl,
+      },
+      clock,
+    ),
     bucket: env.IMAGES_BUCKET,
-    images: env.IMAGES as any,
+    images: env.IMAGES,
     fetcher: fetch.bind(globalThis),
-    anthropic,
+    anthropic: new Anthropic({
+      apiKey: env.ANTHROPIC_API_KEY,
+      maxRetries: 0,
+    }),
     clock,
     config,
     airtableToken: env.AIRTABLE_TOKEN,
     googleServiceAccountJson: env.GOOGLE_SERVICE_ACCOUNT_JSON,
-    lineGroupId: config.lineAllowedGroupId,
-    async signCollageUrl(r2Key: string): Promise<string> {
-      const object = await env.IMAGES_BUCKET.get(r2Key);
-      if (!object) throw new Error(`collage object missing at ${r2Key}`);
-      const signed = await env.IMAGES_BUCKET.createSignedUrl?.(r2Key, { expiresIn: SIGNED_URL_TTL_SECONDS });
-      if (!signed) throw new Error(`unable to sign collage URL for ${r2Key}`);
-      return signed;
-    },
+    notify: (text) =>
+      createLineClient({
+        channelAccessToken: env.LINE_CHANNEL_ACCESS_TOKEN,
+        fetch: fetch.bind(globalThis),
+      }).pushMessage(config.lineAllowedGroupId, text),
   };
 }
 
-export class PublicationWorkflow extends WorkflowEntrypoint<Env, PublicationWorkflowParams> {
-  async run(event: WorkflowEvent<PublicationWorkflowParams>, step: WorkflowStep): Promise<PublicationResult | null> {
-    const correlationId = `publication:${event.payload.publicationRunId}`;
-    const clock = { now: () => new Date() };
-
-    const outcome = await step.do(
-      "run-publication",
-      { retries: { limit: 5, delay: "30 seconds", backoff: "exponential" } },
-      async () => {
-        const deps = buildPublicationServiceDeps(this.env, clock, correlationId);
-        return runPublicationForRun(deps, event.payload.publicationRunId, correlationId);
-      },
-    );
-
-    if (outcome.kind === "succeeded" || outcome.kind === "already_succeeded") {
-      return outcome.result;
+async function workflowCall<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (error instanceof OperationalError && !error.retryable) {
+      throw new NonRetryableError(error.message, error.code);
     }
-    return null;
+    throw error;
   }
 }
 
-export const __internal = { collageR2Key };
-```
+export async function runPublicationWorkflow(
+  params: PublicationWorkflowParams,
+  step: WorkflowStep,
+  deps: PublicationServiceDeps,
+): Promise<PublicationResult | null> {
+  const retries = {
+    retries: {
+      limit: deps.config.publicationRetryLimit,
+      delay: "10 seconds" as const,
+      backoff: "exponential" as const,
+    },
+    timeout: "5 minutes" as const,
+  };
+  const runId = params.publicationRunId;
 
-- [ ] **Step 4: Run workflow test to verify it passes**
+  let validation: Awaited<ReturnType<typeof validatePublication>>;
+  try {
+    validation = await step.do(
+      "validate publication",
+      retries,
+      () => workflowCall(() =>
+        validatePublication(deps, runId, `publication-${runId}`)),
+    );
+  } catch (error) {
+    const reason = error instanceof Error
+      ? error.message
+      : "unknown publication error";
+    await step.do(
+      "record exhausted publication failure",
+      retries,
+      () => failPublicationAfterExhaustion(deps, runId, reason, null),
+    );
+    throw error;
+  }
 
-Run: `npx vitest run test/publication/workflow.test.ts`
-Expected: PASS — 1 test green.
+  if (validation.kind === "validation_failed") {
+    await step.do(
+      "notify validation failure",
+      retries,
+      () => workflowCall(() => notifyPublicationValidationFailure(
+        deps,
+        runId,
+        validation.thaiDate,
+        validation.validation,
+      )),
+    );
+    return null;
+  }
+  if (validation.kind === "already_succeeded") {
+    return validation.result;
+  }
 
-- [ ] **Step 5: Write the failing `/docs` route test**
-
-```ts
-// test/routes/docs.test.ts
-import { describe, expect, it, vi } from "vitest";
-import { handleDocsRoute } from "../../src/routes/docs";
-
-describe("handleDocsRoute", () => {
-  it("finds today's Ready run and creates a Workflow instance keyed by publication:<runId>", async () => {
-    const create = vi.fn().mockResolvedValue({ id: "wf-1" });
-    const env = {
-      PUBLICATION_WORKFLOW: { create },
-      APP_CONFIG_JSON: JSON.stringify({
-        airtableBaseId: "base123",
-        airtableProductsTableId: "tblProducts",
-        airtablePublicationRunsTableId: "tblRuns",
-        lineAllowedGroupId: "group-1",
-        googleDriveFolderId: "folder-1",
-        googleTemplateDocId: "template-doc-1",
-        timeZone: "Asia/Bangkok",
-        importCron: "*/30 * * * *",
-        publicationCron: "0 6 * * *",
-        uploadCutoffMinutes: 30,
-        importMaxAttempts: 5,
-        publicationMaxAttempts: 5,
-        productIdPrefix: "A",
-        productIdInitialNumber: 1,
-        claudeModel: "claude-opus-5",
-        claudeRequestInputTokenLimit: 150000,
-        soldoutConfirmationEnabled: true,
-        firstImportCutoffDate: "2026-08-01",
-      }),
-      AIRTABLE_TOKEN: "airtable-token",
-    } as any;
-
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({ records: [{ id: "rec-run-1", fields: { "Publication Date": "2026-09-01", Status: "Ready", Products: [] } }] }),
-        { status: 200 },
+  let prepared: Awaited<ReturnType<typeof preparePublicationOutputs>>;
+  let result: PublicationResult;
+  try {
+    prepared = await step.do(
+      "prepare outputs",
+      retries,
+      () => workflowCall(() =>
+        preparePublicationOutputs(deps, validation.value)),
+    );
+    const tempDocId = await step.do(
+      "ensure temporary document",
+      retries,
+      () => workflowCall(() =>
+        ensureTemporaryDocument(deps, prepared)),
+    );
+    await step.do(
+      "fill and verify document",
+      retries,
+      () => workflowCall(() =>
+        fillAndVerifyDocument(deps, prepared, tempDocId)),
+    );
+    result = await step.do(
+      "finalize publication",
+      retries,
+      () => workflowCall(() =>
+        finalizePublication(deps, prepared, tempDocId)),
+    );
+  } catch (error) {
+    const reason = error instanceof Error
+      ? error.message
+      : "unknown publication error";
+    await step.do(
+      "record exhausted publication failure",
+      retries,
+      () => failPublicationAfterExhaustion(
+        deps,
+        runId,
+        reason,
+        validation.value.thaiDate,
       ),
     );
+    throw error;
+  }
 
-    const response = await handleDocsRoute(new Request("https://worker.example/docs", { method: "POST" }), env);
+  // Notification failure must not delete or downgrade a completed document.
+  await step.do(
+    "notify publication success",
+    retries,
+    () => workflowCall(() =>
+      notifyPublicationSuccess(deps, prepared, result)),
+  );
+  return result;
+}
 
-    expect(response.status).toBe(202);
-    expect(create).toHaveBeenCalledWith({ id: "publication:rec-run-1", params: { publicationRunId: "rec-run-1", trigger: "line" } });
+export class PublicationWorkflow extends WorkflowEntrypoint<
+  Env,
+  PublicationWorkflowParams
+> {
+  async run(
+    event: WorkflowEvent<PublicationWorkflowParams>,
+    step: WorkflowStep,
+  ): Promise<PublicationResult | null> {
+    const clock = { now: () => new Date() };
+    return runPublicationWorkflow(
+      event.payload,
+      step,
+      depsFor(this.env, clock),
+    );
+  }
+}
+```
 
-    fetchSpy.mockRestore();
+- [ ] **Step 4: Write failing trigger tests**
+
+```ts
+// test/publication/trigger.test.ts
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { env as testEnv } from "cloudflare:test";
+import type { Env } from "../../src/env";
+import { handleDocsTrigger } from "../../src/publication/trigger";
+
+const clock = {
+  now: () => new Date("2026-09-01T17:30:00.000Z"),
+};
+
+const rawConfig = {
+  TIME_ZONE: "Asia/Bangkok",
+  UPLOAD_CUTOFF_MINUTES: 30,
+  PRODUCT_ID_PREFIX: "A",
+  IMPORT_CRON: "0 23 * * *",
+  IMPORT_RETRY_LIMIT: 5,
+  PRODUCT_ID_INITIAL_NUMBER: 1,
+  FIRST_IMPORT_CUTOFF_DATE: null,
+  AIRTABLE_BASE_ID: "base123",
+  AIRTABLE_PRODUCTS_TABLE_ID: "tblProducts",
+  LINE_ALLOWED_GROUP_ID: "group-1",
+  PUBLIC_BASE_URL: "https://worker.example",
+  PUBLICATION_CRON: "30 23 * * *",
+  PUBLICATION_RETRY_LIMIT: 5,
+  AIRTABLE_PUBLICATION_RUNS_TABLE_ID: "tblRuns",
+  GOOGLE_DRIVE_FOLDER_ID: "folder-1",
+  GOOGLE_TEMPLATE_DOC_ID: "template-1",
+  CLAUDE_MODEL: "claude-opus-5",
+  CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150_000,
+};
+
+function mockRun(records: unknown[] = [{
+  id: "rec-run-1",
+  fields: {
+    "Publication Date": "2026-09-02",
+    Status: "Ready",
+    Products: [],
+  },
+}]): void {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify({ records })),
+  );
+}
+
+function makeTriggerEnv(statusValue: string) {
+  const restart = vi.fn();
+  const resume = vi.fn();
+  const status = vi.fn().mockResolvedValue({ status: statusValue });
+  const get = vi.fn().mockReturnValue({ status, restart, resume });
+  const create = vi.fn().mockResolvedValue({ id: "publication-rec-run-1" });
+  const env = {
+    DB: testEnv.DB,
+    APP_CONFIG_JSON: JSON.stringify(rawConfig),
+    AIRTABLE_TOKEN: "airtable-token",
+    PUBLICATION_WORKFLOW: { get, create },
+  } as unknown as Env;
+  return { env, get, create, restart, resume };
+}
+
+describe("handleDocsTrigger", () => {
+  beforeEach(async () => {
+    vi.restoreAllMocks();
+    await testEnv.DB.exec("DELETE FROM publication_product_cache");
+    await testEnv.DB.exec("DELETE FROM publication_jobs");
   });
 
-  it("returns 200 with no-op body when no Ready run exists for today", async () => {
-    const env = {
-      PUBLICATION_WORKFLOW: { create: vi.fn() },
-      APP_CONFIG_JSON: JSON.stringify({
-        airtableBaseId: "base123",
-        airtableProductsTableId: "tblProducts",
-        airtablePublicationRunsTableId: "tblRuns",
-        lineAllowedGroupId: "group-1",
-        googleDriveFolderId: "folder-1",
-        googleTemplateDocId: "template-doc-1",
-        timeZone: "Asia/Bangkok",
-        importCron: "*/30 * * * *",
-        publicationCron: "0 6 * * *",
-        uploadCutoffMinutes: 30,
-        importMaxAttempts: 5,
-        publicationMaxAttempts: 5,
-        productIdPrefix: "A",
-        productIdInitialNumber: 1,
-        claudeModel: "claude-opus-5",
-        claudeRequestInputTokenLimit: 150000,
-        soldoutConfirmationEnabled: true,
-        firstImportCutoffDate: "2026-08-01",
-      }),
-      AIRTABLE_TOKEN: "airtable-token",
-    } as any;
+  it("restarts an errored retained Workflow using the hyphenated ID", async () => {
+    mockRun();
+    const fixture = makeTriggerEnv("errored");
 
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ records: [] }), { status: 200 }));
+    const result = await handleDocsTrigger(fixture.env, "admin", clock);
 
-    const response = await handleDocsRoute(new Request("https://worker.example/docs", { method: "POST" }), env);
-    expect(response.status).toBe(200);
-    const body = await response.json();
-    expect(body).toEqual({ status: "no_ready_run" });
+    expect(fixture.get).toHaveBeenCalledWith("publication-rec-run-1");
+    expect(fixture.restart).toHaveBeenCalledTimes(1);
+    expect(fixture.create).not.toHaveBeenCalled();
+    expect(result.status).toBe("restarted");
+  });
 
-    fetchSpy.mockRestore();
+  it("creates only an unknown instance and records admin trigger", async () => {
+    mockRun();
+    const fixture = makeTriggerEnv("unknown");
+
+    const result = await handleDocsTrigger(fixture.env, "admin", clock);
+
+    expect(fixture.create).toHaveBeenCalledWith({
+      id: "publication-rec-run-1",
+      params: {
+        publicationRunId: "rec-run-1",
+        trigger: "admin",
+      },
+    });
+    expect(result.status).toBe("started");
+  });
+
+  it("resumes a paused instance", async () => {
+    mockRun();
+    const fixture = makeTriggerEnv("paused");
+    const result = await handleDocsTrigger(fixture.env, "line", clock);
+    expect(fixture.resume).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("resumed");
+  });
+
+  it.each(["queued", "running", "waiting", "waitingForPause"])(
+    "returns already_running for active status %s",
+    async (statusValue) => {
+      mockRun();
+      const fixture = makeTriggerEnv(statusValue);
+      const result = await handleDocsTrigger(fixture.env, "cron", clock);
+      expect(result.status).toBe("already_running");
+      expect(fixture.create).not.toHaveBeenCalled();
+      expect(fixture.restart).not.toHaveBeenCalled();
+    },
+  );
+
+  it("restarts a complete instance after staff corrects a validation failure", async () => {
+    mockRun();
+    const fixture = makeTriggerEnv("complete");
+    const result = await handleDocsTrigger(fixture.env, "admin", clock);
+    expect(fixture.restart).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("restarted");
+  });
+
+  it("returns already_generated from D1 without changing Workflow state", async () => {
+    mockRun();
+    await testEnv.DB.prepare(
+      `INSERT INTO publication_jobs
+         (publication_run_id, state, correlation_id, google_doc_id,
+          google_doc_url, attempt_count, created_at, updated_at)
+       VALUES (?, 'succeeded', ?, ?, ?, 1, ?, ?)`,
+    ).bind(
+      "rec-run-1",
+      "corr-1",
+      "doc-1",
+      "https://docs.google.com/document/d/doc-1/edit",
+      clock.now().toISOString(),
+      clock.now().toISOString(),
+    ).run();
+    const fixture = makeTriggerEnv("complete");
+
+    const result = await handleDocsTrigger(fixture.env, "admin", clock);
+
+    expect(result.status).toBe("already_generated");
+    expect(fixture.get).not.toHaveBeenCalled();
+  });
+
+  it("returns no_runnable_run when today's Bangkok date has no Ready or Failed run", async () => {
+    mockRun([]);
+    const fixture = makeTriggerEnv("unknown");
+    const result = await handleDocsTrigger(fixture.env, "admin", clock);
+    expect(result).toEqual({ status: "no_runnable_run" });
+    expect(fixture.get).not.toHaveBeenCalled();
   });
 });
 ```
 
-- [ ] **Step 6: Run test to verify it fails**
+- [ ] **Step 5: Implement trigger service**
 
-Run: `npx vitest run test/routes/docs.test.ts`
-Expected: FAIL — `Cannot find module '../../src/routes/docs'`.
+```ts
+// src/publication/trigger.ts
+import type { Env } from "../env";
+import { parseConfig } from "../config";
+import { acquireOrResumeJob } from "../db/publication-repository";
+import { todayBangkokDate, type Clock } from "../shared/time";
+import { findRunnableRunForDate } from "./airtable-runs";
 
-- [ ] **Step 7: Write `src/routes/docs.ts`**
+export type DocsTriggerResult =
+  | { status: "no_runnable_run" }
+  | { status: "already_generated"; publicationRunId: string }
+  | { status: "already_running"; publicationRunId: string }
+  | {
+      status: "started" | "restarted" | "resumed";
+      publicationRunId: string;
+    };
+
+export async function handleDocsTrigger(
+  env: Env,
+  trigger: "cron" | "line" | "admin",
+  clock: Clock = { now: () => new Date() },
+): Promise<DocsTriggerResult> {
+  const config = parseConfig(env.APP_CONFIG_JSON);
+  const date = todayBangkokDate(clock);
+  const run = await findRunnableRunForDate(
+    fetch.bind(globalThis),
+    config,
+    env.AIRTABLE_TOKEN,
+    date,
+  );
+  if (!run) return { status: "no_runnable_run" };
+
+  const acquired = await acquireOrResumeJob(
+    env.DB,
+    clock,
+    run.airtableRunId,
+    `publication-${run.airtableRunId}`,
+  );
+  if (acquired.alreadySucceeded) {
+    return {
+      status: "already_generated",
+      publicationRunId: run.airtableRunId,
+    };
+  }
+
+  const id = `publication-${run.airtableRunId}`;
+  const instance = env.PUBLICATION_WORKFLOW.get(id);
+  const state = await instance.status();
+  if (["queued", "running", "waiting", "waitingForPause"].includes(state.status)) {
+    return { status: "already_running", publicationRunId: run.airtableRunId };
+  }
+  if (state.status === "paused") {
+    await instance.resume();
+    return { status: "resumed", publicationRunId: run.airtableRunId };
+  }
+  if (["errored", "terminated", "complete"].includes(state.status)) {
+    await instance.restart();
+    return { status: "restarted", publicationRunId: run.airtableRunId };
+  }
+  if (state.status !== "unknown") {
+    throw new Error(`unsupported publication Workflow status: ${state.status}`);
+  }
+
+  try {
+    await env.PUBLICATION_WORKFLOW.create({
+      id,
+      params: { publicationRunId: run.airtableRunId, trigger },
+    });
+  } catch (error) {
+    const raced = await env.PUBLICATION_WORKFLOW.get(id).status();
+    if (["queued", "running", "waiting", "waitingForPause"].includes(raced.status)) {
+      return { status: "already_running", publicationRunId: run.airtableRunId };
+    }
+    throw error;
+  }
+  return { status: "started", publicationRunId: run.airtableRunId };
+}
+```
+
+- [ ] **Step 6: Write failing `/docs` authentication tests**
+
+```ts
+// test/routes/docs.test.ts
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Env } from "../../src/env";
+
+const trigger = vi.hoisted(() => ({
+  handleDocsTrigger: vi.fn(),
+}));
+
+vi.mock("../../src/publication/trigger", () => trigger);
+
+import { handleDocsRoute } from "../../src/routes/docs";
+
+const env = {
+  ADMIN_ROUTE_TOKEN: "correct-token",
+} as Env;
+
+describe("POST /docs", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    trigger.handleDocsTrigger.mockResolvedValue({
+      status: "started",
+      publicationRunId: "rec-run-1",
+    });
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["wrong", "Bearer wrong-token"],
+  ])(
+    "rejects %s admin bearer before Airtable or Workflow access",
+    async (_name, authorization) => {
+      const request = new Request("https://worker.example/docs", {
+        method: "POST",
+        headers: authorization ? { authorization } : undefined,
+      });
+
+      const response = await handleDocsRoute(request, env);
+
+      expect(response.status).toBe(401);
+      expect(trigger.handleDocsTrigger).not.toHaveBeenCalled();
+    },
+  );
+
+  it("passes admin trigger after constant-time bearer verification", async () => {
+    const clock = {
+      now: () => new Date("2026-09-01T17:30:00.000Z"),
+    };
+    const response = await handleDocsRoute(
+      new Request("https://worker.example/docs", {
+        method: "POST",
+        headers: { authorization: "Bearer correct-token" },
+      }),
+      env,
+      clock,
+    );
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({
+      status: "started",
+      publicationRunId: "rec-run-1",
+    });
+    expect(trigger.handleDocsTrigger).toHaveBeenCalledWith(
+      env,
+      "admin",
+      clock,
+    );
+  });
+
+  it("returns 200 for an idempotent already-generated result", async () => {
+    trigger.handleDocsTrigger.mockResolvedValue({
+      status: "already_generated",
+      publicationRunId: "rec-run-1",
+    });
+    const response = await handleDocsRoute(
+      new Request("https://worker.example/docs", {
+        method: "POST",
+        headers: { authorization: "Bearer correct-token" },
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+  });
+});
+```
+
+- [ ] **Step 7: Implement and register `/docs` plus cron**
 
 ```ts
 // src/routes/docs.ts
 import type { Env } from "../env";
-import { parseConfig } from "../config";
-import { jsonResponse } from "../shared/http";
-import { findReadyRunForDate } from "../publication/airtable-runs";
+import type { Clock } from "../shared/time";
+import { verifyAdminBearer } from "../shared/admin-auth";
+import { handleDocsTrigger } from "../publication/trigger";
 
-export async function handleDocsRoute(request: Request, env: Env): Promise<Response> {
-  const config = parseConfig(env.APP_CONFIG_JSON);
-  const todayIso = new Date().toISOString().slice(0, 10);
-
-  const run = await findReadyRunForDate(fetch.bind(globalThis), config, env.AIRTABLE_TOKEN, todayIso);
-  if (!run) {
-    return jsonResponse({ status: "no_ready_run" }, { status: 200 });
+export async function handleDocsRoute(
+  request: Request,
+  env: Env,
+  clock: Clock = { now: () => new Date() },
+): Promise<Response> {
+  if (!await verifyAdminBearer(request, env.ADMIN_ROUTE_TOKEN)) {
+    return new Response("Unauthorized", { status: 401 });
   }
-
-  await env.PUBLICATION_WORKFLOW.create({
-    id: `publication:${run.airtableRunId}`,
-    params: { publicationRunId: run.airtableRunId, trigger: "line" },
-  });
-
-  return jsonResponse({ status: "started", publicationRunId: run.airtableRunId }, { status: 202 });
+  const result = await handleDocsTrigger(env, "admin", clock);
+  const status = ["started", "restarted", "resumed"].includes(result.status)
+    ? 202
+    : 200;
+  return Response.json(result, { status });
 }
 ```
 
-- [ ] **Step 8: Run test to verify it passes**
-
-Run: `npx vitest run test/routes/docs.test.ts`
-Expected: PASS — 2 tests green.
-
-- [ ] **Step 9: Wire `/docs` into the router**
-
-Modify `src/router.ts` by adding one route registration next to the existing `/upload` entry (do not touch other routes):
+Register exact native route:
 
 ```ts
+// src/router.ts
 import { handleDocsRoute } from "./routes/docs";
-// ... existing imports stay unchanged
 
-// inside the existing route table/dispatch, alongside the existing POST /upload entry:
 if (request.method === "POST" && url.pathname === "/docs") {
   return handleDocsRoute(request, env);
 }
 ```
 
-- [ ] **Step 10: Wire the publication cron into `scheduled.ts`**
-
-Modify `src/scheduled.ts` by adding one branch next to the existing import-cron branch (do not touch the existing import branch):
+Add exact cron branch; it calls the same internal trigger service and never calls the HTTP route or publication stages directly:
 
 ```ts
-import { findAndRunTodaysPublication } from "./publication/service";
-import { buildPublicationServiceDeps } from "./publication/workflow";
-import { newCorrelationId } from "./shared/ids";
-// ... existing imports stay unchanged
+// src/scheduled.ts
+import { handleDocsTrigger } from "./publication/trigger";
 
-// inside the existing scheduled handler, alongside the existing import-cron branch:
 if (controller.cron === config.publicationCron) {
-  const correlationId = newCorrelationId();
-  const clock = { now: () => new Date(event.scheduledTime) };
-  const deps = buildPublicationServiceDeps(env, clock, correlationId);
-  await findAndRunTodaysPublication(deps, correlationId);
+  await handleDocsTrigger(
+    env,
+    "cron",
+    { now: () => new Date(controller.scheduledTime) },
+  );
   return;
 }
 ```
 
-- [ ] **Step 11: Full check and commit**
+LINE `/docs` continues to call:
+
+```ts
+await handleDocsTrigger(env, "line");
+```
+
+It never calls public `POST /docs` and therefore never needs `ADMIN_ROUTE_TOKEN`.
+
+- [ ] **Step 8: Export and bind `PublicationWorkflow` locally**
+
+Add the second Workflow class export beside `ImportWorkflow`:
+
+```ts
+// src/index.ts
+export { PublicationWorkflow } from "./publication/workflow";
+```
+
+Append the publication binding to the existing top-level local `workflows` array in `wrangler.jsonc`:
+
+```jsonc
+{
+  "name": "snazzy-publication-workflow-local",
+  "binding": "PUBLICATION_WORKFLOW",
+  "class_name": "PublicationWorkflow"
+}
+```
+
+Keep the existing `IMPORT_WORKFLOW` entry; local tests and `wrangler dev` require both bindings.
+
+- [ ] **Step 9: Run focused tests**
+
+Run: `npx vitest run test/publication/workflow.test.ts test/publication/trigger.test.ts test/routes/docs.test.ts test/scheduled.test.ts`
+Expected: PASS.
+
+- [ ] **Step 10: Run full check and commit**
 
 Run: `npm run check`
+Expected: PASS.
 
 ```bash
-git add src/publication/workflow.ts src/routes/docs.ts src/router.ts src/scheduled.ts test/publication/workflow.test.ts test/routes/docs.test.ts
-git commit -m "feat(publication): add PublicationWorkflow, /docs trigger, and publication cron"
+git add src/publication/workflow.ts src/publication/trigger.ts src/routes/docs.ts src/router.ts src/scheduled.ts src/index.ts wrangler.jsonc test/publication/workflow.test.ts test/publication/trigger.test.ts test/routes/docs.test.ts test/scheduled.test.ts
+git commit -m "feat(publication): add durable Workflow and retry-safe triggers"
 ```
 
 ---
 
-## Task 11: Publication acceptance tests
+## Task 11: Publication acceptance suite
 
 **Files:**
 - Create: `test/acceptance/publication.test.ts`
 
 **Interfaces:**
-- Consumes: `runPublicationForRun`, `PublicationServiceDeps` (Task 9); `COLLAGE_BASE_R2_KEY` (Task 4); publication D1 repository (Task 1).
-- Produces: no new exports — this task only adds tests.
+- Consumes: Task 9 stage functions, Task 10 Workflow/trigger functions, Task 4 collage constants, Task 5 caption generator, Task 7 Google client, and D1 publication repository.
+- Produces: no production exports.
 
-This suite proves the acceptance criteria from spec section 18 (“Publication acceptance”): missing field blocks the whole document, first-four image ordering, collage layout, three captions per Product ID, suffix changes, Google API failure, duplicate `/docs`, one final document per date.
-
-- [ ] **Step 1: Write the failing acceptance test file**
+- [ ] **Step 1: Write complete acceptance cases**
 
 ```ts
 // test/acceptance/publication.test.ts
-import { describe, expect, it, vi, beforeEach } from "vitest";
-import { env } from "cloudflare:test";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import { generateKeyPairSync } from "node:crypto";
+import { env as testEnv } from "cloudflare:test";
+import type { Env } from "../../src/env";
+import {
+  acquireOrResumeJob,
+  getProductCache,
+  setJobState,
+  setTempDocId,
+} from "../../src/db/publication-repository";
+import {
+  COLLAGE_BASE_R2_KEY,
+  COLLAGE_CELL_POSITIONS,
+  COLLAGE_CELL_SIZE,
+  type ImageTransformer,
+  type ImagesBinding,
+} from "../../src/publication/collage";
+import {
+  copyTemplate,
+  fillTemplate,
+} from "../../src/publication/google-docs";
+import {
+  ensureTemporaryDocument,
+  failPublicationAfterExhaustion,
+  preparePublicationOutputs,
+  validatePublication,
+  type PublicationServiceDeps,
+  type ValidatedPublication,
+} from "../../src/publication/service";
+import { handleDocsTrigger } from "../../src/publication/trigger";
+import type {
+  PublicationProduct,
+  PublicationRun,
+} from "../../src/publication/types";
 
-vi.mock("../../src/line/client", () => ({ pushTextMessage: vi.fn().mockResolvedValue(undefined) }));
+const clock = {
+  now: () => new Date("2026-09-01T17:30:00.000Z"),
+};
 
-import { runPublicationForRun } from "../../src/publication/service";
-import type { PublicationServiceDeps } from "../../src/publication/service";
-import { COLLAGE_BASE_R2_KEY, COLLAGE_CELL_POSITIONS } from "../../src/publication/collage";
+let privateKey = "";
 
-const clock = { now: () => new Date("2026-09-01T05:00:00.000Z") };
-const config = {
-  airtableBaseId: "base123",
-  airtableProductsTableId: "tblProducts",
-  airtablePublicationRunsTableId: "tblRuns",
-  claudeModel: "claude-opus-5",
-  claudeRequestInputTokenLimit: 150000,
-  googleDriveFolderId: "folder-1",
-  googleTemplateDocId: "template-doc-1",
-  timeZone: "Asia/Bangkok",
-} as any;
+beforeAll(() => {
+  privateKey = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  }).privateKey;
+});
 
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status });
+const rawConfig = {
+  TIME_ZONE: "Asia/Bangkok",
+  UPLOAD_CUTOFF_MINUTES: 30,
+  PRODUCT_ID_PREFIX: "A",
+  IMPORT_CRON: "0 23 * * *",
+  IMPORT_RETRY_LIMIT: 5,
+  PRODUCT_ID_INITIAL_NUMBER: 1,
+  FIRST_IMPORT_CUTOFF_DATE: null,
+  AIRTABLE_BASE_ID: "base123",
+  AIRTABLE_PRODUCTS_TABLE_ID: "tblProducts",
+  LINE_ALLOWED_GROUP_ID: "group-1",
+  PUBLIC_BASE_URL: "https://worker.example",
+  PUBLICATION_CRON: "30 23 * * *",
+  PUBLICATION_RETRY_LIMIT: 5,
+  AIRTABLE_PUBLICATION_RUNS_TABLE_ID: "tblRuns",
+  GOOGLE_DRIVE_FOLDER_ID: "folder-1",
+  GOOGLE_TEMPLATE_DOC_ID: "template-1",
+  CLAUDE_MODEL: "claude-opus-5",
+  CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150_000,
+};
+
+function product(productId: string, imageCount = 5): PublicationProduct {
+  return {
+    airtableRecordId: `rec-${productId}`,
+    productId,
+    orderedImageKeys: Array.from(
+      { length: imageCount },
+      (_, index) => `assets/${productId}-${index + 1}.jpg`,
+    ),
+    brandName: "Nike",
+    modelName: "Air Max",
+    conditionType: "Used",
+    size: "42",
+    description: "สภาพดี",
+    lineSquarePrice: 1290,
+    igPrice: 1390,
+  };
 }
 
-function productFields(id: string, overrides: Record<string, unknown> = {}) {
+function validated(
+  runId: string,
+  products: PublicationProduct[],
+): ValidatedPublication {
   return {
-    "Product ID": id,
-    "Product Images": [
-      { id: "a", url: `assets/${id}-1.jpg` },
-      { id: "b", url: `assets/${id}-2.jpg` },
-      { id: "c", url: `assets/${id}-3.jpg` },
-      { id: "d", url: `assets/${id}-4.jpg` },
-    ],
-    "Brand Name": "Nike",
-    "Model Name": "Air Max",
-    "Condition Type": "Used",
-    Size: "42",
-    Description: "Good condition",
-    "LINE Square Price": 1290,
-    "IG Price": 1390,
+    run: {
+      airtableRunId: runId,
+      publicationDate: "2026-09-02",
+      status: "Ready",
+      products,
+    },
+    thaiDate: "2 กันยายน 2569",
+  };
+}
+
+function toolResponse(products: PublicationProduct[]) {
+  return {
+    content: [{
+      type: "tool_use",
+      name: "submit_captions",
+      input: {
+        captions: products.map(({ productId }) => ({
+          productId,
+          drafts: [
+            `แคปชันหนึ่ง ${productId}`,
+            `แคปชันสอง ${productId}`,
+            `แคปชันสาม ${productId}`,
+          ],
+        })),
+      },
+    }],
+  };
+}
+
+type ImageCall =
+  | {
+      op: "transform";
+      options: Parameters<ImageTransformer["transform"]>[0];
+    }
+  | {
+      op: "draw";
+      options: Parameters<ImageTransformer["draw"]>[1];
+    }
+  | {
+      op: "output";
+      options: Parameters<ImageTransformer["output"]>[0];
+    };
+
+function fakeTransformer(calls: ImageCall[]): ImageTransformer {
+  const transformer: ImageTransformer = {
+    transform(options) {
+      calls.push({ op: "transform", options });
+      return transformer;
+    },
+    draw(_overlay, options) {
+      calls.push({ op: "draw", options });
+      return transformer;
+    },
+    async output(options) {
+      calls.push({ op: "output", options });
+      return {
+        response: () => new Response(new Uint8Array([1, 2, 3])),
+      };
+    },
+  };
+  return transformer;
+}
+
+function baseDeps(
+  overrides: Partial<PublicationServiceDeps> = {},
+): PublicationServiceDeps {
+  const imageCalls: ImageCall[] = [];
+  return {
+    db: testEnv.DB,
+    assets: {
+      putOriginal: vi.fn(),
+      signUrl: vi.fn(async (key: string) =>
+        `https://worker.example/assets/${encodeURIComponent(key)}?expires=1&signature=x`),
+    } as PublicationServiceDeps["assets"],
+    bucket: {
+      get: vi.fn(async () => ({ body: new ReadableStream() })),
+      put: vi.fn(),
+    } as unknown as R2Bucket,
+    images: {
+      input: () => fakeTransformer(imageCalls),
+    } satisfies ImagesBinding,
+    fetcher: vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: "ok" })),
+    ) as unknown as typeof fetch,
+    anthropic: {
+      messages: {
+        countTokens: vi.fn().mockResolvedValue({ input_tokens: 1_000 }),
+        create: vi.fn(),
+      },
+    } as unknown as PublicationServiceDeps["anthropic"],
+    clock,
+    config: {
+      airtableBaseId: "base123",
+      airtableProductsTableId: "tblProducts",
+      airtablePublicationRunsTableId: "tblRuns",
+      googleDriveFolderId: "folder-1",
+      googleTemplateDocId: "template-1",
+      claudeModel: "claude-opus-5",
+      claudeRequestInputTokenLimit: 150_000,
+      publicationRetryLimit: 5,
+      publicBaseUrl: "https://worker.example",
+      lineAllowedGroupId: "group-1",
+      timeZone: "Asia/Bangkok",
+    } as PublicationServiceDeps["config"],
+    airtableToken: "airtable-token",
+    googleServiceAccountJson: JSON.stringify({
+      client_email: "svc@example.com",
+      private_key: privateKey,
+    }),
+    notify: vi.fn(),
     ...overrides,
   };
 }
 
-function fakeImages(collageCalls: unknown[]) {
-  return {
-    input: () => {
-      const t: any = {
-        transform(options: unknown) {
-          collageCalls.push({ op: "transform", options });
-          return t;
-        },
-        draw(_overlay: unknown, options: unknown) {
-          collageCalls.push({ op: "draw", options });
-          return t;
-        },
-        async output() {
-          return { response: () => new Response(new Uint8Array([1, 2, 3])) };
-        },
-      };
-      return t;
-    },
-  };
+async function createJob(runId: string): Promise<void> {
+  await acquireOrResumeJob(testEnv.DB, clock, runId, `publication-${runId}`);
 }
 
-async function fakeBucket() {
-  const store = new Map<string, Uint8Array>();
-  store.set(COLLAGE_BASE_R2_KEY, new Uint8Array([1]));
-  for (const id of ["A-2001", "A-2002"]) {
-    for (const suffix of ["1", "2", "3", "4"]) store.set(`assets/${id}-${suffix}.jpg`, new Uint8Array([1]));
-  }
-  return {
-    async get(key: string) {
-      const v = store.get(key);
-      return v ? { body: new ReadableStream() } : null;
-    },
-    async put(key: string, value: unknown) {
-      store.set(key, value as Uint8Array);
-    },
-  } as unknown as R2Bucket;
+async function cacheCollage(runId: string, productId: string): Promise<void> {
+  await testEnv.DB.prepare(
+    `INSERT INTO publication_product_cache
+       (publication_run_id, product_id, collage_r2_key, updated_at)
+     VALUES (?, ?, ?, ?)`,
+  ).bind(
+    runId,
+    productId,
+    `products/${productId}/collage/1080x1080.jpg`,
+    clock.now().toISOString(),
+  ).run();
 }
 
-function docBodyWithMarkers() {
-  return {
-    body: {
-      content: [
-        { paragraph: { elements: [{ startIndex: 1, endIndex: 21, textRun: { content: "{{PUBLICATION_DATE}}" } }] } },
-        {
-          paragraph: {
-            elements: [
-              { startIndex: 21, endIndex: 32, textRun: { content: "{{PRODUCTS}}" } },
-              { startIndex: 32, endIndex: 47, textRun: { content: "-- end of listing --" } },
-              { startIndex: 47, endIndex: 63, textRun: { content: "{{END_PRODUCTS}}" } },
-            ],
-          },
-        },
-      ],
-    },
-  };
-}
-
-function toolCaptionResponse(productIds: string[]) {
-  return {
-    content: [
-      {
-        type: "tool_use",
-        name: "submit_captions",
-        input: { captions: productIds.map((id) => ({ productId: id, drafts: [`${id}-d1`, `${id}-d2`, `${id}-d3`] })) },
+function runnableRunResponse(): Response {
+  return new Response(JSON.stringify({
+    records: [{
+      id: "rec-run-1",
+      fields: {
+        "Publication Date": "2026-09-02",
+        Status: "Ready",
+        Products: [],
       },
-    ],
-  };
-}
-
-function buildDeps(overrides: Partial<PublicationServiceDeps> = {}): PublicationServiceDeps {
-  return {
-    db: env.DB,
-    bucket: overrides.bucket ?? ({} as any),
-    images: overrides.images ?? ({} as any),
-    fetcher: overrides.fetcher ?? (vi.fn() as any),
-    anthropic: overrides.anthropic ?? ({ messages: { create: vi.fn(), countTokens: vi.fn() } } as any),
-    clock,
-    config,
-    airtableToken: "airtable-token",
-    googleServiceAccountJson: JSON.stringify({ client_email: "svc@example.com", private_key: "unused" }),
-    lineGroupId: "group-1",
-    signCollageUrl: overrides.signCollageUrl ?? (async (key: string) => `https://r2.example.com/signed/${key}`),
-  };
+    }],
+  }));
 }
 
 describe("publication acceptance", () => {
   beforeEach(async () => {
-    await env.DB.exec("DELETE FROM publication_jobs");
-    await env.DB.exec("DELETE FROM publication_product_cache");
+    await testEnv.DB.exec("DELETE FROM publication_product_cache");
+    await testEnv.DB.exec("DELETE FROM publication_jobs");
   });
 
-  it("blocks the whole document when any linked product is missing a required field", async () => {
-    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.includes("tblRuns") && init?.method === "PATCH") {
-        const body = JSON.parse((init as any).body);
-        expect(body.fields.Status).toBe("Draft");
-        return jsonResponse({ id: "rec-run-1" });
-      }
-      if (url.includes("tblRuns")) {
-        return jsonResponse({ records: [{ id: "rec-run-1", fields: { "Publication Date": "2026-09-01", Status: "Ready", Products: ["recA", "recB"] } }] });
-      }
-      if (url.includes("tblProducts")) {
-        return jsonResponse({
-          records: [
-            { id: "recA", fields: productFields("A-2001") },
-            { id: "recB", fields: productFields("A-2002", { Description: "" }) },
-          ],
-        });
-      }
-      throw new Error(`unhandled fetch: ${url}`);
-    });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
-    const deps = buildDeps({ fetcher: fetcher as any });
-    const outcome = await runPublicationForRun(deps, "rec-run-1", "corr-1");
+  it("missing field blocks whole run before Google copy", async () => {
+    const invalid = product("A-1001");
+    invalid.description = "";
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: "rec-run-1",
+        fields: {
+          "Publication Date": "2026-09-02",
+          Status: "Ready",
+          Products: ["rec-A-1001"],
+        },
+      })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        records: [{
+          id: "rec-A-1001",
+          fields: {
+            "Product ID": invalid.productId,
+            "Product Images": invalid.orderedImageKeys.map((key, index) => ({
+              id: String(index),
+              url: `https://dl.airtable.com/${index}`,
+              filename: key.slice("assets/".length),
+            })),
+            "Brand Name": invalid.brandName,
+            "Model Name": invalid.modelName,
+            "Condition Type": invalid.conditionType,
+            Size: invalid.size,
+            Description: invalid.description,
+            "LINE Square Price": invalid.lineSquarePrice,
+            "IG Price": invalid.igPrice,
+          },
+        }],
+      })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "rec-run-1" })));
+    const deps = baseDeps({ fetcher: fetcher as unknown as typeof fetch });
+
+    const outcome = await validatePublication(
+      deps,
+      "rec-run-1",
+      "publication-rec-run-1",
+    );
+
     expect(outcome.kind).toBe("validation_failed");
-
-    const patchCalls = fetcher.mock.calls.filter(([, init]: any) => init?.method === "PATCH" && String(init?.body).includes("Draft"));
-    expect(patchCalls.length).toBeGreaterThan(0);
-
-    const googleDocsCalls = fetcher.mock.calls.filter(([url]) => String(url).includes("docs.googleapis.com"));
-    expect(googleDocsCalls).toHaveLength(0);
+    const patch = JSON.parse(String(fetcher.mock.calls[2]![1]?.body));
+    expect(patch.fields).toEqual({
+      Status: "Draft",
+      "Error Summary": "A-1001: Description",
+    });
+    expect(fetcher.mock.calls.some(([url]) =>
+      String(url).includes("googleapis.com"))).toBe(false);
+    expect(deps.anthropic.messages.create).not.toHaveBeenCalled();
+    expect(deps.bucket.get).not.toHaveBeenCalled();
+    expect(deps.bucket.put).not.toHaveBeenCalled();
+    expect(deps.notify).not.toHaveBeenCalled();
   });
 
-  it("uses only the first four ordered images for the collage in ordered position", async () => {
-    const collageCalls: unknown[] = [];
-    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.includes("tblRuns") && init?.method === "PATCH") return jsonResponse({ id: "rec-run-1" });
-      if (url.includes("tblRuns")) {
-        return jsonResponse({
-          records: [{ id: "rec-run-1", fields: { "Publication Date": "2026-09-01", Status: "Ready", Products: ["recA"] } }],
-        });
-      }
-      if (url.includes("tblProducts") && init?.method === "PATCH") return jsonResponse({ id: "recA" });
-      if (url.includes("tblProducts")) {
-        return jsonResponse({
-          records: [
-            {
-              id: "recA",
-              fields: productFields("A-2001", {
-                "Product Images": [
-                  { id: "a", url: "assets/A-2001-1.jpg" },
-                  { id: "b", url: "assets/A-2001-2.jpg" },
-                  { id: "c", url: "assets/A-2001-3.jpg" },
-                  { id: "d", url: "assets/A-2001-4.jpg" },
-                  { id: "e", url: "assets/A-2001-5.jpg" },
-                ],
-              }),
-            },
-          ],
-        });
-      }
-      if (url.includes("drive/v3/files") && url.includes("copy")) return jsonResponse({ id: "temp-doc-1" });
-      if (url.includes("docs.googleapis.com") && !url.includes("batchUpdate")) return jsonResponse(docBodyWithMarkers());
-      if (url.includes("batchUpdate")) return jsonResponse({ documentId: "temp-doc-1" });
-      if (url.includes("drive/v3/files/temp-doc-1") && init?.method === "PATCH") return jsonResponse({ id: "temp-doc-1" });
-      throw new Error(`unhandled fetch: ${url}`);
+  it("first four ordered images occupy deterministic 2x2 positions", async () => {
+    const runId = "rec-run-collage";
+    const item = product("A-1001", 5);
+    await createJob(runId);
+    await testEnv.DB.prepare(
+      `INSERT INTO publication_product_cache
+         (publication_run_id, product_id, captions_json, updated_at)
+       VALUES (?, ?, ?, ?)`,
+    ).bind(
+      runId,
+      item.productId,
+      JSON.stringify(["หนึ่ง", "สอง", "สาม"]),
+      clock.now().toISOString(),
+    ).run();
+    const imageCalls: ImageCall[] = [];
+    const get = vi.fn(async (key: string) => {
+      const allowed = [COLLAGE_BASE_R2_KEY, ...item.orderedImageKeys.slice(0, 4)];
+      return allowed.includes(key) ? { body: new ReadableStream() } : null;
+    });
+    const deps = baseDeps({
+      bucket: { get, put: vi.fn() } as unknown as R2Bucket,
+      images: { input: () => fakeTransformer(imageCalls) },
     });
 
-    const anthropic = { messages: { create: vi.fn().mockResolvedValue(toolCaptionResponse(["A-2001"])), countTokens: vi.fn().mockResolvedValue({ input_tokens: 100 }) } };
-    const deps = buildDeps({ fetcher: fetcher as any, bucket: await fakeBucket(), images: fakeImages(collageCalls) as any, anthropic: anthropic as any });
+    const prepared = await preparePublicationOutputs(
+      deps,
+      validated(runId, [item]),
+    );
 
-    // verifyDocumentContainsProducts reads the doc again; make that call return text containing the Product ID.
-    fetcher.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.includes("tblRuns") && init?.method === "PATCH") return jsonResponse({ id: "rec-run-1" });
-      if (url.includes("tblRuns")) {
-        return jsonResponse({ records: [{ id: "rec-run-1", fields: { "Publication Date": "2026-09-01", Status: "Ready", Products: ["recA"] } }] });
-      }
-      if (url.includes("tblProducts") && init?.method === "PATCH") return jsonResponse({ id: "recA" });
-      if (url.includes("tblProducts")) {
-        return jsonResponse({
-          records: [
-            {
-              id: "recA",
-              fields: productFields("A-2001", {
-                "Product Images": [
-                  { id: "a", url: "assets/A-2001-1.jpg" },
-                  { id: "b", url: "assets/A-2001-2.jpg" },
-                  { id: "c", url: "assets/A-2001-3.jpg" },
-                  { id: "d", url: "assets/A-2001-4.jpg" },
-                  { id: "e", url: "assets/A-2001-5.jpg" },
-                ],
-              }),
-            },
-          ],
-        });
-      }
-      if (url.includes("drive/v3/files") && url.includes("copy")) return jsonResponse({ id: "temp-doc-1" });
-      if (url.includes("batchUpdate")) return jsonResponse({ documentId: "temp-doc-1" });
-      if (url.includes("docs.googleapis.com")) {
-        return jsonResponse({
-          body: { content: [{ paragraph: { elements: [{ textRun: { content: "Product ID: A-2001" } }] } }] },
-        });
-      }
-      if (url.includes("drive/v3/files/temp-doc-1") && init?.method === "PATCH") return jsonResponse({ id: "temp-doc-1" });
-      throw new Error(`unhandled fetch: ${url}`);
-    });
-
-    const outcome = await runPublicationForRun(deps, "rec-run-1", "corr-1");
-    expect(outcome.kind).toBe("succeeded");
-
-    const drawCalls = collageCalls.filter((c: any) => c.op === "draw");
-    expect(drawCalls).toHaveLength(4);
-    expect((drawCalls as any[]).map((c) => ({ top: c.options.top, left: c.options.left }))).toEqual(COLLAGE_CELL_POSITIONS);
+    expect(get.mock.calls.map(([key]) => key)).toEqual([
+      COLLAGE_BASE_R2_KEY,
+      ...item.orderedImageKeys.slice(0, 4),
+    ]);
+    expect(get).not.toHaveBeenCalledWith(item.orderedImageKeys[4]);
+    expect(prepared.outputs[0]!.collageR2Key).toBe(
+      "products/A-1001/collage/1080x1080.jpg",
+    );
+    const transforms = imageCalls.filter(
+      (call): call is Extract<
+        ImageCall,
+        { op: "transform" }
+      > => call.op === "transform",
+    );
+    expect(transforms).toHaveLength(4);
+    for (const call of transforms) {
+      expect(call.options).toEqual({
+        width: COLLAGE_CELL_SIZE,
+        height: COLLAGE_CELL_SIZE,
+        fit: "contain",
+        background: "#FFFFFF",
+      });
+    }
+    expect(imageCalls
+      .filter(
+        (call): call is Extract<
+          ImageCall,
+          { op: "draw" }
+        > => call.op === "draw",
+      )
+      .map(({ options }) => ({
+        top: options.top,
+        left: options.left,
+      }))).toEqual(COLLAGE_CELL_POSITIONS);
   });
 
-  it("returns already_succeeded and never creates a second final document on duplicate /docs for the same run", async () => {
-    await env.DB.prepare(
-      `INSERT INTO publication_jobs (publication_run_id, state, correlation_id, google_doc_id, google_doc_url, attempt_count, created_at, updated_at)
-       VALUES (?, 'succeeded', 'corr-0', 'doc-existing', 'https://docs.google.com/document/d/doc-existing/edit', 1, ?, ?)`,
-    )
-      .bind("rec-run-1", clock.now().toISOString(), clock.now().toISOString())
-      .run();
+  it("exactly three Thai captions are cached for a normal 22-product run in one request", async () => {
+    const runId = "rec-run-22";
+    const products = Array.from(
+      { length: 22 },
+      (_, index) => product(`A-${1001 + index}`, 4),
+    );
+    await createJob(runId);
+    for (const item of products) await cacheCollage(runId, item.productId);
+    const countTokens = vi.fn().mockResolvedValue({ input_tokens: 12_000 });
+    const create = vi.fn().mockResolvedValue(toolResponse(products));
+    const deps = baseDeps({
+      anthropic: { messages: { countTokens, create } } as unknown as
+        PublicationServiceDeps["anthropic"],
+    });
 
-    const fetcher = vi.fn();
-    const deps = buildDeps({ fetcher: fetcher as any });
-    const outcome = await runPublicationForRun(deps, "rec-run-1", "corr-1");
+    const prepared = await preparePublicationOutputs(
+      deps,
+      validated(runId, products),
+    );
 
-    expect(outcome).toEqual({
-      kind: "already_succeeded",
-      result: {
+    expect(countTokens).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(prepared.outputs).toHaveLength(22);
+    const prompt = create.mock.calls[0]![0].messages[0]!.content as string;
+    expect(prompt).not.toContain("assets/");
+    for (const item of products) {
+      const cache = await getProductCache(testEnv.DB, runId, item.productId);
+      const drafts = JSON.parse(cache.captionsJson ?? "[]") as string[];
+      expect(drafts).toHaveLength(3);
+      expect(drafts.every((draft) => draft.trim().length > 0)).toBe(true);
+      expect(drafts.every((draft) => /[ก-๙]/.test(draft))).toBe(true);
+    }
+  });
+
+  it("retry requests only uncached or invalid Product IDs", async () => {
+    const runId = "rec-run-retry";
+    const products = [product("A-1001", 4), product("A-1002", 4), product("A-1003", 4)];
+    await createJob(runId);
+    for (const item of products) await cacheCollage(runId, item.productId);
+    const create = vi.fn()
+      .mockResolvedValueOnce(toolResponse(products.slice(0, 2)))
+      .mockResolvedValueOnce(toolResponse(products.slice(2)));
+    const deps = baseDeps({
+      anthropic: {
+        messages: {
+          countTokens: vi.fn().mockResolvedValue({ input_tokens: 1_000 }),
+          create,
+        },
+      } as unknown as PublicationServiceDeps["anthropic"],
+    });
+
+    await expect(
+      preparePublicationOutputs(deps, validated(runId, products)),
+    ).rejects.toThrow("caption generation incomplete for A-1003");
+    expect((await getProductCache(testEnv.DB, runId, "A-1001")).captionsJson).not.toBeNull();
+    expect((await getProductCache(testEnv.DB, runId, "A-1002")).captionsJson).not.toBeNull();
+    expect((await getProductCache(testEnv.DB, runId, "A-1003")).captionsJson).toBeNull();
+
+    await preparePublicationOutputs(deps, validated(runId, products));
+
+    const firstPrompt = create.mock.calls[0]![0].messages[0]!.content as string;
+    const retryPrompt = create.mock.calls[1]![0].messages[0]!.content as string;
+    expect(firstPrompt).toContain("A-1001");
+    expect(firstPrompt).toContain("A-1002");
+    expect(firstPrompt).toContain("A-1003");
+    expect(retryPrompt).not.toContain("A-1001");
+    expect(retryPrompt).not.toContain("A-1002");
+    expect(retryPrompt).toContain("A-1003");
+
+    const schemaRunId = "rec-run-schema";
+    await createJob(schemaRunId);
+    for (const item of products) await cacheCollage(schemaRunId, item.productId);
+    const schemaDeps = baseDeps({
+      anthropic: {
+        messages: {
+          countTokens: vi.fn().mockResolvedValue({ input_tokens: 1_000 }),
+          create: vi.fn().mockResolvedValue({ content: [] }),
+        },
+      } as unknown as PublicationServiceDeps["anthropic"],
+    });
+    await expect(
+      preparePublicationOutputs(schemaDeps, validated(schemaRunId, products)),
+    ).rejects.toThrow(/caption generation incomplete/);
+    for (const item of products) {
+      expect((await getProductCache(
+        testEnv.DB,
+        schemaRunId,
+        item.productId,
+      )).captionsJson).toBeNull();
+    }
+  });
+
+  it("Drive appProperties recovery prevents a second copy and document refill", async () => {
+    const runId = "rec-run-drive";
+    await createJob(runId);
+    const tokenProvider = {
+      getAccessToken: vi.fn().mockResolvedValue("google-token"),
+    };
+    const initialCopyFetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: "temp-doc-1" })),
+    );
+
+    const copiedId = await copyTemplate(
+      initialCopyFetch as unknown as typeof fetch,
+      tokenProvider,
+      "template-1",
+      "folder-1",
+      runId,
+      "Publication 2026-09-02 (in progress)",
+    );
+    expect(copiedId).toBe("temp-doc-1");
+    // Simulate copy success followed by failure before setTempDocId persisted.
+    expect((await acquireOrResumeJob(
+      testEnv.DB,
+      clock,
+      runId,
+      "corr-check",
+    )).job.tempDocId).toBeNull();
+
+    const recoveryFetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "google-token",
+        expires_in: 3600,
+      })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        files: [{ id: "temp-doc-1" }],
+      })));
+    const deps = baseDeps({
+      fetcher: recoveryFetch as unknown as typeof fetch,
+    });
+    const recoveredId = await ensureTemporaryDocument(
+      deps,
+      { ...validated(runId, []), outputs: [] },
+    );
+
+    expect(recoveredId).toBe("temp-doc-1");
+    expect(recoveryFetch.mock.calls.some(([url]) =>
+      String(url).endsWith("/copy"))).toBe(false);
+    const query = new URL(String(recoveryFetch.mock.calls[1]![0]))
+      .searchParams.get("q");
+    expect(query).toContain("'folder-1' in parents");
+    expect(query).toContain("key='publicationRunId'");
+    expect(query).toContain(`value='${runId}'`);
+
+    const fillFetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        body: { content: [{ paragraph: { elements: [
+          {
+            startIndex: 1,
+            endIndex: 42,
+            textRun: { content: "{{PRODUCTS}}suffix{{END_PRODUCTS}}" },
+          },
+        ] } }] },
+      })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ documentId: "temp-doc-1" })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        body: { content: [{ paragraph: { elements: [
+          { textRun: { content: "Product ID: A-1001" } },
+        ] } }] },
+      })));
+    const docProduct = {
+      productId: "A-1001",
+      conditionType: "Used",
+      description: "สภาพดี",
+      lineSquarePrice: 1290,
+      igPrice: 1390,
+      captionDrafts: ["หนึ่ง", "สอง", "สาม"] as [string, string, string],
+      collageImageUrl: "https://worker.example/signed-collage",
+    };
+    await fillTemplate(
+      fillFetch as unknown as typeof fetch,
+      tokenProvider,
+      "temp-doc-1",
+      "2 กันยายน 2569",
+      [docProduct],
+    );
+    await fillTemplate(
+      fillFetch as unknown as typeof fetch,
+      tokenProvider,
+      "temp-doc-1",
+      "2 กันยายน 2569",
+      [docProduct],
+    );
+    expect(fillFetch.mock.calls.filter(([url]) =>
+      String(url).includes(":batchUpdate"))).toHaveLength(1);
+  });
+
+  it("duplicate docs trigger reuses one hyphenated Workflow ID", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      runnableRunResponse());
+
+    function workflowEnv(statusValue: string) {
+      const restart = vi.fn();
+      const resume = vi.fn();
+      const get = vi.fn().mockReturnValue({
+        status: vi.fn().mockResolvedValue({ status: statusValue }),
+        restart,
+        resume,
+      });
+      const create = vi.fn().mockResolvedValue({
+        id: "publication-rec-run-1",
+      });
+      const env = {
+        DB: testEnv.DB,
+        APP_CONFIG_JSON: JSON.stringify(rawConfig),
+        AIRTABLE_TOKEN: "airtable-token",
+        PUBLICATION_WORKFLOW: { get, create },
+      } as unknown as Env;
+      return { env, get, create, restart };
+    }
+
+    const first = workflowEnv("unknown");
+    expect((await handleDocsTrigger(first.env, "admin", clock)).status)
+      .toBe("started");
+    expect(first.create).toHaveBeenCalledWith({
+      id: "publication-rec-run-1",
+      params: {
         publicationRunId: "rec-run-1",
-        googleDocId: "doc-existing",
-        googleDocUrl: "https://docs.google.com/document/d/doc-existing/edit",
-        productIds: [],
+        trigger: "admin",
       },
     });
-    expect(fetcher).not.toHaveBeenCalled();
+
+    const active = workflowEnv("running");
+    expect((await handleDocsTrigger(active.env, "line", clock)).status)
+      .toBe("already_running");
+
+    const errored = workflowEnv("errored");
+    expect((await handleDocsTrigger(errored.env, "admin", clock)).status)
+      .toBe("restarted");
+    expect(errored.restart).toHaveBeenCalledTimes(1);
+
+    await setJobState(testEnv.DB, clock, "rec-run-1", "succeeded", {
+      googleDocId: "doc-1",
+      googleDocUrl: "https://docs.google.com/document/d/doc-1/edit",
+    });
+    const succeeded = workflowEnv("complete");
+    expect((await handleDocsTrigger(succeeded.env, "admin", clock)).status)
+      .toBe("already_generated");
+    expect(succeeded.get).not.toHaveBeenCalled();
+
+    for (const fixture of [first, active, errored, succeeded]) {
+      for (const [options] of fixture.create.mock.calls) {
+        expect(options.id).toMatch(/^publication-/);
+        expect(options.id).not.toContain(":");
+      }
+    }
   });
 
-  it("deletes the temporary document and marks the job failed when the Google API fails persistently", async () => {
-    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.includes("tblRuns") && init?.method === "PATCH") return jsonResponse({ id: "rec-run-1" });
-      if (url.includes("tblRuns")) {
-        return jsonResponse({ records: [{ id: "rec-run-1", fields: { "Publication Date": "2026-09-01", Status: "Ready", Products: ["recA"] } }] });
-      }
-      if (url.includes("tblProducts")) {
-        return jsonResponse({ records: [{ id: "recA", fields: productFields("A-2001") }] });
-      }
-      if (url.includes("drive/v3/files") && url.includes("copy")) return jsonResponse({ id: "temp-doc-1" });
-      if (url.includes("docs.googleapis.com") && !url.includes("batchUpdate")) return jsonResponse(docBodyWithMarkers());
-      if (url.includes("batchUpdate")) return new Response("server error", { status: 500 });
-      if (url.includes("drive/v3/files/temp-doc-1") && init?.method === "DELETE") return new Response(null, { status: 204 });
-      throw new Error(`unhandled fetch: ${url}`);
-    });
+  it("keeps temp doc during six calls and deletes it only after retry exhaustion", async () => {
+    const runId = "rec-run-exhausted";
+    await createJob(runId);
+    await setTempDocId(testEnv.DB, clock, runId, "temp-doc-1");
+    const fill = vi.fn().mockRejectedValue(new Error("google 503"));
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "google-token",
+        expires_in: 3600,
+      })))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: runId })));
+    const deps = baseDeps({ fetcher: fetcher as unknown as typeof fetch });
 
-    const anthropic = { messages: { create: vi.fn().mockResolvedValue(toolCaptionResponse(["A-2001"])), countTokens: vi.fn().mockResolvedValue({ input_tokens: 100 }) } };
-    const deps = buildDeps({ fetcher: fetcher as any, bucket: await fakeBucket(), images: fakeImages([]) as any, anthropic: anthropic as any });
+    for (let call = 0; call < 6; call += 1) {
+      await expect(fill()).rejects.toThrow("google 503");
+      expect(fetcher.mock.calls.some(([, init]) =>
+        init?.method === "DELETE")).toBe(false);
+    }
 
-    await expect(runPublicationForRun(deps, "rec-run-1", "corr-1")).rejects.toThrow();
+    await failPublicationAfterExhaustion(
+      deps,
+      runId,
+      "google 503",
+      "2 กันยายน 2569",
+    );
 
-    const deleteCalls = fetcher.mock.calls.filter(([url, init]: any) => String(url).includes("temp-doc-1") && init?.method === "DELETE");
-    expect(deleteCalls).toHaveLength(1);
-
-    const jobRow = await env.DB.prepare("SELECT state FROM publication_jobs WHERE publication_run_id = ?").bind("rec-run-1").first<{ state: string }>();
-    expect(jobRow?.state).toBe("failed");
+    expect(fill).toHaveBeenCalledTimes(6);
+    expect(fetcher.mock.calls.filter(([, init]) =>
+      init?.method === "DELETE")).toHaveLength(1);
+    expect((await acquireOrResumeJob(
+      testEnv.DB,
+      clock,
+      runId,
+      "corr-after",
+    )).job).toMatchObject({ state: "failed", tempDocId: null });
   });
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+Task 10's pure Workflow-runner test proves `step.do()` invokes those six failed calls and only then calls `failPublicationAfterExhaustion`; this acceptance case uses the real cleanup function to prove its D1, Drive, Airtable, and LINE effects.
+
+- [ ] **Step 2: Run acceptance suite**
 
 Run: `npx vitest run test/acceptance/publication.test.ts`
-Expected: FAIL — assertions fail or requests are unhandled because prior tasks are not yet wired together correctly in this exact combination (surfaces integration gaps not caught by unit tests).
+Expected: PASS — 7 acceptance tests green. Any failure identifies an integration defect in production code from Tasks 1–10, not missing test scaffolding.
 
-- [ ] **Step 3: Fix integration gaps until the suite passes**
+- [ ] **Step 3: Fix only publication integration defects if Step 2 fails**
 
-Common gaps to expect and fix directly in the files from Tasks 1–9 (not new files):
-- If `verifyDocumentContainsProducts` is called against the same `docId` as `fillTemplate` in `service.ts`, confirm the mocked route order in the test matches call order in `service.ts` (`fillTemplate` then `verifyDocumentContainsProducts`); adjust the fetch router in the test if a route is unreachable, not the implementation, unless the implementation calls a different sequence than intended.
-- If `ensureCollage` in `service.ts` reads `getProductCache`/`putProductCollage` keyed by `product.airtableRecordId` instead of `publicationRunId`, correct the two calls in `service.ts` to use `airtableRunId` consistently (this task's fixture inserts/reads cache rows keyed by `publicationRunId`).
+Allowed files: `src/publication/*.ts`, `src/routes/docs.ts`, `src/scheduled.ts`, `src/db/publication-repository.ts`, and their existing tests. Do not create alternate production paths or replace real stage calls with acceptance-only helpers. Re-run the single failing test after each minimal fix until all 7 pass.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run focused, acceptance, and full checks**
 
-Run: `npx vitest run test/acceptance/publication.test.ts`
-Expected: PASS — 4 tests green.
+Run: `npx vitest run test/acceptance/publication.test.ts && npm run check`
+Expected: PASS.
 
-- [ ] **Step 5: Full check and commit**
-
-Run: `npm run check`
+- [ ] **Step 5: Commit**
 
 ```bash
-git add test/acceptance/publication.test.ts
-git commit -m "test(publication): add acceptance suite for validation blocking, collage ordering, idempotency, and cleanup"
+git add test/acceptance/publication.test.ts src/publication src/routes/docs.ts src/scheduled.ts src/db/publication-repository.ts
+git commit -m "test(publication): prove validation, retry, recovery, and one-document invariants"
 ```
 
 ---
@@ -3999,14 +5847,20 @@ git commit -m "test(publication): add acceptance suite for validation blocking, 
 
 This plan is complete only when:
 
-- `npm run check` passes with all publication tests included.
-- `migrations/0002_publication.sql` applies cleanly to a fresh local D1 database via `npm run db:migrate:local`.
-- The publication acceptance suite (Task 11) proves: missing-field blocks the whole document and creates no Google Doc; first-four ordered images drive the collage in deterministic position; three captions are generated per Product ID; duplicate `/docs` triggers never create a second final document for the same run; a persistent Google API failure deletes the temporary document and marks the job `failed`.
-- `POST /docs` and the publication cron branch both start/resume `PublicationWorkflow` keyed by `publication:<airtablePublicationRunId>`.
-- LINE receives a Thai success message (date, count, Product IDs, Google Doc link) on success, a grouped missing-fields report on validation failure, and a failure report with a safe retry command on workflow failure — and none of these messages contain secrets, signed URLs, or raw stack traces (Task 8, Step 1 second test).
+- `npm run check` passes with all publication tests.
+- `migrations/0002_publication.sql` applies to a fresh local D1 database.
+- Missing Product data returns the Airtable run to Draft, writes the complete Error Summary, sends a Thai LINE report, and performs no Google/Claude/Images/R2 side effect.
+- Collages use the first four ordered images, deterministic 1080×1080 2×2 contain layout, white padding, private R2 storage, and shared `AssetStore.signUrl` delivery.
+- Caption generation uses official `@anthropic-ai/sdk`, model `claude-opus-5`, adaptive thinking, `maxRetries: 0`, deterministic token batching, exactly three Thai drafts, valid-output caching, and missing-only retry.
+- Google Drive copy is tagged with `appProperties.publicationRunId`, rediscovered after uncertain copy persistence, and never duplicated for one Airtable Publication Run.
+- Google document fill is retry-safe: one atomic batch, completed-document no-op detection, Product ID verification, and one final document URL.
+- Transient stages receive one initial call plus five retries. Temporary document deletion and Failed status occur only after exhaustion; validation failures do not create a document or mark Failed.
+- `POST /docs` rejects missing/wrong bearer tokens, uses trigger `admin`, and shares internal trigger code with cron and LINE.
+- Cron and `/docs` use Bangkok date and create/restart/resume `PublicationWorkflow` under `publication-<airtablePublicationRunId>`; no colon Workflow ID remains.
 
 ## Self-Review Notes
 
-- **Spec coverage:** section 10 (trigger/validation, collage, captions, template, completion/retries) is covered by Tasks 1–2–3–4–5–7–9; section 11's `/docs` command and section 8's cron pattern are covered by Task 10; section 13's LINE log requirements are covered by Task 8; section 12's publication idempotency (`Unique key: Airtable Publication Run ID. One final Google Doc ID per run.`) is covered by Task 1's `publication_jobs` lock plus Task 9's `already_succeeded` short-circuit, exercised in Task 11.
-- **Placeholder scan:** no TBD/TODO markers; every step has runnable code and exact commands.
-- **Type consistency:** `PublicationServiceDeps`, `PublicationOutcome`, `CaptionSet`, `DocProductContent`, and `ImagesBinding` are defined once (Tasks 2, 4, 5, 7, 9) and reused verbatim by every later task; `collageR2Key`/`COLLAGE_BASE_R2_KEY`/`COLLAGE_CELL_POSITIONS` from Task 4 are the single source used by Tasks 9 and 11.
+- **Spec coverage:** Tasks 1–11 cover D1 idempotency, whole-run validation, deterministic collage, Claude batching/cache, retry-safe Drive/Docs generation, LINE reports, Workflow stage retries, authenticated manual trigger, cron, and acceptance.
+- **Reuse:** Private R2 signing/delivery reuses Import `AssetStore`; no second signer, route, or `R2Bucket.createSignedUrl` call exists.
+- **Retry ownership:** Cloudflare `step.do()` owns retry count. Anthropic automatic retries remain disabled. Permanent `OperationalError` values become `cloudflare:workflows` `NonRetryableError` with preserved code.
+- **Type consistency:** `PublicationWorkflowParams.trigger` is `"cron" | "line" | "admin"`; every cache call uses Airtable Publication Run ID; every trigger uses hyphenated Workflow ID.

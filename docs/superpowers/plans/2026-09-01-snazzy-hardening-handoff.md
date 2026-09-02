@@ -6,7 +6,7 @@
 
 **Architecture:** This plan adds no new business features. It adds a usage-metrics D1 table and repository wired into existing Claude and R2 call sites, a setup-validation route and CLI script, a budget/cost report backed by that table, failure-injectable test fakes exercised against the existing `import/service.ts` and `publication/service.ts` orchestration functions, staging/production `wrangler.jsonc` environments, and four operator runbooks. Every acceptance suite (import batches, publication, LINE, redaction, smoke) runs against the real service functions with fake external clients — no new production code paths are introduced beyond metrics and setup validation.
 
-**Tech Stack:** TypeScript, Cloudflare Workers, Cloudflare Workflows, D1, R2, Cloudflare Images, Vitest 4.1+, `@cloudflare/vitest-plugin`, Zod, `@anthropic-ai/sdk`, `tsx` (new devDependency for running `scripts/*.ts`).
+**Tech Stack:** TypeScript, Cloudflare Workers, Cloudflare Workflows, D1, R2, Cloudflare Images, Vitest 4.1+, `@cloudflare/vitest-plugin`, Zod, `@anthropic-ai/sdk`, and the existing `tsx` devDependency from Foundation Task 1.
 
 **Spec:** `docs/superpowers/specs/2026-09-01-snazzy-automation-design.md`
 
@@ -15,7 +15,8 @@
 - Dedicated customer-owned staging and production deployments.
 - Runtime timezone: `Asia/Bangkok`.
 - Import volume: 100–500 photos/day; normal product group: 9–15 photos.
-- Retry transient workflow steps five times with exponential backoff.
+- Retry transient workflow steps up to five times after the initial attempt, with exponential backoff.
+- Operator routes `/upload`, `/docs`, `/setup`, and `/usage` verify `Authorization: Bearer <ADMIN_ROUTE_TOKEN>` with the shared constant-time `verifyAdminBearer` helper before any side effect or dependency access.
 - Missing Product data blocks whole publication and creates no Google Doc.
 - Already-Out Product is never overwritten.
 - Only allowlisted LINE group may execute commands; every LINE webhook signature is verified.
@@ -30,33 +31,27 @@
 
 ---
 
-## Prerequisite: install `tsx`
+## Prerequisite: register operational scripts
 
-Every task below that runs a `scripts/*.ts` file needs a TypeScript script runner. Install it once before Task 1.
-
-```bash
-npm install --save-dev tsx
-```
-
-Add to `package.json` `scripts`:
+Foundation Task 1 already installs `tsx`. Add only the scripts implemented by this plan to the existing `package.json` `scripts` object; preserve every existing script:
 
 ```json
 {
   "scripts": {
     "setup:verify": "tsx scripts/verify-airtable-schema.ts",
-    "usage:alarms": "tsx scripts/configure-usage-alarms.ts",
-    "smoke:staging": "tsx scripts/smoke-test.ts --env staging",
-    "smoke:production": "tsx scripts/smoke-test.ts --env production",
+    "smoke": "tsx scripts/smoke-test.ts",
     "test:acceptance": "vitest run test/acceptance"
   }
 }
 ```
 
+No `usage:alarms` script exists: Task 9 implements the code-side cron alarm, while account-level Cloudflare notifications remain documented dashboard setup.
+
 Commit:
 
 ```bash
-git add package.json package-lock.json
-git commit -m "chore: add tsx for running operational scripts"
+git add package.json
+git commit -m "chore: register hardening operational scripts"
 ```
 
 ---
@@ -64,22 +59,22 @@ git commit -m "chore: add tsx for running operational scripts"
 ### Task 1: Usage-metrics D1 table and repository
 
 **Files:**
-- Create: `migrations/0002_usage_metrics.sql`
+- Create: `migrations/0004_usage_metrics.sql`
 - Create: `src/db/usage-repository.ts`
 - Test: `test/db/usage-repository.test.ts`
 
 **Interfaces:**
 - Consumes: `Env.DB` (`D1Database`, from `src/env.ts`).
-- Produces: `recordUsage(db: D1Database, metricName: string, value: number, metricDate: string): Promise<void>` and `getMonthlyUsage(db: D1Database, yearMonth: string): Promise<Record<string, number>>`, both consumed by Task 2 (metric call sites) and Task 9 (cost report).
+- Produces: `recordUsage(db: D1Database, metricName: string, value: number, metricDate: string): Promise<void>`, `getMonthlyUsage(db: D1Database, yearMonth: string): Promise<Record<string, number>>`, and `getUsageTotal(db: D1Database, metricName: string): Promise<number>`. Task 8 combines monthly Claude tokens with the all-time `r2_bytes_added` total as a conservative current-storage gauge.
 
 - [ ] **Step 1: Write the migration**
 
 ```sql
--- migrations/0002_usage_metrics.sql
+-- migrations/0004_usage_metrics.sql
 CREATE TABLE usage_metrics (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   metric_date TEXT NOT NULL,       -- 'YYYY-MM-DD' in Asia/Bangkok
-  metric_name TEXT NOT NULL,       -- e.g. 'claude_input_tokens', 'r2_bytes_written'
+  metric_name TEXT NOT NULL,       -- e.g. 'claude_input_tokens', 'r2_bytes_added'
   metric_value INTEGER NOT NULL,
   created_at TEXT NOT NULL,
   UNIQUE(metric_date, metric_name)
@@ -92,7 +87,7 @@ CREATE INDEX idx_usage_metrics_name ON usage_metrics(metric_name);
 - [ ] **Step 2: Apply migration locally**
 
 Run: `npm run db:migrate:local`
-Expected: `Migrations to be applied: 0002_usage_metrics.sql` then `✅ Successfully applied`.
+Expected: `Migrations to be applied: 0004_usage_metrics.sql` then `✅ Successfully applied`.
 
 - [ ] **Step 3: Write the failing test**
 
@@ -100,7 +95,11 @@ Expected: `Migrations to be applied: 0002_usage_metrics.sql` then `✅ Successfu
 // test/db/usage-repository.test.ts
 import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:test";
-import { recordUsage, getMonthlyUsage } from "../../src/db/usage-repository";
+import {
+  getMonthlyUsage,
+  getUsageTotal,
+  recordUsage,
+} from "../../src/db/usage-repository";
 
 describe("usage-repository", () => {
   it("accumulates same-day same-metric writes instead of overwriting", async () => {
@@ -112,13 +111,15 @@ describe("usage-repository", () => {
   });
 
   it("keeps metrics from different months separate", async () => {
-    await recordUsage(env.DB, "r2_bytes_written", 5_000_000, "2026-08-31");
-    await recordUsage(env.DB, "r2_bytes_written", 3_000_000, "2026-09-01");
+    await recordUsage(env.DB, "r2_bytes_added", 5_000_000, "2026-08-31");
+    await recordUsage(env.DB, "r2_bytes_added", 3_000_000, "2026-09-01");
 
     const august = await getMonthlyUsage(env.DB, "2026-08");
     const september = await getMonthlyUsage(env.DB, "2026-09");
-    expect(august.r2_bytes_written).toBe(5_000_000);
-    expect(september.r2_bytes_written).toBe(3_000_000);
+    expect(august.r2_bytes_added).toBe(5_000_000);
+    expect(september.r2_bytes_added).toBe(3_000_000);
+    expect(await getUsageTotal(env.DB, "r2_bytes_added"))
+      .toBe(8_000_000);
   });
 });
 ```
@@ -167,6 +168,21 @@ export async function getMonthlyUsage(
   for (const row of results) out[row.metric_name] = row.total;
   return out;
 }
+
+export async function getUsageTotal(
+  db: D1Database,
+  metricName: string,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COALESCE(SUM(metric_value), 0) AS total
+       FROM usage_metrics
+       WHERE metric_name = ?1`,
+    )
+    .bind(metricName)
+    .first<{ total: number }>();
+  return row?.total ?? 0;
+}
 ```
 
 - [ ] **Step 6: Run test to verify it passes**
@@ -177,7 +193,7 @@ Expected: PASS (2 tests).
 - [ ] **Step 7: Commit**
 
 ```bash
-git add migrations/0002_usage_metrics.sql src/db/usage-repository.ts test/db/usage-repository.test.ts
+git add migrations/0004_usage_metrics.sql src/db/usage-repository.ts test/db/usage-repository.test.ts
 git commit -m "feat: add usage_metrics table and repository for cost tracking"
 ```
 
@@ -187,7 +203,10 @@ git commit -m "feat: add usage_metrics table and repository for cost tracking"
 
 **Files:**
 - Modify: `src/publication/captions.ts` (existing Anthropic SDK call site from the publication plan)
+- Modify: `src/publication/service.ts` (pass usage context to caption generation)
+- Modify: `src/publication/workflow.ts` (pass D1 to the asset store)
 - Modify: `src/import/asset-store.ts` (existing R2 write call site from the import plan)
+- Modify: `src/import/workflow.ts` (pass D1 to the asset store)
 - Test: `test/publication/captions.test.ts` (extend existing suite)
 - Test: `test/import/asset-store.test.ts` (extend existing suite)
 
@@ -197,26 +216,53 @@ git commit -m "feat: add usage_metrics table and repository for cost tracking"
 
 - [ ] **Step 1: Write the failing test for captions**
 
+First extend the existing `toolResponse` test helper so every successful SDK fixture carries usage:
+
 ```ts
-// test/publication/captions.test.ts (add to existing describe block)
+function toolResponse(
+  captions: Array<{ productId: string; drafts: string[] }>,
+  usage = { input_tokens: 0, output_tokens: 0 },
+) {
+  return {
+    content: [
+      {
+        type: "tool_use",
+        name: "submit_captions",
+        input: { captions },
+      },
+    ],
+    usage,
+  };
+}
+```
+
+Then append this test inside the existing `generateCaptionsForRun` describe block:
+
+```ts
 import { env } from "cloudflare:test";
 import { getMonthlyUsage } from "../../src/db/usage-repository";
 
 it("records Claude input and output token usage in D1", async () => {
-  const fakeAnthropic = {
-    messages: {
-      create: async () => ({
-        content: [{ type: "text", text: JSON.stringify({ "A-1001": ["a", "b", "c"] }) }],
-        usage: { input_tokens: 500, output_tokens: 300 },
-      }),
-    },
-  };
+  const client = sdkClient({
+    countTokens: vi.fn().mockResolvedValue({ input_tokens: 500 }),
+    create: vi.fn().mockResolvedValue(toolResponse(
+      [{ productId: "A-1001", drafts: ["หนึ่ง", "สอง", "สาม"] }],
+      { input_tokens: 500, output_tokens: 300 },
+    )),
+  });
+  const products = toCaptionRequestProducts([product("A-1001")]);
 
-  await generateCaptions(
-    fakeAnthropic as any,
-    [{ airtableRecordId: "rec1", productId: "A-1001", orderedImageKeys: [], brandName: "Nike", modelName: "Air", conditionType: "New", size: "42", description: "d", lineSquarePrice: 100, igPrice: 100 }],
-    env.DB,
-    { now: () => new Date("2026-09-01T10:00:00+07:00") },
+  await generateCaptionsForRun(
+    client,
+    "claude-opus-5",
+    1_000,
+    products,
+    {
+      db: env.DB,
+      clock: {
+        now: () => new Date("2026-09-01T10:00:00+07:00"),
+      },
+    },
   );
 
   const usage = await getMonthlyUsage(env.DB, "2026-09");
@@ -225,84 +271,291 @@ it("records Claude input and output token usage in D1", async () => {
 });
 ```
 
+Also add `usage: { input_tokens: 0, output_tokens: 0 }` to the existing malformed fixture whose successful SDK response is `{ content: [] }`.
+
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `npx vitest run test/publication/captions.test.ts -t "records Claude"`
-Expected: FAIL — either the extra `db`/`clock` parameters are rejected by TypeScript or `usage.claude_input_tokens` is `undefined`.
+Expected: FAIL because `generateCaptionsForRun` does not accept `db`/`clock` and no usage rows are written.
 
-- [ ] **Step 3: Extend the function signature and record usage**
+- [ ] **Step 3: Extend the exact caption functions and call site**
+
+Add these imports to `src/publication/captions.ts`:
 
 ```ts
-// src/publication/captions.ts (inside existing generateCaptions, after a successful SDK call)
 import { recordUsage } from "../db/usage-repository";
-import { bangkokDateString } from "../shared/time"; // existing helper from Foundation plan
+import { todayBangkokDate, type Clock } from "../shared/time";
+```
 
-export async function generateCaptions(
-  client: Anthropic,
-  products: PublicationProduct[],
-  db: D1Database,
-  clock: Clock,
-): Promise<CaptionSet[]> {
-  // ...existing request-building and retry logic stays unchanged...
-  const response = await client.messages.create(/* existing params */);
+Replace `requestCaptionBatch` with:
 
-  await recordUsage(db, "claude_input_tokens", response.usage.input_tokens, bangkokDateString(clock.now()));
-  await recordUsage(db, "claude_output_tokens", response.usage.output_tokens, bangkokDateString(clock.now()));
+```ts
+interface CaptionUsageContext {
+  db: D1Database;
+  clock: Clock;
+}
 
-  // ...existing parsing/validation into CaptionSet[] stays unchanged...
+export async function requestCaptionBatch(
+  client: Pick<Anthropic, "messages">,
+  model: string,
+  products: CaptionRequestProduct[],
+  usageContext?: CaptionUsageContext,
+): Promise<CaptionGenerationOutcome> {
+  const requestedIds = new Set(products.map((product) => product.productId));
+  let response: Anthropic.Messages.Message;
+  try {
+    response = await client.messages.create(
+      buildRequestParams(model, products),
+    );
+  } catch {
+    return { captions: [], missingProductIds: [...requestedIds] };
+  }
+
+  if (usageContext) {
+    const metricDate = todayBangkokDate(
+      usageContext.clock,
+    );
+    await recordUsage(
+      usageContext.db,
+      "claude_input_tokens",
+      response.usage.input_tokens,
+      metricDate,
+    );
+    await recordUsage(
+      usageContext.db,
+      "claude_output_tokens",
+      response.usage.output_tokens,
+      metricDate,
+    );
+  }
+
+  const toolUse = response.content.find(
+    (block): block is Anthropic.Messages.ToolUseBlock =>
+      block.type === "tool_use" && block.name === "submit_captions",
+  );
+  if (!toolUse) {
+    return { captions: [], missingProductIds: [...requestedIds] };
+  }
+
+  const parsed = ResponseSchema.safeParse(toolUse.input);
+  if (!parsed.success) {
+    return { captions: [], missingProductIds: [...requestedIds] };
+  }
+
+  const returnedIds = new Set(
+    parsed.data.captions.map((caption) => caption.productId),
+  );
+  const hasInvalidIdSet =
+    parsed.data.captions.length !== requestedIds.size ||
+    returnedIds.size !== requestedIds.size ||
+    [...returnedIds].some((id) => !requestedIds.has(id));
+  if (hasInvalidIdSet) {
+    return { captions: [], missingProductIds: [...requestedIds] };
+  }
+
+  const captions: CaptionSet[] = [];
+  const missingProductIds: string[] = [];
+  for (const productId of requestedIds) {
+    const match = parsed.data.captions.find(
+      (caption) => caption.productId === productId,
+    );
+    if (match) {
+      captions.push({ productId, drafts: match.drafts });
+    } else {
+      missingProductIds.push(productId);
+    }
+  }
+  return { captions, missingProductIds };
 }
 ```
 
-Update every call site of `generateCaptions` (in `src/publication/service.ts` and its workflow step) to pass `db` and `clock`, both of which those callers already hold.
+Replace `generateCaptionsForRun` with:
+
+```ts
+export async function generateCaptionsForRun(
+  client: Pick<Anthropic, "messages">,
+  model: string,
+  inputTokenLimit: number,
+  products: CaptionRequestProduct[],
+  usageContext?: CaptionUsageContext,
+): Promise<CaptionGenerationOutcome> {
+  if (products.length === 0) {
+    return { captions: [], missingProductIds: [] };
+  }
+  const batches = await planCaptionBatches(
+    client,
+    model,
+    products,
+    inputTokenLimit,
+  );
+  const captions: CaptionSet[] = [];
+  const missingProductIds: string[] = [];
+  for (const batch of batches) {
+    const outcome = await requestCaptionBatch(
+      client,
+      model,
+      batch,
+      usageContext,
+    );
+    captions.push(...outcome.captions);
+    missingProductIds.push(...outcome.missingProductIds);
+  }
+  return { captions, missingProductIds };
+}
+```
+
+In `src/publication/service.ts`, replace the existing call inside `captionsForProducts` with:
+
+```ts
+const generated = await generateCaptionsForRun(
+  deps.anthropic,
+  deps.config.claudeModel,
+  deps.config.claudeRequestInputTokenLimit,
+  toCaptionRequestProducts(missing),
+  { db: deps.db, clock: deps.clock },
+);
+```
+
+Existing unit tests keep their current calls and omit `usageContext`; only the D1 metrics test above and the production `captionsForProducts` call pass it. This preserves focused caption tests while making metrics mandatory on the sole production path.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/publication/captions.test.ts`
 Expected: PASS, including all pre-existing tests in the file.
 
-- [ ] **Step 5: Write the failing test for R2 byte tracking**
+- [ ] **Step 5: Write the failing test for net-new R2 storage tracking**
 
 ```ts
 // test/import/asset-store.test.ts (add to existing describe block)
 import { env } from "cloudflare:test";
-import { getMonthlyUsage } from "../../src/db/usage-repository";
+import { getUsageTotal } from "../../src/db/usage-repository";
 
-it("records bytes written to R2 per stored asset", async () => {
-  const body = new Uint8Array(2_500_000);
-  await storeAsset(env.IMAGES_BUCKET, env.DB, "sha256-fixture", body, { now: () => new Date("2026-09-01T10:00:00+07:00") });
+it("records only bytes added by a newly created R2 object", async () => {
+  const clock = {
+    now: () => new Date("2026-09-01T10:00:00+07:00"),
+  };
+  const store = createAssetStore(
+    env.IMAGES_BUCKET,
+    {
+      signingSecret: "test-signing-secret",
+      publicBaseUrl: "https://worker.example",
+    },
+    clock,
+    env.DB,
+  );
+  const body = new Uint8Array(2_500_000).buffer;
 
-  const usage = await getMonthlyUsage(env.DB, "2026-09");
-  expect(usage.r2_bytes_written).toBe(2_500_000);
+  expect((await store.putIfAbsent(
+    "sha256-fixture",
+    "jpg",
+    body,
+    "image/jpeg",
+  )).created).toBe(true);
+  expect((await store.putIfAbsent(
+    "sha256-fixture",
+    "jpg",
+    body,
+    "image/jpeg",
+  )).created).toBe(false);
+
+  expect(await getUsageTotal(env.DB, "r2_bytes_added"))
+    .toBe(2_500_000);
 });
 ```
 
 - [ ] **Step 6: Run test to verify it fails**
 
-Run: `npx vitest run test/import/asset-store.test.ts -t "records bytes"`
-Expected: FAIL — `storeAsset` does not accept `db`/`clock` or does not record usage.
+Run: `npx vitest run test/import/asset-store.test.ts -t "newly created R2"`
+Expected: FAIL because `createAssetStore` does not yet accept `db` or record the new object's bytes.
 
-- [ ] **Step 7: Extend `storeAsset`**
+- [ ] **Step 7: Extend the existing `createAssetStore` constructor and `putIfAbsent` implementation**
 
 ```ts
-// src/import/asset-store.ts
+// src/import/asset-store.ts — add imports
 import { recordUsage } from "../db/usage-repository";
-import { bangkokDateString } from "../shared/time";
+import { todayBangkokDate } from "../shared/time";
 
-export async function storeAsset(
+// replace the existing constructor signature
+export function createAssetStore(
   bucket: R2Bucket,
-  db: D1Database,
-  contentHash: string,
-  body: Uint8Array,
+  config: {
+    signingSecret: string;
+    publicBaseUrl: string;
+  },
   clock: Clock,
-): Promise<string> {
-  const key = `assets/${contentHash}.jpg`; // existing key derivation stays unchanged
-  await bucket.put(key, body); // existing put call stays unchanged
-  await recordUsage(db, "r2_bytes_written", body.byteLength, bangkokDateString(clock.now()));
-  return key;
+  db?: D1Database,
+): AssetStore {
+  return {
+    async putIfAbsent(
+      contentHash,
+      extension,
+      body,
+      contentType,
+    ) {
+      const r2Key = `assets/${contentHash}.${extension}`;
+      const created = await bucket.put(r2Key, body, {
+        onlyIf: { etagDoesNotMatch: "*" },
+        httpMetadata: { contentType },
+      });
+      if (created === null) {
+        return { r2Key, created: false };
+      }
+      if (db) {
+        await recordUsage(
+          db,
+          "r2_bytes_added",
+          body.byteLength,
+          todayBangkokDate(clock),
+        );
+      }
+      return { r2Key, created: true };
+    },
+
+    async signUrl(r2Key, ttlSeconds) {
+      const expiresAt =
+        Math.floor(clock.now().getTime() / 1000) + ttlSeconds;
+      const payload = `${r2Key}:${expiresAt}`;
+      const signature = await hmacHex(config.signingSecret, payload);
+      const url = new URL(
+        `${config.publicBaseUrl}/assets/${encodeURIComponent(r2Key)}`,
+      );
+      url.searchParams.set("exp", String(expiresAt));
+      url.searchParams.set("sig", signature);
+      return url.toString();
+    },
+  };
 }
 ```
 
-Update every call site in `src/import/service.ts` and `src/import/workflow.ts` to pass `db` and `clock`, both already available in those scopes.
+Keep existing unit-test constructors unchanged except the metrics test above. Add D1 only at the two production constructors:
+
+```ts
+// src/import/workflow.ts
+assets: createAssetStore(
+  this.env.IMAGES_BUCKET,
+  {
+    signingSecret: this.env.ASSET_URL_SIGNING_SECRET,
+    publicBaseUrl: config.publicBaseUrl,
+  },
+  clock,
+  this.env.DB,
+),
+```
+
+```ts
+// src/publication/workflow.ts
+assets: createAssetStore(
+  env.IMAGES_BUCKET,
+  {
+    signingSecret: env.ASSET_URL_SIGNING_SECRET,
+    publicBaseUrl: config.publicBaseUrl,
+  },
+  clock,
+  env.DB,
+),
+```
+
+The conditional R2 write is atomic: a pre-existing content-hash key returns `null`, skips the metric, and prevents concurrent imports from double-counting retained storage.
 
 - [ ] **Step 8: Run test to verify it passes**
 
@@ -312,26 +565,27 @@ Expected: PASS.
 - [ ] **Step 9: Run full check**
 
 Run: `npm run check`
-Expected: PASS — signature changes propagated to every caller.
+Expected: PASS — production constructors pass D1; existing focused tests remain valid without metrics.
 
 - [ ] **Step 10: Commit**
 
 ```bash
-git add src/publication/captions.ts src/import/asset-store.ts test/publication/captions.test.ts test/import/asset-store.test.ts src/publication/service.ts src/publication/workflow.ts src/import/service.ts src/import/workflow.ts
+git add src/publication/captions.ts src/import/asset-store.ts test/publication/captions.test.ts test/import/asset-store.test.ts src/publication/service.ts src/publication/workflow.ts src/import/workflow.ts
 git commit -m "feat: record Claude token and R2 byte usage for cost reporting"
 ```
 
 ---
 
-### Task 3: Redaction assertion sweep
+### Task 3: Embedded-secret redaction hardening
 
 **Files:**
-- Modify: `test/shared/logger.test.ts` (extend existing suite from Foundation plan)
-- Create: `test/acceptance/redaction.test.ts`
+- Modify: `src/shared/logger.ts`
+- Modify: `test/shared/logger.test.ts`
+- Modify: `test/icloud/redaction-audit.test.ts`
 
 **Interfaces:**
-- Consumes: existing `LogFields`, `redact(fields)`, and `createLogger(base)` from Foundation plan.
-- Produces: `redactText(value: string): string`; `redact(fields)` additionally sanitizes sensitive text embedded in non-secret-key string values; logger messages are sanitized before serialization.
+- Consumes: existing `LogFields`, `redact(fields)`, and `createLogger(base)` from Foundation Task 5; existing iCloud redaction audit from Foundation Task 12.
+- Produces: `redactText(value: string): string`; `redact(fields)` additionally sanitizes sensitive text embedded in ordinary string values; logger messages are sanitized before JSON serialization.
 
 - [ ] **Step 1: Write failing unit tests for embedded secrets**
 
@@ -340,10 +594,26 @@ git commit -m "feat: record Claude token and R2 byte usage for cost reporting"
 import { redactText } from "../../src/shared/logger";
 
 it.each([
-  ["iCloud URL", "fetch https://p123-sharedstreams.icloud.com/A1b2C3d4Token/00/asset.jpg", "A1b2C3d4Token"],
-  ["signed asset URL", "https://worker.example/assets/x.jpg?X-Amz-Signature=abcdef123456&X-Amz-Expires=600", "abcdef123456"],
-  ["LINE bearer token", "Authorization: Bearer LINE_CHANNEL_ACCESS_TOKEN_VALUE_XYZ", "LINE_CHANNEL_ACCESS_TOKEN_VALUE_XYZ"],
-  ["Airtable token", "Authorization: Bearer patABCDEF1234567890.somehash", "patABCDEF1234567890"],
+  [
+    "iCloud URL",
+    "fetch https://p123-sharedstreams.icloud.com/A1b2C3d4Token/00/asset.jpg",
+    "A1b2C3d4Token",
+  ],
+  [
+    "signed asset URL",
+    "https://worker.example/assets/x.jpg?X-Amz-Signature=abcdef123456&X-Amz-Expires=600",
+    "abcdef123456",
+  ],
+  [
+    "LINE bearer token",
+    "Authorization: Bearer LINE_CHANNEL_ACCESS_TOKEN_VALUE_XYZ",
+    "LINE_CHANNEL_ACCESS_TOKEN_VALUE_XYZ",
+  ],
+  [
+    "Airtable token",
+    "Authorization: Bearer patABCDEF1234567890.somehash",
+    "patABCDEF1234567890",
+  ],
 ])("redacts %s embedded in text", (_name, input, secret) => {
   const line = redactText(input);
   expect(line).not.toContain(secret);
@@ -354,10 +624,11 @@ it("sanitizes message and ordinary string fields before writing JSON", () => {
   const spy = vi.spyOn(console, "log").mockImplementation(() => {});
   const logger = createLogger({ correlationId: "corr-redact" });
   logger.info("using Bearer LINE_CHANNEL_ACCESS_TOKEN_VALUE_XYZ", {
-    endpoint: "https://worker.example/assets/x.jpg?X-Amz-Signature=abcdef123456",
+    endpoint:
+      "https://worker.example/assets/x.jpg?X-Amz-Signature=abcdef123456",
   });
 
-  const line = spy.mock.calls[0][0] as string;
+  const line = String(spy.mock.calls[0][0]);
   expect(line).not.toContain("LINE_CHANNEL_ACCESS_TOKEN_VALUE_XYZ");
   expect(line).not.toContain("abcdef123456");
   spy.mockRestore();
@@ -369,13 +640,17 @@ it("sanitizes message and ordinary string fields before writing JSON", () => {
 Run: `npx vitest run test/shared/logger.test.ts`
 Expected: FAIL — `redactText` is not exported and embedded values remain visible.
 
-- [ ] **Step 3: Replace `src/shared/logger.ts` with the complete hardened implementation**
+- [ ] **Step 3: Replace `src/shared/logger.ts` with the hardened implementation**
 
 ```ts
 // src/shared/logger.ts
-export type LogFields = Record<string, string | number | boolean | null>;
+export type LogFields = Record<
+  string,
+  string | number | boolean | null
+>;
 
-const SECRET_KEY_PATTERN = /token|secret|signedurl|signed_url|derivativeurl|password|authorization/i;
+const SECRET_KEY_PATTERN =
+  /token|secret|signedurl|signed_url|derivativeurl|password|authorization/i;
 const SECRET_TEXT_PATTERNS: RegExp[] = [
   /sharedstreams\.icloud\.com\/[A-Za-z0-9_-]{10,}/gi,
   /X-Amz-Signature=[^&\s]+/gi,
@@ -385,7 +660,8 @@ const SECRET_TEXT_PATTERNS: RegExp[] = [
 
 export function redactText(value: string): string {
   return SECRET_TEXT_PATTERNS.reduce(
-    (output, pattern) => output.replace(pattern, "[REDACTED]"),
+    (output, pattern) =>
+      output.replace(pattern, "[REDACTED]"),
     value,
   );
 }
@@ -396,13 +672,21 @@ export function redact(fields: LogFields): LogFields {
     if (SECRET_KEY_PATTERN.test(key)) {
       out[key] = "[REDACTED]";
     } else {
-      out[key] = typeof value === "string" ? redactText(value) : value;
+      out[key] =
+        typeof value === "string"
+          ? redactText(value)
+          : value;
     }
   }
   return out;
 }
 
-function write(level: "info" | "warn" | "error", base: LogFields, message: string, fields: LogFields) {
+function write(
+  level: "info" | "warn" | "error",
+  base: LogFields,
+  message: string,
+  fields: LogFields,
+): void {
   const line = JSON.stringify({
     level,
     message: redactText(message),
@@ -429,813 +713,1597 @@ export function createLogger(base: LogFields) {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `npx vitest run test/shared/logger.test.ts`
-Expected: PASS.
-
-- [ ] **Step 5: Write an end-to-end redaction acceptance test**
+- [ ] **Step 4: Extend existing cross-cutting redaction audit**
 
 ```ts
-// test/acceptance/redaction.test.ts
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { env } from "cloudflare:test";
-import { runImport } from "../../src/import/service";
-import { buildFakeImageSource, buildFakeAirtableProducts } from "../helpers/fakes";
-import { buildAlbumSnapshot } from "../helpers/fixtures";
+// test/icloud/redaction-audit.test.ts (append inside describe block)
+it("redacts derivative and signed URLs embedded in a logged error", () => {
+  const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+  const logger = createLogger({ correlationId: "corr-embedded" });
+  const albumToken = "A1b2C3d4Token";
+  const signature = "abcdef123456";
 
-describe("redaction across a full import run", () => {
-  let logLines: string[];
-
-  beforeEach(() => {
-    logLines = [];
-    vi.spyOn(console, "log").mockImplementation((line: string) => {
-      logLines.push(String(line));
-    });
+  logger.error("download failed", {
+    reason:
+      `https://p1-sharedstreams.icloud.com/${albumToken}/asset.jpg ` +
+      `https://worker.example/assets/x.jpg?X-Amz-Signature=${signature}`,
   });
 
-  it("never logs the iCloud album token or a signed R2 URL", async () => {
-    const secretToken = "SECRET_ALBUM_TOKEN_9f8e7d6c5b4a";
-    const snapshot = buildAlbumSnapshot({
-      photoCount: 12,
-      markerEveryN: 12,
-      derivativeUrlToken: secretToken,
-    });
-    const imageSource = buildFakeImageSource(snapshot);
-    const airtable = buildFakeAirtableProducts();
-
-    await runImport({
-      importRunId: "run-redaction-1",
-      db: env.DB,
-      bucket: env.IMAGES_BUCKET,
-      images: env.IMAGES,
-      imageSource,
-      airtableProducts: airtable,
-      clock: { now: () => new Date("2026-09-01T07:00:00+07:00") },
-    });
-
-    const joined = logLines.join("\n");
-    expect(joined).not.toContain(secretToken);
-    expect(joined).not.toMatch(/X-Amz-Signature=[^&\s"]{10,}/);
-  });
+  const line = String(spy.mock.calls[0][0]);
+  expect(line).not.toContain(albumToken);
+  expect(line).not.toContain(signature);
+  expect(line).toContain("[REDACTED]");
+  spy.mockRestore();
 });
 ```
 
-- [ ] **Step 6: Run the end-to-end redaction test**
+- [ ] **Step 5: Run focused and full checks**
 
-Run: `npx vitest run test/acceptance/redaction.test.ts`
-Expected: PASS — full import logs contain neither the album token nor signed-URL signature.
+Run: `npx vitest run test/shared/logger.test.ts test/icloud/redaction-audit.test.ts`
+Expected: PASS.
 
-- [ ] **Step 7: Commit**
+Run: `npm run check`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/shared/logger.ts test/shared/logger.test.ts test/acceptance/redaction.test.ts
-git commit -m "test: assert redaction of tokens and signed URLs across a full import run"
+git add src/shared/logger.ts test/shared/logger.test.ts test/icloud/redaction-audit.test.ts
+git commit -m "feat: redact secrets embedded in log text"
 ```
 
 ---
 
-### Task 4: Failure-injection fakes and retry-exhaustion tests
+### Task 4: Workflow retry-exhaustion acceptance tests
 
 **Files:**
-- Modify: `test/helpers/fakes.ts` (extend existing fakes from Foundation plan)
-- Create: `test/acceptance/failure-injection.test.ts`
+- Create: `test/helpers/workflow-step.ts`
+- Create: `test/acceptance/retry-exhaustion.test.ts`
 
 **Interfaces:**
-- Consumes: `ImportRunResult` from `src/import/types.ts`; `PublicationResult` from `src/publication/types.ts`; `runImport` from `src/import/service.ts`; `runPublication` from `src/publication/service.ts` (both existing exports from their respective plans).
-- Produces: `buildFlakyAirtableProducts(failCount: number)` and `buildFlakyGoogleDocs(failCount: number)`, reused by Tasks 5 and 6.
+- Consumes: `runImportWorkflow` from Import Task 14; `OperationalError`; Cloudflare `NonRetryableError` semantics.
+- Produces: `retryingStep()`, a test-only `WorkflowStep.do()` harness that records step name, retry limit, and actual attempts. Task 5 and Task 6 reuse it.
 
-- [ ] **Step 1: Write the failure-injection fake**
+- [ ] **Step 1: Extract one exact Workflow-step retry harness**
 
 ```ts
-// test/helpers/fakes.ts (add alongside existing fake builders)
-export function buildFlakyAirtableProducts(failCount: number) {
-  let calls = 0;
-  const rows = new Map<string, Record<string, unknown>>();
+// test/helpers/workflow-step.ts
+import { NonRetryableError } from "cloudflare:workflows";
+
+export interface WorkflowStepCall {
+  name: string;
+  retryLimit: number;
+  attempts: number;
+}
+
+export function retryingStep() {
+  const calls: WorkflowStepCall[] = [];
   return {
-    async createProduct(payload: Record<string, unknown>) {
-      calls += 1;
-      if (calls <= failCount) {
-        throw new Error("AIRTABLE_RATE_LIMITED");
+    calls,
+    async do<T>(
+      name: string,
+      optionsOrCallback: unknown,
+      maybeCallback?: () => Promise<T>,
+    ): Promise<T> {
+      const hasOptions =
+        typeof optionsOrCallback !== "function";
+      const callback = (
+        hasOptions ? maybeCallback : optionsOrCallback
+      ) as () => Promise<T>;
+      const retryLimit = hasOptions
+        ? (
+            optionsOrCallback as {
+              retries?: { limit: number };
+            }
+          ).retries?.limit ?? 0
+        : 0;
+      let attempts = 0;
+
+      for (;;) {
+        attempts += 1;
+        try {
+          const result = await callback();
+          calls.push({ name, retryLimit, attempts });
+          return result;
+        } catch (error) {
+          if (
+            attempts > retryLimit ||
+            error instanceof NonRetryableError
+          ) {
+            calls.push({ name, retryLimit, attempts });
+            throw error;
+          }
+        }
       }
-      const id = `rec${calls}`;
-      rows.set(id, payload);
-      return { id, ...payload };
     },
-    async deleteProduct(id: string) {
-      rows.delete(id);
-    },
-    async getProduct(id: string) {
-      return rows.get(id) ?? null;
-    },
-    callCount: () => calls,
-  };
-}
-
-export function buildFlakyGoogleDocs(failCount: number) {
-  let calls = 0;
-  return {
-    async copyTemplate() {
-      calls += 1;
-      if (calls <= failCount) throw new Error("GOOGLE_API_UNAVAILABLE");
-      return { documentId: "doc-final", url: "https://docs.google.com/document/d/doc-final" };
-    },
-    callCount: () => calls,
   };
 }
 ```
 
-- [ ] **Step 2: Write the failing import retry-exhaustion test**
+- [ ] **Step 2: Write import retry and sibling-isolation acceptance tests**
 
 ```ts
-// test/acceptance/failure-injection.test.ts
-import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:test";
-import { runImport } from "../../src/import/service";
-import { runPublication } from "../../src/publication/service";
-import { buildFakeImageSource, buildFlakyAirtableProducts, buildFlakyGoogleDocs, buildFakePublicationRuns, buildFakeCaptionClient, buildFakeCollageRenderer } from "../helpers/fakes";
-import { buildAlbumSnapshot, buildReadyPublicationRun } from "../helpers/fixtures";
+// test/acceptance/retry-exhaustion.test.ts
+import { describe, expect, it, vi } from "vitest";
+import { runImportWorkflow } from "../../src/import/workflow";
+import type {
+  PersistedGroup,
+  ProcessGroupDeps,
+} from "../../src/import/service";
+import { OperationalError } from "../../src/shared/errors";
+import { retryingStep } from "../helpers/workflow-step";
 
-describe("failure injection — import", () => {
-  it("exhausts five attempts, burns the Product ID, and leaves the group failed without a partial Airtable row", async () => {
-    const snapshot = buildAlbumSnapshot({ photoCount: 10, markerEveryN: 10 });
-    const airtable = buildFlakyAirtableProducts(5); // fails all 5 attempts
-    const imageSource = buildFakeImageSource(snapshot);
+function group(id: string, ordinal: number): PersistedGroup {
+  return {
+    groupId: id,
+    groupRowId: `row-${id}`,
+    ordinal,
+    markerPhotoId: `marker-${id}`,
+    attachablePhotos: [{
+      applePhotoId: `photo-${id}`,
+      r2Key: `assets/${id}.jpg`,
+    }],
+  };
+}
 
-    const result = await runImport({
-      importRunId: "run-fail-1",
-      db: env.DB,
-      bucket: env.IMAGES_BUCKET,
-      images: env.IMAGES,
-      imageSource,
-      airtableProducts: airtable,
-      clock: { now: () => new Date("2026-09-01T07:00:00+07:00") },
+function forwardedDeps(): ProcessGroupDeps {
+  // Orchestrator only forwards this object to stage fakes below.
+  return Object.create(null) as ProcessGroupDeps;
+}
+
+const payload = {
+  importRunId: "run-retry-acceptance",
+  sourceAlbumId: "album-1",
+  trigger: "admin" as const,
+};
+
+describe("Workflow-owned import retries", () => {
+  it("succeeds after three transient failures within five retries", async () => {
+    const step = retryingStep();
+    const process = vi.fn()
+      .mockRejectedValueOnce(new OperationalError(
+        "airtable_rate_limited",
+        "rate limited",
+        true,
+      ))
+      .mockRejectedValueOnce(new OperationalError(
+        "airtable_rate_limited",
+        "rate limited",
+        true,
+      ))
+      .mockRejectedValueOnce(new OperationalError(
+        "airtable_rate_limited",
+        "rate limited",
+        true,
+      ))
+      .mockResolvedValue({
+        outcome: "succeeded",
+        productId: "A-501",
+      });
+
+    const result = await runImportWorkflow(
+      forwardedDeps(),
+      payload,
+      step,
+      {
+        retryLimit: 5,
+        downloadAndGroup: async () => ({
+          pendingGroups: [group("g1", 0)],
+          orphanRange: null,
+          checkpointPosition: 10,
+        }),
+        processGroupAttempt: process,
+        recordExhaustedFailure: vi.fn(),
+        finalize: vi.fn().mockResolvedValue(undefined),
+        notify: vi.fn().mockResolvedValue(undefined),
+      },
+    );
+
+    expect(result).toEqual({
+      importRunId: payload.importRunId,
+      succeededProductIds: ["A-501"],
+      failedGroups: [],
     });
-
-    expect(result.succeededProductIds).toHaveLength(0);
-    expect(result.failedGroups).toHaveLength(1);
-    expect(result.failedGroups[0].errorCode).toBe("AIRTABLE_RATE_LIMITED");
-    expect(airtable.callCount()).toBe(5);
+    expect(process).toHaveBeenCalledTimes(4);
+    expect(step.calls.find(
+      ({ name }) => name === "process-group-row-g1",
+    )).toMatchObject({ retryLimit: 5, attempts: 4 });
   });
 
-  it("succeeds after transient failures within five attempts and preserves the successful group", async () => {
-    const snapshot = buildAlbumSnapshot({ photoCount: 10, markerEveryN: 10 });
-    const airtable = buildFlakyAirtableProducts(3); // fails 3 times, succeeds on 4th
-    const imageSource = buildFakeImageSource(snapshot);
-
-    const result = await runImport({
-      importRunId: "run-fail-2",
-      db: env.DB,
-      bucket: env.IMAGES_BUCKET,
-      images: env.IMAGES,
-      imageSource,
-      airtableProducts: airtable,
-      clock: { now: () => new Date("2026-09-01T07:00:00+07:00") },
+  it("records one failed group after six attempts and continues its sibling", async () => {
+    const step = retryingStep();
+    const process = vi.fn(
+      async (_deps, current: PersistedGroup) => {
+        if (current.groupId === "g1") {
+          throw new OperationalError(
+            "airtable_rate_limited",
+            "rate limited",
+            true,
+          );
+        }
+        return {
+          outcome: "succeeded" as const,
+          productId: "A-502",
+        };
+      },
+    );
+    const record = vi.fn().mockResolvedValue({
+      productId: "A-501",
+      errorCode: "airtable_rate_limited",
     });
 
-    expect(result.succeededProductIds).toHaveLength(1);
-    expect(result.failedGroups).toHaveLength(0);
-  });
-});
+    const result = await runImportWorkflow(
+      forwardedDeps(),
+      payload,
+      step,
+      {
+        retryLimit: 5,
+        downloadAndGroup: async () => ({
+          pendingGroups: [group("g1", 0), group("g2", 1)],
+          orphanRange: null,
+          checkpointPosition: 20,
+        }),
+        processGroupAttempt: process,
+        recordExhaustedFailure: record,
+        finalize: vi.fn().mockResolvedValue(undefined),
+        notify: vi.fn().mockResolvedValue(undefined),
+      },
+    );
 
-describe("failure injection — publication", () => {
-  it("returns Failed after five exhausted Google Docs attempts and deletes the temp document", async () => {
-    const run = buildReadyPublicationRun({ productCount: 2 });
-    const googleDocs = buildFlakyGoogleDocs(5);
-
-    const result = await runPublication({
-      publicationRunId: run.id,
-      db: env.DB,
-      images: env.IMAGES,
-      airtableRuns: buildFakePublicationRuns(run),
-      captionClient: buildFakeCaptionClient(),
-      collageRenderer: buildFakeCollageRenderer(),
-      googleDocs,
-      clock: { now: () => new Date("2026-09-01T09:00:00+07:00") },
-    });
-
-    expect(result).toBeNull(); // service returns null on exhausted non-validation failure per spec ยง10
-    expect(googleDocs.callCount()).toBe(5);
+    expect(step.calls.find(
+      ({ name }) => name === "process-group-row-g1",
+    )).toMatchObject({ retryLimit: 5, attempts: 6 });
+    expect(record).toHaveBeenCalledTimes(1);
+    expect(result.failedGroups).toEqual([{
+      groupId: "row-g1",
+      productId: "A-501",
+      errorCode: "airtable_rate_limited",
+    }]);
+    expect(result.succeededProductIds).toEqual(["A-502"]);
   });
 });
 ```
 
-- [ ] **Step 3: Run tests to verify they fail (or reveal a gap)**
+- [ ] **Step 3: Run focused tests**
 
-Run: `npx vitest run test/acceptance/failure-injection.test.ts`
-Expected: If `runImport`/`runPublication` already implement five-attempt retry with per-group rollback (per Import and Publication plans), these tests should already PASS — this task's purpose is to prove that contract with an independent test file, not to change behavior. If any assertion FAILS, that is a defect in the existing retry/rollback implementation; fix `src/import/service.ts` or `src/publication/service.ts` to match the design doc §8 "Retry and rollback" and §10 "Completion and retries" before continuing.
+Run: `npx vitest run test/import/workflow.test.ts test/acceptance/retry-exhaustion.test.ts`
+Expected: PASS — transient case uses 4 attempts; exhausted case uses 6 attempts and still processes sibling group.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 4: Run full check**
 
-Run: `npx vitest run test/acceptance/failure-injection.test.ts`
-Expected: PASS (3 tests).
+Run: `npm run check`
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add test/helpers/fakes.ts test/acceptance/failure-injection.test.ts
-git commit -m "test: add failure-injection fakes and retry-exhaustion acceptance tests"
+git add test/helpers/workflow-step.ts test/acceptance/retry-exhaustion.test.ts
+git commit -m "test: verify Workflow retry exhaustion and sibling isolation"
 ```
 
 ---
 
-### Task 5: Production-sized ten-batch import acceptance suite
+### Task 5: Production-sized grouping and import-orchestration acceptance suite
 
 **Files:**
-- Modify: `test/helpers/fixtures.ts` (extend existing fixture builders)
+- Modify: `test/helpers/fixtures.ts`
 - Create: `test/acceptance/import-batches.test.ts`
 
 **Interfaces:**
-- Consumes: `runImport` from `src/import/service.ts`; `buildFakeImageSource`, `buildFlakyAirtableProducts` from Task 4 and Foundation-plan fakes.
-- Produces: `buildAlbumSnapshot(opts)` with photo count, marker interval, pre-marker junk photos, and injected duplicate Apple IDs — reused by Task 3's redaction test and Task 4.
+- Consumes: `groupByMarkers`, `computeGroupHash`, `GroupingPhoto` from Import Task 8; `runImportWorkflow` and `PersistedGroup` from Import Task 14; `retryingStep()` from Task 4.
+- Produces: `buildGroupingPhotos(options)`, a deterministic 100–500-photo fixture with explicit product-group sizes and optional pre-marker orphan photos.
 
-- [ ] **Step 1: Extend fixtures with a parameterized batch builder**
+- [ ] **Step 1: Add deterministic production-volume fixture builder**
 
 ```ts
-// test/helpers/fixtures.ts (add alongside existing builders)
-export interface AlbumSnapshotOptions {
-  photoCount: number;
-  markerEveryN: number;
-  groupSize?: number; // default varies 9-15 across groups
-  preMarkerJunkPhotos?: number;
-  duplicateApplePhotoIds?: string[];
-  derivativeUrlToken?: string;
+// test/helpers/fixtures.ts (append)
+import type { GroupingPhoto } from "../../src/import/grouping";
+
+export interface GroupingBatchOptions {
+  groupSizes: number[];
+  orphanPhotoCount?: number;
 }
 
-export function buildAlbumSnapshot(opts: AlbumSnapshotOptions): AlbumSnapshot {
-  const token = opts.derivativeUrlToken ?? "fixture-token";
-  const photos: SourcePhoto[] = [];
+export function buildGroupingPhotos(
+  options: GroupingBatchOptions,
+): GroupingPhoto[] {
+  const photos: GroupingPhoto[] = [];
   let position = 0;
 
-  for (let i = 0; i < (opts.preMarkerJunkPhotos ?? 0); i++) {
+  for (
+    let index = 0;
+    index < (options.orphanPhotoCount ?? 0);
+    index += 1
+  ) {
+    const id = `orphan-${index}`;
     photos.push({
-      sourceAlbumId: "album-1",
-      applePhotoId: `junk-${i}`,
+      applePhotoId: id,
       position: position++,
-      captureAt: "2026-09-01T06:00:00Z",
-      derivativeUrl: `https://p1-sharedstreams.icloud.com/${token}/junk-${i}.jpg`,
-      mediaType: "image/jpeg",
+      isMarker: false,
+      r2Key: `assets/${id}.jpg`,
     });
   }
 
-  let groupIndex = 0;
-  while (photos.length - (opts.preMarkerJunkPhotos ?? 0) < opts.photoCount) {
-    const size = opts.groupSize ?? (9 + (groupIndex % 7)); // cycles 9..15
+  options.groupSizes.forEach((size, groupIndex) => {
+    const markerId = `marker-${groupIndex}`;
     photos.push({
-      sourceAlbumId: "album-1",
-      applePhotoId: `marker-${groupIndex}`,
+      applePhotoId: markerId,
       position: position++,
-      captureAt: "2026-09-01T06:00:00Z",
-      derivativeUrl: `https://p1-sharedstreams.icloud.com/${token}/marker-${groupIndex}.jpg`,
-      mediaType: "image/jpeg",
+      isMarker: true,
+      r2Key: `assets/${markerId}.jpg`,
     });
-    for (let i = 0; i < size; i++) {
+    for (let index = 0; index < size; index += 1) {
+      const id = `g${groupIndex}-p${index}`;
       photos.push({
-        sourceAlbumId: "album-1",
-        applePhotoId: `g${groupIndex}-p${i}`,
+        applePhotoId: id,
         position: position++,
-        captureAt: "2026-09-01T06:00:00Z",
-        derivativeUrl: `https://p1-sharedstreams.icloud.com/${token}/g${groupIndex}-p${i}.jpg`,
-        mediaType: "image/jpeg",
+        isMarker: false,
+        r2Key: `assets/${id}.jpg`,
       });
     }
-    groupIndex++;
-  }
+  });
 
-  for (const dupId of opts.duplicateApplePhotoIds ?? []) {
-    photos.push({ ...photos.find((p) => p.applePhotoId === dupId)! });
-  }
-
-  return { sourceAlbumId: "album-1", fetchedAt: "2026-09-01T07:00:00Z", photos };
+  return photos;
 }
 ```
 
-- [ ] **Step 2: Write the ten-batch acceptance test**
+- [ ] **Step 2: Write ten production-sized acceptance cases**
 
 ```ts
 // test/acceptance/import-batches.test.ts
-import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:test";
-import { runImport } from "../../src/import/service";
-import { buildFakeImageSource, buildFakeAirtableProducts, buildFlakyAirtableProducts } from "../helpers/fakes";
-import { buildAlbumSnapshot } from "../helpers/fixtures";
+import { describe, expect, it, vi } from "vitest";
+import {
+  computeGroupHash,
+  groupByMarkers,
+} from "../../src/import/grouping";
+import type {
+  PersistedGroup,
+  ProcessGroupDeps,
+} from "../../src/import/service";
+import { runImportWorkflow } from "../../src/import/workflow";
+import { buildGroupingPhotos } from "../helpers/fixtures";
+import { retryingStep } from "../helpers/workflow-step";
 
-const batches: Array<{ name: string; photoCount: number; groupSize?: number; junk?: number; flaky?: number; duplicates?: string[] }> = [
-  { name: "batch-1-min-volume-min-group", photoCount: 100, groupSize: 9 },
-  { name: "batch-2-max-volume-max-group", photoCount: 500, groupSize: 15 },
-  { name: "batch-3-mixed-group-sizes", photoCount: 250 },
-  { name: "batch-4-first-run-cutoff", photoCount: 120, junk: 0 },
-  { name: "batch-5-pre-marker-junk-photos", photoCount: 150, junk: 8 },
-  { name: "batch-6-single-transient-failure", photoCount: 130, flaky: 2 },
-  { name: "batch-7-multiple-failed-groups", photoCount: 200, flaky: 5 },
-  { name: "batch-8-duplicate-apple-ids", photoCount: 140, duplicates: ["g0-p0", "g1-p1"] },
-  { name: "batch-9-daily-typical-volume", photoCount: 300 },
-  { name: "batch-10-large-multi-hundred", photoCount: 480, groupSize: 12 },
-];
+const batches = [
+  {
+    name: "100 photos with minimum nine-photo products",
+    groupSizes: Array(10).fill(9),
+    orphanPhotoCount: 0,
+  },
+  {
+    name: "500 photos with maximum fifteen-photo products",
+    groupSizes: Array(31).fill(15),
+    orphanPhotoCount: 4,
+  },
+  {
+    name: "mixed sizes nine through fifteen",
+    groupSizes: Array.from(
+      { length: 20 },
+      (_, index) => 9 + (index % 7),
+    ),
+    orphanPhotoCount: 0,
+  },
+  {
+    name: "twelve even twelve-photo products",
+    groupSizes: Array(12).fill(12),
+    orphanPhotoCount: 0,
+  },
+  {
+    name: "eight pre-marker orphan photos",
+    groupSizes: Array(12).fill(12),
+    orphanPhotoCount: 8,
+  },
+  {
+    name: "100-photo boundary with one orphan",
+    groupSizes: Array(9).fill(10),
+    orphanPhotoCount: 1,
+  },
+  {
+    name: "twenty-five eleven-photo products",
+    groupSizes: Array(25).fill(11),
+    orphanPhotoCount: 0,
+  },
+  {
+    name: "alternating nine and fifteen photo products",
+    groupSizes: Array.from(
+      { length: 16 },
+      (_, index) => index % 2 === 0 ? 9 : 15,
+    ),
+    orphanPhotoCount: 0,
+  },
+  {
+    name: "normal twenty-two-product day",
+    groupSizes: Array(22).fill(12),
+    orphanPhotoCount: 0,
+  },
+  {
+    name: "494-photo large day",
+    groupSizes: Array(38).fill(12),
+    orphanPhotoCount: 0,
+  },
+] satisfies Array<{
+  name: string;
+  groupSizes: number[];
+  orphanPhotoCount: number;
+}>;
 
-describe.each(batches)("import acceptance — $name", (batch) => {
-  it("produces correct grouping, no duplicates, and retryable failures only", async () => {
-    const snapshot = buildAlbumSnapshot({
-      photoCount: batch.photoCount,
-      markerEveryN: batch.groupSize ?? 12,
-      groupSize: batch.groupSize,
-      preMarkerJunkPhotos: batch.junk ?? 0,
-      duplicateApplePhotoIds: batch.duplicates,
-    });
-    const imageSource = buildFakeImageSource(snapshot);
-    const airtable = batch.flaky ? buildFlakyAirtableProducts(batch.flaky) : buildFakeAirtableProducts();
+function forwardedDeps(): ProcessGroupDeps {
+  // Orchestrator only forwards this object to stage fakes below.
+  return Object.create(null) as ProcessGroupDeps;
+}
 
-    const result = await runImport({
-      importRunId: `run-${batch.name}`,
-      db: env.DB,
-      bucket: env.IMAGES_BUCKET,
-      images: env.IMAGES,
-      imageSource,
-      airtableProducts: airtable,
-      clock: { now: () => new Date("2026-09-01T07:00:00+07:00") },
-    });
+describe.each(batches)("import batch: $name", (batch) => {
+  it("preserves marker groups, stable hashes, and one Product ID per group", async () => {
+    const photos = buildGroupingPhotos(batch);
+    expect(photos.length).toBeGreaterThanOrEqual(100);
+    expect(photos.length).toBeLessThanOrEqual(500);
 
-    const expectedGroups = Math.floor(batch.photoCount / (batch.groupSize ?? 12));
-    const totalGroups = result.succeededProductIds.length + result.failedGroups.length;
-    expect(totalGroups).toBeGreaterThanOrEqual(expectedGroups - 1);
+    const grouped = groupByMarkers(photos);
+    expect(grouped.orphanPhotos).toHaveLength(
+      batch.orphanPhotoCount,
+    );
+    expect(grouped.groups).toHaveLength(
+      batch.groupSizes.length,
+    );
+    expect(grouped.groups.map(({ photos: groupPhotos }) =>
+      groupPhotos.length)).toEqual(
+      batch.groupSizes.map((size) => size + 1),
+    );
 
-    // No duplicate Product IDs across a single run.
-    expect(new Set(result.succeededProductIds).size).toBe(result.succeededProductIds.length);
+    const groupedIds = grouped.groups.flatMap(({ photos: groupPhotos }) =>
+      groupPhotos.map(({ applePhotoId }) => applePhotoId));
+    expect(new Set(groupedIds).size).toBe(groupedIds.length);
 
-    // Every failure is a retryable errorCode, never a silent drop.
-    for (const failure of result.failedGroups) {
-      expect(failure.errorCode).toBeTruthy();
-      expect(failure.productId).not.toBeNull();
-    }
+    const hashes = await Promise.all(
+      grouped.groups.map(({ photos: groupPhotos }) =>
+        computeGroupHash("album-1", groupPhotos)),
+    );
+    expect(new Set(hashes).size).toBe(hashes.length);
+
+    const pendingGroups: PersistedGroup[] = grouped.groups.map(
+      (group, index) => ({
+        groupId: hashes[index],
+        groupRowId: `row-${index}`,
+        ordinal: group.ordinal,
+        markerPhotoId: group.photos[0].applePhotoId,
+        attachablePhotos: group.photos
+          .filter(({ isMarker }) => !isMarker)
+          .map(({ applePhotoId, r2Key }) => ({
+            applePhotoId,
+            r2Key,
+          })),
+      }),
+    );
+    const notify = vi.fn().mockResolvedValue(undefined);
+    const result = await runImportWorkflow(
+      forwardedDeps(),
+      {
+        importRunId: `run-${batch.name}`,
+        sourceAlbumId: "album-1",
+        trigger: "admin",
+      },
+      retryingStep(),
+      {
+        retryLimit: 5,
+        downloadAndGroup: async () => ({
+          pendingGroups,
+          orphanRange: grouped.orphanPhotos.length === 0
+            ? null
+            : {
+                firstApplePhotoId:
+                  grouped.orphanPhotos[0].applePhotoId,
+                lastApplePhotoId:
+                  grouped.orphanPhotos.at(-1)!.applePhotoId,
+                count: grouped.orphanPhotos.length,
+              },
+          checkpointPosition: photos.at(-1)!.position,
+        }),
+        processGroupAttempt: async (_deps, group) => ({
+          outcome: "succeeded",
+          productId: `A-${1001 + group.ordinal}`,
+        }),
+        recordExhaustedFailure: vi.fn(),
+        finalize: vi.fn().mockResolvedValue(undefined),
+        notify,
+      },
+    );
+
+    expect(result.failedGroups).toEqual([]);
+    expect(result.succeededProductIds).toHaveLength(
+      batch.groupSizes.length,
+    );
+    expect(new Set(result.succeededProductIds).size).toBe(
+      result.succeededProductIds.length,
+    );
+    expect(notify).toHaveBeenCalledTimes(1);
   });
 });
 ```
 
-- [ ] **Step 3: Run tests to verify they fail or pass against real implementation**
+- [ ] **Step 3: Run focused acceptance tests**
 
-Run: `npx vitest run test/acceptance/import-batches.test.ts`
-Expected: If grouping, deduplication, and rollback in `src/import/grouping.ts` and `src/import/service.ts` match spec §8, all 10 cases PASS. Any FAIL identifies a grouping/dedup defect in the existing Import plan implementation — fix the offending file (most likely `src/import/grouping.ts` marker-boundary logic or `src/db/import-repository.ts` content-hash uniqueness) before continuing.
+Run: `npx vitest run test/import/grouping.test.ts test/import/workflow.test.ts test/acceptance/import-batches.test.ts`
+Expected: PASS — 10 acceptance cases cover 100–500 photos, 9–15 product photos, pre-marker orphans, stable group hashes, and unique Product IDs.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 4: Run full check**
 
-Run: `npx vitest run test/acceptance/import-batches.test.ts`
-Expected: PASS (10 cases).
+Run: `npm run check`
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add test/helpers/fixtures.ts test/acceptance/import-batches.test.ts
-git commit -m "test: add ten-batch production-sized import acceptance suite"
+git commit -m "test: cover production-sized import grouping batches"
 ```
 
 ---
 
-### Task 6: Publication acceptance suite
+### Task 6: Bind publication cleanup acceptance to Workflow retry budget
 
 **Files:**
-- Modify: `test/helpers/fixtures.ts` (add `buildReadyPublicationRun`)
-- Create: `test/acceptance/publication.test.ts`
+- Modify: `test/acceptance/publication.test.ts` (created by Publication Task 11)
 
 **Interfaces:**
-- Consumes: `runPublication` from `src/publication/service.ts`; `PublicationResult`, `PublicationProduct`, `CaptionSet` from `src/publication/types.ts`; `buildFlakyGoogleDocs` from Task 4.
+- Consumes: existing seven-case publication acceptance suite; `retryingStep()` from Task 4; `failPublicationAfterExhaustion` and D1 publication state from Publication Task 9.
+- Produces: no production exports. Replaces the acceptance suite's manual six-call loop with the same `WorkflowStep.do()` retry harness used by import acceptance.
 
-- [ ] **Step 1: Extend fixtures**
-
-```ts
-// test/helpers/fixtures.ts (add alongside existing builders)
-export function buildReadyPublicationRun(opts: { productCount: number; missingFieldOnProduct?: number }) {
-  const products: PublicationProduct[] = Array.from({ length: opts.productCount }, (_, i) => ({
-    airtableRecordId: `rec${i}`,
-    productId: `A-${2000 + i}`,
-    orderedImageKeys: [`assets/img-${i}-1.jpg`, `assets/img-${i}-2.jpg`, `assets/img-${i}-3.jpg`, `assets/img-${i}-4.jpg`],
-    brandName: "Nike",
-    modelName: `Air Model ${i}`,
-    conditionType: "Used - Good",
-    size: "42",
-    description: opts.missingFieldOnProduct === i ? "" : `Description for product ${i}`,
-    lineSquarePrice: 1200 + i,
-    igPrice: 1300 + i,
-  }));
-  return { id: "pubrun-1", date: "2026-09-01", products };
-}
-```
-
-- [ ] **Step 2: Write the publication acceptance test**
+- [ ] **Step 1: Import shared retry harness**
 
 ```ts
 // test/acceptance/publication.test.ts
-import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:test";
-import { runPublication } from "../../src/publication/service";
-import {
-  buildFakePublicationRuns,
-  buildFakeCaptionClient,
-  buildFakeCollageRenderer,
-  buildFakeGoogleDocs,
-  buildFlakyGoogleDocs,
-} from "../helpers/fakes";
-import { buildReadyPublicationRun } from "../helpers/fixtures";
-
-describe("publication acceptance", () => {
-  it("blocks the whole document when any linked Product is missing a required field", async () => {
-    const run = buildReadyPublicationRun({ productCount: 3, missingFieldOnProduct: 1 });
-    const airtableRuns = buildFakePublicationRuns(run);
-
-    const result = await runPublication({
-      publicationRunId: run.id,
-      db: env.DB,
-      images: env.IMAGES,
-      airtableRuns,
-      captionClient: buildFakeCaptionClient(),
-      collageRenderer: buildFakeCollageRenderer(),
-      googleDocs: buildFakeGoogleDocs(),
-      clock: { now: () => new Date("2026-09-01T09:00:00+07:00") },
-    });
-
-    expect(result).toBeNull();
-    expect(await airtableRuns.getStatus(run.id)).toBe("Draft");
-    expect(await airtableRuns.getErrorSummary(run.id)).toContain("A-2001");
-  });
-
-  it("uses only the first four ordered images per Product for the collage", async () => {
-    const run = buildReadyPublicationRun({ productCount: 1 });
-    run.products[0].orderedImageKeys.push("assets/img-0-5-should-be-ignored.jpg");
-    const collageRenderer = buildFakeCollageRenderer();
-
-    await runPublication({
-      publicationRunId: run.id,
-      db: env.DB,
-      images: env.IMAGES,
-      airtableRuns: buildFakePublicationRuns(run),
-      captionClient: buildFakeCaptionClient(),
-      collageRenderer,
-      googleDocs: buildFakeGoogleDocs(),
-      clock: { now: () => new Date("2026-09-01T09:00:00+07:00") },
-    });
-
-    expect(collageRenderer.lastInputKeys("A-2000")).toHaveLength(4);
-    expect(collageRenderer.lastInputKeys("A-2000")).not.toContain("assets/img-0-5-should-be-ignored.jpg");
-  });
-
-  it("returns exactly three captions per Product ID", async () => {
-    const run = buildReadyPublicationRun({ productCount: 2 });
-    const result = await runPublication({
-      publicationRunId: run.id,
-      db: env.DB,
-      images: env.IMAGES,
-      airtableRuns: buildFakePublicationRuns(run),
-      captionClient: buildFakeCaptionClient(),
-      collageRenderer: buildFakeCollageRenderer(),
-      googleDocs: buildFakeGoogleDocs(),
-      clock: { now: () => new Date("2026-09-01T09:00:00+07:00") },
-    });
-
-    expect(result?.productIds).toEqual(["A-2000", "A-2001"]);
-  });
-
-  it("never creates a second final document for the same run on duplicate /docs trigger", async () => {
-    const run = buildReadyPublicationRun({ productCount: 1 });
-    const googleDocs = buildFakeGoogleDocs();
-    const airtableRuns = buildFakePublicationRuns(run);
-
-    const first = await runPublication({
-      publicationRunId: run.id,
-      db: env.DB,
-      images: env.IMAGES,
-      airtableRuns,
-      captionClient: buildFakeCaptionClient(),
-      collageRenderer: buildFakeCollageRenderer(),
-      googleDocs,
-      clock: { now: () => new Date("2026-09-01T09:00:00+07:00") },
-    });
-    const second = await runPublication({
-      publicationRunId: run.id,
-      db: env.DB,
-      images: env.IMAGES,
-      airtableRuns,
-      captionClient: buildFakeCaptionClient(),
-      collageRenderer: buildFakeCollageRenderer(),
-      googleDocs,
-      clock: { now: () => new Date("2026-09-01T09:05:00+07:00") },
-    });
-
-    expect(first?.googleDocId).toBe(second?.googleDocId);
-    expect(googleDocs.copyCount()).toBe(1);
-  });
-
-  it("deletes the incomplete temporary document after exhausted Google API failure", async () => {
-    const run = buildReadyPublicationRun({ productCount: 1 });
-    const googleDocs = buildFlakyGoogleDocs(5);
-
-    const result = await runPublication({
-      publicationRunId: run.id,
-      db: env.DB,
-      images: env.IMAGES,
-      airtableRuns: buildFakePublicationRuns(run),
-      captionClient: buildFakeCaptionClient(),
-      collageRenderer: buildFakeCollageRenderer(),
-      googleDocs,
-      clock: { now: () => new Date("2026-09-01T09:00:00+07:00") },
-    });
-
-    expect(result).toBeNull();
-    expect(googleDocs.deletedTempDocuments()).toHaveLength(1);
-  });
-});
+import { retryingStep } from "../helpers/workflow-step";
 ```
 
-- [ ] **Step 3: Run tests to verify they fail or reveal a gap**
+- [ ] **Step 2: Replace manual retry loop in the existing exhaustion test**
 
-Run: `npx vitest run test/acceptance/publication.test.ts`
-Expected: PASS if `src/publication/validator.ts`, `src/publication/collage.ts`, and `src/publication/service.ts` already implement design §10. Any FAIL is a defect in the existing Publication plan implementation; fix it there.
+Replace:
 
-- [ ] **Step 4: Run tests to verify they pass**
+```ts
+for (let call = 0; call < 6; call += 1) {
+  await expect(fill()).rejects.toThrow("google 503");
+  expect(fetcher.mock.calls.some(([, init]) =>
+    init?.method === "DELETE")).toBe(false);
+}
+```
 
-Run: `npx vitest run test/acceptance/publication.test.ts`
-Expected: PASS (5 tests).
+with:
+
+```ts
+const step = retryingStep();
+await expect(
+  step.do(
+    "fill and verify document",
+    {
+      retries: {
+        limit: 5,
+        delay: "10 seconds",
+        backoff: "exponential",
+      },
+      timeout: "5 minutes",
+    },
+    fill,
+  ),
+).rejects.toThrow("google 503");
+expect(step.calls).toContainEqual({
+  name: "fill and verify document",
+  retryLimit: 5,
+  attempts: 6,
+});
+expect(fetcher.mock.calls.some(([, init]) =>
+  init?.method === "DELETE")).toBe(false);
+```
+
+Keep the existing `failPublicationAfterExhaustion(...)` call and assertions after this replacement. They prove one deletion occurs only after all six Workflow attempts and D1 ends with `{ state: "failed", tempDocId: null }`.
+
+- [ ] **Step 3: Run Workflow and acceptance suites together**
+
+Run: `npx vitest run test/publication/workflow.test.ts test/acceptance/publication.test.ts`
+Expected: PASS — Workflow unit test proves `runPublicationWorkflow` invokes the stage six times; acceptance test proves real cleanup happens once after those six attempts.
+
+- [ ] **Step 4: Run full check**
+
+Run: `npm run check`
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add test/helpers/fixtures.ts test/acceptance/publication.test.ts
-git commit -m "test: add publication acceptance suite covering validation, collage, and idempotency"
+git add test/acceptance/publication.test.ts
+git commit -m "test: bind publication cleanup to Workflow retry budget"
 ```
 
 ---
-
-### Task 7: LINE acceptance suite (30 messages)
-
-**Files:**
-- Create: `test/acceptance/line-commands.test.ts`
-
-**Interfaces:**
-- Consumes: `parseCommand` from `src/line/parser.ts`; `ParsedCommand` from `src/line/types.ts` (both existing exports from the LINE plan).
-
-- [ ] **Step 1: Write the 30-case table test**
-
-```ts
-// test/acceptance/line-commands.test.ts
-import { describe, it, expect } from "vitest";
-import { parseCommand } from "../../src/line/parser";
-
-const cases: Array<{ text: string; expect: unknown }> = [
-  // Accepted Product ID forms
-  { text: "/search A-1234", expect: { type: "search", productId: "A-1234" } },
-  { text: "รหัส 1234", expect: { type: "search", productId: "A-1234" } },
-  { text: "รหัสสินค้า 1234", expect: { type: "search", productId: "A-1234" } },
-  // Rejected Product ID forms
-  { text: "/search A1234", expect: "error" },
-  { text: "/search A 1234", expect: "error" },
-  // /soldout accepted price forms
-  { text: "/soldout A-1001 thb 1290", expect: { type: "soldout", productId: "A-1001", soldPrice: 1290 } },
-  { text: "/soldout A-1001 THB 1,290", expect: { type: "soldout", productId: "A-1001", soldPrice: 1290 } },
-  { text: "/soldout A-1001 ราคา 1290", expect: { type: "soldout", productId: "A-1001", soldPrice: 1290 } },
-  { text: "/soldout A-1001 ราคา 1,290 บาท", expect: { type: "soldout", productId: "A-1001", soldPrice: 1290 } },
-  // /soldout missing/ambiguous data
-  { text: "/soldout A-1001", expect: "error" },
-  { text: "/soldout thb 1290", expect: "error" },
-  { text: "/soldout A-1001 thb 1290 or ราคา 1500", expect: "error" },
-  // /soldout multiple Product IDs
-  { text: "/soldout A-1001 A-1002 thb 1290", expect: "error" },
-  // /help
-  { text: "/help", expect: { type: "help" } },
-  // /upload, /docs
-  { text: "/upload", expect: { type: "upload" } },
-  { text: "/docs", expect: { type: "docs" } },
-  // /revert
-  { text: "/revert", expect: { type: "revert" } },
-  // Case and whitespace tolerance
-  { text: "  /help  ", expect: { type: "help" } },
-  { text: "/SOLDOUT A-1001 THB 1290", expect: { type: "soldout", productId: "A-1001", soldPrice: 1290 } },
-  // Unknown command
-  { text: "/unknown", expect: "error" },
-  // Unknown Product ID form still structurally valid (existence checked downstream, not by parser)
-  { text: "/search A-9999", expect: { type: "search", productId: "A-9999" } },
-  // Additional accepted price edge cases
-  { text: "/soldout A-1050 THB 500", expect: { type: "soldout", productId: "A-1050", soldPrice: 500 } },
-  { text: "/soldout A-1050 ราคา500", expect: "error" }, // no space is ambiguous
-  { text: "/soldout A-1050 thb 1,290.50", expect: "error" }, // decimal baht rejected
-  { text: "/soldout A-1050 thb -100", expect: "error" }, // negative rejected
-  { text: "/soldout A-1050 thb 0", expect: "error" }, // zero rejected as not-a-real-price
-  // Additional rejected Product ID edge cases
-  { text: "/soldout a-1050 thb 100", expect: "error" }, // lowercase prefix rejected
-  { text: "/soldout A-01050 thb 100", expect: { type: "soldout", productId: "A-01050", soldPrice: 100 } },
-  { text: "รหัส1234", expect: "error" }, // missing required space
-  { text: "/search", expect: "error" }, // missing Product ID
-  { text: "", expect: "error" }, // empty message
-];
-
-describe.each(cases)("LINE parser — %j", (testCase) => {
-  it("matches the expected parse result", () => {
-    const result = parseCommand(testCase.text);
-    if (testCase.expect === "error") {
-      expect(result.ok).toBe(false);
-    } else {
-      expect(result.ok).toBe(true);
-      if (result.ok) expect(result.value).toEqual(testCase.expect);
-    }
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify current behavior**
-
-Run: `npx vitest run test/acceptance/line-commands.test.ts`
-Expected: PASS if `src/line/parser.ts` already implements the grammar from design §11 exactly. Any FAIL pinpoints a parser gap (e.g., decimal or negative baht not rejected, `รหัส1234` without space wrongly accepted) — fix `src/line/parser.ts` to match design §11 exactly.
-
-- [ ] **Step 3: Run test to verify it passes**
-
-Run: `npx vitest run test/acceptance/line-commands.test.ts`
-Expected: PASS (30 cases).
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add test/acceptance/line-commands.test.ts
-git commit -m "test: add 30-case LINE command parser acceptance suite"
-```
-
----
-
-### Task 8: Setup validator route and CLI script
+### Task 7: Setup validator route and CLI script
 
 **Files:**
-- Modify: `src/routes/setup.ts` (implement the route stub created in Foundation plan)
+- Create: `src/routes/setup.ts` (validator and one-time sequence bootstrap)
+- Create: `src/routes/health.ts` (public liveness plus sequence/import readiness)
+- Modify: `src/router.ts` (register health and authenticated setup routes)
 - Create: `scripts/verify-airtable-schema.ts`
 - Test: `test/routes/setup.test.ts`
+- Test: `test/routes/health.test.ts`
 
 **Interfaces:**
-- Consumes: `Env` from `src/env.ts`; `getMonthlyUsage` from Task 1; existing repositories `src/db/sequence-repository.ts`, `src/db/import-repository.ts`.
-- Produces: `runSetupChecks(env: Env): Promise<SetupReport>` where `SetupReport = { ok: boolean; checks: Array<{ name: string; ok: boolean; detail: string }> }`, consumed by Task 16's smoke test and by the CLI script.
+- Consumes: `Env` from `src/env.ts`; `parseConfig`; shared constant-time `verifyAdminBearer`; `createAssetStore` and `handleGetAsset`; `createSequenceRepository`; Airtable REST with paginated `Product ID` reads; existing LINE, Google-auth, Anthropic SDK, and iCloud clients for live credential/access probes.
+- Produces: `runSetupChecks(env, fetcher?, clock?, probes?): Promise<SetupReport>`, authenticated `handleSetup(request, env, fetcher?, clock?, probes?): Promise<Response>`, authenticated one-time `handleBootstrapSequence(request, env)`, and public `handleHealth(env, fetcher?): Promise<Response>`. `SetupReport = { ok: boolean; checks: Array<{ name: string; ok: boolean; detail: string }> }` is consumed by Task 15's smoke test and CLI script.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
 // test/routes/setup.test.ts
-import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:test";
-import { runSetupChecks } from "../../src/routes/setup";
+import { describe, expect, it, vi } from "vitest";
+import {
+  createSetupExternalProbes,
+  handleBootstrapSequence,
+  handleSetup,
+  runSetupChecks,
+} from "../../src/routes/setup";
+import { testEnv } from "../helpers/env";
 
-describe("runSetupChecks", () => {
-  it("reports d1_migrations, sequence_consistency, and every required check by name", async () => {
-    const report = await runSetupChecks(env as any);
-    const names = report.checks.map((c) => c.name);
-    expect(names).toEqual(
-      expect.arrayContaining([
-        "d1_migrations",
-        "r2_access",
-        "images_binding",
-        "airtable_schema",
-        "sequence_consistency",
-        "line_webhook_config",
-        "google_template_access",
-        "claude_credential",
-        "icloud_phase_zero",
-        "cron_timezone",
-      ]),
+const requiredProductsFields = [
+  "Product ID",
+  "System Group ID",
+  "Upload Date",
+  "Product Images",
+  "Inventory Status",
+  "4-in-1 Image",
+  "Publication Run",
+  "Sold Price",
+  "Sold At",
+  "Sold By",
+  "Last System Update",
+  "Brand Name",
+  "Model Name",
+  "Condition Type",
+  "Size",
+  "Description",
+  "LINE Square Price",
+  "IG Price",
+  "Data Complete",
+  "Missing Fields",
+];
+const requiredRunFields = [
+  "Publication Date",
+  "Status",
+  "Products",
+  "Google Doc URL",
+  "Generated At",
+  "Error Summary",
+];
+
+function airtableSetupFetch(productIds = ["A-500"]) {
+  return vi.fn(async (input: RequestInfo | URL) => {
+    const url = new URL(String(input));
+    if (url.pathname.includes("/meta/bases/")) {
+      return Response.json({
+        tables: [
+          {
+            id: "tblProducts",
+            fields: requiredProductsFields.map((name) => ({ name })),
+          },
+          {
+            id: "tblRuns",
+            fields: requiredRunFields.map((name) => ({ name })),
+          },
+        ],
+      });
+    }
+    return Response.json({
+      records: productIds.map((productId, index) => ({
+        id: `rec-${index}`,
+        fields: { "Product ID": productId },
+      })),
+    });
+  });
+}
+
+describe("setup routes", () => {
+  it("reports all eleven required setup checks by name", async () => {
+    const env = testEnv();
+    await env.IMAGES_BUCKET.put(
+      "assets/collage-base-1080.jpg",
+      "fixture",
     );
+    await env.DB.prepare(
+      `INSERT INTO sequences
+       (name, next_value, bootstrapped_at)
+       VALUES ('product_id', 501, '2026-09-01T00:00:00.000Z')`,
+    ).run();
+
+    const report = await runSetupChecks(
+      env,
+      airtableSetupFetch(),
+      { now: () => new Date("2026-09-02T01:00:00.000Z") },
+      {
+        verifyLineGroupAccess: vi.fn().mockResolvedValue(undefined),
+        verifyGoogleTemplateAccess: vi.fn().mockResolvedValue(undefined),
+        verifyClaudeCredential: vi.fn().mockResolvedValue(undefined),
+        verifyICloudSnapshotAccess: vi.fn().mockResolvedValue(250),
+      },
+    );
+
+    expect(report.checks.map((check) => check.name)).toEqual([
+      "d1_migrations",
+      "r2_access",
+      "asset_delivery",
+      "images_binding",
+      "airtable_schema",
+      "sequence_consistency",
+      "line_webhook_config",
+      "google_template_access",
+      "claude_credential",
+      "icloud_phase_zero",
+      "cron_timezone",
+    ]);
+    expect(report.ok).toBe(true);
   });
 
-  it("fails sequence_consistency when Airtable's max Product ID meets or exceeds D1's next value", async () => {
-    // fake env with a sequence-repository stub returning nextNumber=5 while Airtable max is 5
-    const report = await runSetupChecks({
-      ...env,
-      __testOverrides: { d1NextProductNumber: 5, airtableMaxProductNumber: 5 },
-    } as any);
-    const check = report.checks.find((c) => c.name === "sequence_consistency");
-    expect(check?.ok).toBe(false);
+  it("returns the setup report after valid bearer authentication", async () => {
+    const env = testEnv();
+    await env.IMAGES_BUCKET.put(
+      "assets/collage-base-1080.jpg",
+      "fixture",
+    );
+    await env.DB.prepare(
+      `INSERT INTO sequences
+       (name, next_value, bootstrapped_at)
+       VALUES ('product_id', 501, '2026-09-01T00:00:00.000Z')`,
+    ).run();
+    const response = await handleSetup(
+      new Request("https://worker.example/setup", {
+        headers: {
+          authorization: `Bearer ${env.ADMIN_ROUTE_TOKEN}`,
+        },
+      }),
+      env,
+      airtableSetupFetch(),
+      { now: () => new Date("2026-09-02T01:00:00.000Z") },
+      {
+        verifyLineGroupAccess: vi.fn().mockResolvedValue(undefined),
+        verifyGoogleTemplateAccess: vi.fn().mockResolvedValue(undefined),
+        verifyClaudeCredential: vi.fn().mockResolvedValue(undefined),
+        verifyICloudSnapshotAccess: vi.fn().mockResolvedValue(250),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      checks: expect.arrayContaining([
+        expect.objectContaining({
+          name: "airtable_schema",
+          ok: true,
+        }),
+      ]),
+    });
+  });
+
+  it.each([
+    undefined,
+    "Bearer wrong-token",
+  ])("rejects setup before checks for missing or wrong bearer", async (authorization) => {
+    const headers = authorization ? { authorization } : undefined;
+    const response = await handleSetup(
+      new Request("https://worker.example/setup", { headers }),
+      { ADMIN_ROUTE_TOKEN: "admin-secret" } as ReturnType<typeof testEnv>,
+    );
+    expect(response.status).toBe(401);
+  });
+
+  it("rejects a malformed successful LINE group summary", async () => {
+    const env = testEnv();
+    const probes = createSetupExternalProbes(
+      env,
+      vi.fn().mockResolvedValue(Response.json({ groupId: "C1" })),
+      { now: () => new Date("2026-09-02T01:00:00.000Z") },
+    );
+
+    await expect(probes.verifyLineGroupAccess()).rejects.toThrow();
+  });
+
+  it("bootstraps from maximum valid Airtable Product ID plus one", async () => {
+    const env = testEnv();
+    const response = await handleBootstrapSequence(
+      new Request("https://worker.example/setup/bootstrap-sequence", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${env.ADMIN_ROUTE_TOKEN}`,
+        },
+      }),
+      env,
+      airtableSetupFetch(["A-9", "invalid", "A-501"]),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      bootstrappedFrom: 502,
+    });
+  });
+
+  it("rejects a second bootstrap without moving the sequence", async () => {
+    const env = testEnv();
+    const request = () => new Request(
+      "https://worker.example/setup/bootstrap-sequence",
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${env.ADMIN_ROUTE_TOKEN}`,
+        },
+      },
+    );
+    expect((await handleBootstrapSequence(
+      request(),
+      env,
+      airtableSetupFetch(["A-10"]),
+    )).status).toBe(200);
+    expect((await handleBootstrapSequence(
+      request(),
+      env,
+      airtableSetupFetch(["A-999"]),
+    )).status).toBe(409);
   });
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+```ts
+// test/routes/health.test.ts
+import { describe, expect, it, vi } from "vitest";
+import { handleHealth } from "../../src/routes/health";
+import { testEnv } from "../helpers/env";
 
-Run: `npx vitest run test/routes/setup.test.ts`
-Expected: FAIL — `runSetupChecks` is not exported yet (Foundation plan only scaffolded the route).
+function airtableProducts(productIds: string[]) {
+  return vi.fn().mockResolvedValue(Response.json({
+    records: productIds.map((productId, index) => ({
+      id: `rec-${index}`,
+      fields: { "Product ID": productId },
+    })),
+  }));
+}
+
+describe("GET /health", () => {
+  it("fails readiness before Product ID bootstrap", async () => {
+    const response = await handleHealth(
+      testEnv(),
+      airtableProducts([]),
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      importRunning: false,
+      code: "sequence_not_bootstrapped",
+    });
+  });
+
+  it("reports running imports and fails on Airtable sequence drift", async () => {
+    const env = testEnv();
+    await env.DB.prepare(
+      `INSERT INTO sequences
+       (name, next_value, bootstrapped_at)
+       VALUES ('product_id', 501, '2026-09-01T00:00:00.000Z')`,
+    ).run();
+    await env.DB.prepare(
+      `INSERT INTO import_runs
+       (id, source_album_id, trigger, status, started_at)
+       VALUES ('run-1', 'album-1', 'cron', 'running',
+               '2026-09-01T00:00:00.000Z')`,
+    ).run();
+
+    const response = await handleHealth(
+      env,
+      airtableProducts(["A-501"]),
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      importRunning: true,
+      code: "sequence_drift",
+    });
+  });
+
+  it("returns healthy when D1 remains ahead of Airtable", async () => {
+    const env = testEnv();
+    await env.DB.prepare(
+      `INSERT INTO sequences
+       (name, next_value, bootstrapped_at)
+       VALUES ('product_id', 502, '2026-09-01T00:00:00.000Z')`,
+    ).run();
+
+    const response = await handleHealth(
+      env,
+      airtableProducts(["A-501"]),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      importRunning: false,
+    });
+  });
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `npx vitest run test/routes/setup.test.ts test/routes/health.test.ts`
+Expected: FAIL — `src/routes/setup.ts` and `src/routes/health.ts` do not exist yet.
 
 - [ ] **Step 3: Implement `runSetupChecks`**
 
 ```ts
 // src/routes/setup.ts
-import type { Env } from "../env";
-import { getMonthlyUsage } from "../db/usage-repository";
-import { getNextProductNumber } from "../db/sequence-repository"; // existing export from Foundation/Import plan
-import { bangkokDateString } from "../shared/time";
+import Anthropic from "@anthropic-ai/sdk";
+import { z } from "zod";
+import { parseConfig } from "../config";
+import { createSequenceRepository } from "../db/sequence-repository";
+import type { Env, Fetcher } from "../env";
+import { createICloudClient } from "../icloud/client";
+import { createAssetStore } from "../import/asset-store";
+import { createGoogleAuthClient } from "../publication/google-auth";
+import { verifyAdminBearer } from "../shared/admin-auth";
+import type { Clock } from "../shared/time";
+import { todayBangkokDate } from "../shared/time";
+import { handleGetAsset } from "./assets";
 
-export interface SetupCheckResult { name: string; ok: boolean; detail: string; }
-export interface SetupReport { ok: boolean; checks: SetupCheckResult[]; }
+const AirtableMetaSchema = z.object({
+  tables: z.array(z.object({
+    id: z.string().min(1),
+    fields: z.array(z.object({
+      name: z.string().min(1),
+    })),
+  })),
+});
+const AirtableRecordsSchema = z.object({
+  records: z.array(z.object({
+    id: z.string().min(1),
+    fields: z.object({
+      "Product ID": z.string().optional(),
+    }),
+  })),
+  offset: z.string().optional(),
+});
+const LineGroupSummarySchema = z.object({
+  groupName: z.string().min(1),
+});
+const DriveFileSchema = z.object({
+  id: z.string().min(1),
+  mimeType: z.string().min(1),
+  parents: z.array(z.string()).optional(),
+});
 
-async function check(name: string, fn: () => Promise<string>): Promise<SetupCheckResult> {
+export interface SetupExternalProbes {
+  verifyLineGroupAccess(): Promise<void>;
+  verifyGoogleTemplateAccess(): Promise<void>;
+  verifyClaudeCredential(): Promise<void>;
+  verifyICloudSnapshotAccess(): Promise<number>;
+}
+
+const requiredFields = {
+  Products: [
+    "Product ID",
+    "System Group ID",
+    "Upload Date",
+    "Product Images",
+    "Inventory Status",
+    "4-in-1 Image",
+    "Publication Run",
+    "Sold Price",
+    "Sold At",
+    "Sold By",
+    "Last System Update",
+    "Brand Name",
+    "Model Name",
+    "Condition Type",
+    "Size",
+    "Description",
+    "LINE Square Price",
+    "IG Price",
+    "Data Complete",
+    "Missing Fields",
+  ],
+  "Publication Runs": [
+    "Publication Date",
+    "Status",
+    "Products",
+    "Google Doc URL",
+    "Generated At",
+    "Error Summary",
+  ],
+} as const;
+
+export interface SetupCheckResult {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+export interface SetupReport {
+  ok: boolean;
+  checks: SetupCheckResult[];
+}
+
+async function check(
+  name: string,
+  fn: () => Promise<string>,
+): Promise<SetupCheckResult> {
   try {
-    const detail = await fn();
-    return { name, ok: true, detail };
-  } catch (err) {
-    return { name, ok: false, detail: err instanceof Error ? err.message : String(err) };
+    return { name, ok: true, detail: await fn() };
+  } catch (error) {
+    return {
+      name,
+      ok: false,
+      detail: error instanceof Error
+        ? error.message
+        : String(error),
+    };
   }
 }
 
-export async function runSetupChecks(env: Env & { __testOverrides?: Record<string, unknown> }): Promise<SetupReport> {
+async function airtableJson(
+  fetcher: Fetcher,
+  url: string,
+  token: string,
+): Promise<unknown> {
+  const response = await fetcher(url, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`Airtable setup request failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+async function validateAirtableSchema(
+  env: Env,
+  fetcher: Fetcher,
+): Promise<void> {
+  const config = parseConfig(env.APP_CONFIG_JSON);
+  const body = AirtableMetaSchema.parse(await airtableJson(
+    fetcher,
+    `https://api.airtable.com/v0/meta/bases/${config.airtableBaseId}/tables`,
+    env.AIRTABLE_TOKEN,
+  ));
+  const expected = [
+    {
+      tableId: config.airtableProductsTableId,
+      label: "Products" as const,
+    },
+    {
+      tableId: config.airtablePublicationRunsTableId,
+      label: "Publication Runs" as const,
+    },
+  ];
+  for (const entry of expected) {
+    const table = body.tables.find((candidate) =>
+      candidate.id === entry.tableId,
+    );
+    if (!table) {
+      throw new Error(`${entry.label} table ID not found`);
+    }
+    const names = new Set(table.fields.map((field) => field.name));
+    const missing = requiredFields[entry.label].filter((name) =>
+      !names.has(name),
+    );
+    if (missing.length > 0) {
+      throw new Error(
+        `${entry.label} missing fields: ${missing.join(", ")}`,
+      );
+    }
+  }
+}
+
+export async function maximumAirtableProductNumber(
+  env: Env,
+  fetcher: Fetcher,
+): Promise<number> {
+  const config = parseConfig(env.APP_CONFIG_JSON);
+  let offset: string | undefined;
+  let maximum = 0;
+  do {
+    const url = new URL(
+      `https://api.airtable.com/v0/${config.airtableBaseId}/${config.airtableProductsTableId}`,
+    );
+    url.searchParams.append("fields[]", "Product ID");
+    url.searchParams.set("pageSize", "100");
+    if (offset) {
+      url.searchParams.set("offset", offset);
+    }
+    const body = AirtableRecordsSchema.parse(await airtableJson(
+      fetcher,
+      url.toString(),
+      env.AIRTABLE_TOKEN,
+    ));
+    for (const record of body.records) {
+      const match = /^A-(\d+)$/.exec(
+        record.fields["Product ID"] ?? "",
+      );
+      if (match) {
+        maximum = Math.max(maximum, Number(match[1]));
+      }
+    }
+    offset = body.offset;
+  } while (offset);
+  return maximum;
+}
+
+export async function sequenceState(env: Env): Promise<{
+  nextValue: number;
+  bootstrapped: boolean;
+} | null> {
+  const row = await env.DB.prepare(
+    `SELECT next_value, bootstrapped_at
+     FROM sequences
+     WHERE name = 'product_id'`,
+  ).first<{
+    next_value: number;
+    bootstrapped_at: string | null;
+  }>();
+  return row
+    ? {
+        nextValue: row.next_value,
+        bootstrapped: row.bootstrapped_at !== null,
+      }
+    : null;
+}
+
+export function createSetupExternalProbes(
+  env: Env,
+  fetcher: Fetcher,
+  clock: Clock,
+): SetupExternalProbes {
+  const config = parseConfig(env.APP_CONFIG_JSON);
+  const googleAuth = createGoogleAuthClient(
+    env.GOOGLE_SERVICE_ACCOUNT_JSON,
+    clock,
+    fetcher,
+  );
+  const anthropic = new Anthropic({
+    apiKey: env.ANTHROPIC_API_KEY,
+    maxRetries: 0,
+    fetch: fetcher,
+  });
+  const imageSource = createICloudClient(
+    env.ICLOUD_SHARED_ALBUM_TOKEN,
+    fetcher,
+  );
+
+  async function loadDriveFile(id: string) {
+    const token = await googleAuth.getAccessToken();
+    const url = new URL(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}`,
+    );
+    url.searchParams.set("fields", "id,mimeType,parents");
+    const response = await fetcher(url, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      throw new Error(`Google Drive access failed: ${response.status}`);
+    }
+    return DriveFileSchema.parse(await response.json());
+  }
+
+  return {
+    async verifyLineGroupAccess() {
+      const response = await fetcher(
+        `https://api.line.me/v2/bot/group/${encodeURIComponent(config.lineAllowedGroupId)}/summary`,
+        {
+          headers: {
+            authorization: `Bearer ${env.LINE_CHANNEL_ACCESS_TOKEN}`,
+          },
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`LINE group access failed: ${response.status}`);
+      }
+      LineGroupSummarySchema.parse(await response.json());
+    },
+    async verifyGoogleTemplateAccess() {
+      const folder = await loadDriveFile(config.googleDriveFolderId);
+      if (folder.mimeType !== "application/vnd.google-apps.folder") {
+        throw new Error("Configured Google folder is not a Drive folder");
+      }
+      const template = await loadDriveFile(config.googleTemplateDocId);
+      if (
+        template.mimeType !== "application/vnd.google-apps.document" ||
+        !template.parents?.includes(folder.id)
+      ) {
+        throw new Error("Google template is not a document in configured folder");
+      }
+    },
+    async verifyClaudeCredential() {
+      const model = await anthropic.models.retrieve(config.claudeModel);
+      if (model.id !== config.claudeModel) {
+        throw new Error(`Anthropic returned unexpected model ${model.id}`);
+      }
+    },
+    async verifyICloudSnapshotAccess() {
+      const snapshot = await imageSource.getSnapshot();
+      return snapshot.photos.length;
+    },
+  };
+}
+
+export async function runSetupChecks(
+  env: Env,
+  fetcher: Fetcher = fetch.bind(globalThis),
+  clock: Clock = { now: () => new Date() },
+  probes: SetupExternalProbes = createSetupExternalProbes(
+    env,
+    fetcher,
+    clock,
+  ),
+): Promise<SetupReport> {
+  const config = parseConfig(env.APP_CONFIG_JSON);
   const checks: SetupCheckResult[] = [];
 
   checks.push(await check("d1_migrations", async () => {
-    const row = await env.DB.prepare("SELECT COUNT(*) AS n FROM sequences").first<{ n: number }>();
-    if (!row) throw new Error("sequences table missing — run db:migrate");
-    return "sequences table present";
+    const expectedTables = [
+      "sequences",
+      "import_runs",
+      "import_checkpoints",
+      "photo_assets",
+      "product_groups",
+      "audit_events",
+      "publication_jobs",
+      "publication_product_cache",
+      "line_events",
+      "pending_line_commands",
+      "line_actions",
+      "usage_metrics",
+    ];
+    const rows = await env.DB.prepare(
+      `SELECT name FROM sqlite_master
+       WHERE type = 'table' AND name IN (${expectedTables
+         .map(() => "?")
+         .join(",")})`,
+    ).bind(...expectedTables).all<{ name: string }>();
+    const present = new Set(rows.results.map((row) => row.name));
+    const missing = expectedTables.filter((name) => !present.has(name));
+    if (missing.length > 0) {
+      throw new Error(`Missing D1 tables: ${missing.join(", ")}`);
+    }
+    return `${expectedTables.length} required D1 tables present`;
   }));
 
   checks.push(await check("r2_access", async () => {
-    await env.IMAGES_BUCKET.put("setup-check/probe.txt", "ok");
-    await env.IMAGES_BUCKET.delete("setup-check/probe.txt");
-    return "R2 read/write verified";
+    const key = `setup-check/${crypto.randomUUID()}.txt`;
+    await env.IMAGES_BUCKET.put(key, "ok");
+    const object = await env.IMAGES_BUCKET.get(key);
+    await env.IMAGES_BUCKET.delete(key);
+    if (!object || await object.text() !== "ok") {
+      throw new Error("R2 probe read did not match write");
+    }
+    if (
+      await env.IMAGES_BUCKET.head(
+        "assets/collage-base-1080.jpg",
+      ) === null
+    ) {
+      throw new Error(
+        "R2 collage base missing at assets/collage-base-1080.jpg",
+      );
+    }
+    return "R2 write/read/delete and collage base verified";
+  }));
+
+  checks.push(await check("asset_delivery", async () => {
+    const key = `setup-check/${crypto.randomUUID()}.txt`;
+    await env.IMAGES_BUCKET.put(key, "signed-ok");
+    try {
+      const assets = createAssetStore(
+        env.IMAGES_BUCKET,
+        {
+          signingSecret: env.ASSET_URL_SIGNING_SECRET,
+          publicBaseUrl: config.publicBaseUrl,
+        },
+        clock,
+        env.DB,
+      );
+      const url = await assets.signUrl(key, 60);
+      const response = await handleGetAsset(
+        new Request(url),
+        env,
+        clock,
+      );
+      if (!response.ok || await response.text() !== "signed-ok") {
+        throw new Error("signed asset route probe failed");
+      }
+      return "signed private asset route verified";
+    } finally {
+      await env.IMAGES_BUCKET.delete(key);
+    }
   }));
 
   checks.push(await check("images_binding", async () => {
-    if (!env.IMAGES) throw new Error("IMAGES binding missing");
-    return "Images binding present";
+    if (!env.IMAGES) {
+      throw new Error("IMAGES binding missing");
+    }
+    if (!env.IMPORT_WORKFLOW || !env.PUBLICATION_WORKFLOW) {
+      throw new Error("Workflow binding missing");
+    }
+    if (!env.ADMIN_ROUTE_TOKEN) {
+      throw new Error("ADMIN_ROUTE_TOKEN missing");
+    }
+    return "Images, Workflow, and admin-auth bindings present";
   }));
 
   checks.push(await check("airtable_schema", async () => {
-    if (!env.AIRTABLE_TOKEN) throw new Error("AIRTABLE_TOKEN missing");
-    return "Airtable token present (run scripts/verify-airtable-schema.ts for field-level check)";
+    await validateAirtableSchema(env, fetcher);
+    return "Airtable tables and required fields verified";
   }));
 
   checks.push(await check("sequence_consistency", async () => {
-    const d1Next = env.__testOverrides?.d1NextProductNumber as number | undefined ?? await getNextProductNumber(env.DB, { dryRun: true });
-    const airtableMax = env.__testOverrides?.airtableMaxProductNumber as number | undefined ?? d1Next - 1;
-    if (airtableMax >= d1Next) {
-      throw new Error(`Airtable max Product ID (${airtableMax}) >= D1 next (${d1Next}); advance D1 sequence before resuming imports`);
+    const state = await sequenceState(env);
+    if (!state?.bootstrapped) {
+      throw new Error(
+        "Product sequence not bootstrapped; POST /setup/bootstrap-sequence",
+      );
     }
-    return `D1 next=${d1Next}, Airtable max=${airtableMax}`;
+    const airtableMaximum = await maximumAirtableProductNumber(
+      env,
+      fetcher,
+    );
+    if (airtableMaximum >= state.nextValue) {
+      throw new Error(
+        `Airtable max Product ID (${airtableMaximum}) >= D1 next (${state.nextValue})`,
+      );
+    }
+    return `D1 next=${state.nextValue}, Airtable max=${airtableMaximum}`;
   }));
 
   checks.push(await check("line_webhook_config", async () => {
-    if (!env.LINE_CHANNEL_SECRET || !env.LINE_CHANNEL_ACCESS_TOKEN) throw new Error("LINE secrets missing");
-    return "LINE secrets present";
+    if (!env.LINE_CHANNEL_SECRET) {
+      throw new Error("LINE_CHANNEL_SECRET missing");
+    }
+    await probes.verifyLineGroupAccess();
+    return "LINE token can access configured allowed group";
   }));
 
   checks.push(await check("google_template_access", async () => {
-    if (!env.GOOGLE_SERVICE_ACCOUNT_JSON) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON missing");
-    JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
-    return "Google service account JSON parses";
+    await probes.verifyGoogleTemplateAccess();
+    return "Google service account can access template in target folder";
   }));
 
   checks.push(await check("claude_credential", async () => {
-    if (!env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY missing");
-    return "Anthropic API key present";
+    await probes.verifyClaudeCredential();
+    return `Anthropic credential can access ${config.claudeModel}`;
   }));
 
   checks.push(await check("icloud_phase_zero", async () => {
-    if (!env.ICLOUD_SHARED_ALBUM_TOKEN) throw new Error("ICLOUD_SHARED_ALBUM_TOKEN missing");
-    return "iCloud token present (see docs/feasibility/icloud-phase-0-report.md for PASS status)";
+    const photoCount = await probes.verifyICloudSnapshotAccess();
+    return `iCloud snapshot access verified (${photoCount} photos); committed Phase 0 report must also be PASS`;
   }));
 
   checks.push(await check("cron_timezone", async () => {
-    const config = JSON.parse(env.APP_CONFIG_JSON);
-    if (config.TIME_ZONE !== "Asia/Bangkok") throw new Error(`TIME_ZONE is ${config.TIME_ZONE}, expected Asia/Bangkok`);
-    return `TIME_ZONE=${config.TIME_ZONE}, today=${bangkokDateString(new Date())}`;
+    if (config.timeZone !== "Asia/Bangkok") {
+      throw new Error(`TIME_ZONE is ${config.timeZone}`);
+    }
+    if (config.uploadCutoffMinutes !== 30) {
+      throw new Error(
+        `UPLOAD_CUTOFF_MINUTES is ${config.uploadCutoffMinutes}`,
+      );
+    }
+    return `Asia/Bangkok cutoff=30m today=${todayBangkokDate(clock)}`;
   }));
 
-  return { ok: checks.every((c) => c.ok), checks };
+  return {
+    ok: checks.every((entry) => entry.ok),
+    checks,
+  };
+}
+
+export async function handleBootstrapSequence(
+  request: Request,
+  env: Env,
+  fetcher: Fetcher = fetch.bind(globalThis),
+): Promise<Response> {
+  if (!await verifyAdminBearer(request, env.ADMIN_ROUTE_TOKEN)) {
+    return Response.json(
+      { error: "unauthorized" },
+      { status: 401 },
+    );
+  }
+  const existing = await sequenceState(env);
+  if (existing?.bootstrapped) {
+    return Response.json(
+      { error: "already_bootstrapped" },
+      { status: 409 },
+    );
+  }
+  const config = parseConfig(env.APP_CONFIG_JSON);
+  const maximum = await maximumAirtableProductNumber(env, fetcher);
+  const nextValue = Math.max(
+    config.productIdInitialNumber,
+    maximum + 1,
+  );
+  await createSequenceRepository(env.DB).bootstrap(
+    "product_id",
+    nextValue,
+  );
+  return Response.json({
+    ok: true,
+    bootstrappedFrom: nextValue,
+  });
 }
 ```
 
-Note: `getNextProductNumber(db, { dryRun: true })` must exist in `src/db/sequence-repository.ts` from the Import plan; if it only exposes an allocating `allocateNextProductNumber`, add a non-mutating `getNextProductNumber` there as part of this task (read-only `SELECT next_number FROM sequences WHERE name = 'product_id'`).
+`maximumAirtableProductNumber` scans every Airtable page, accepts only exact `A-<digits>` IDs, and ignores malformed values. `handleBootstrapSequence` is one-time and returns `409 already_bootstrapped` before a second scan can move D1.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run test/routes/setup.test.ts`
-Expected: PASS (2 tests).
+Run: `npx vitest run test/routes/setup.test.ts test/routes/health.test.ts`
+Expected: PASS (10 tests).
 
 - [ ] **Step 5: Write the CLI wrapper script**
 
 ```ts
 // scripts/verify-airtable-schema.ts
-import { runSetupChecks } from "../src/routes/setup";
+import { z } from "zod";
 
-async function main() {
-  const envName = process.argv.includes("--env") ? process.argv[process.argv.indexOf("--env") + 1] : "staging";
-  console.log(`Running setup checks against ${envName}...`);
-  // In CI/local use, this script is invoked through `wrangler dev --remote` binding injection,
-  // or via `wrangler d1 execute` + manual secret loading; document exact invocation in
-  // docs/runbooks/deployment.md Task 12.
-  console.log("See docs/runbooks/deployment.md for the environment-bound invocation of this check.");
+const SetupReportSchema = z.object({
+  ok: z.boolean(),
+  checks: z.array(z.object({
+    name: z.string(),
+    ok: z.boolean(),
+    detail: z.string(),
+  })),
+});
+
+async function main(): Promise<void> {
+  const baseUrl = process.env.WORKER_BASE_URL;
+  const token = process.env.ADMIN_ROUTE_TOKEN;
+  if (!baseUrl || !token) {
+    throw new Error(
+      "Set WORKER_BASE_URL and ADMIN_ROUTE_TOKEN",
+    );
+  }
+  const response = await fetch(`${baseUrl}/setup`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  const report = SetupReportSchema.parse(await response.json());
+  for (const check of report.checks) {
+    console.log(
+      `${check.ok ? "PASS" : "FAIL"} ${check.name}: ${check.detail}`,
+    );
+  }
+  if (!response.ok || !report.ok) {
+    process.exitCode = 1;
+  }
 }
 
-main();
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : error);
+  process.exitCode = 1;
+});
+```
+
+Exact staging invocation after deploy:
+
+```bash
+read -r -p "Exact staging Worker base URL: " WORKER_BASE_URL
+export WORKER_BASE_URL
+ADMIN_ROUTE_TOKEN="$ADMIN_ROUTE_TOKEN" npm run setup:verify
 ```
 
 - [ ] **Step 6: Wire the route into the router**
 
-Modify `src/routes/setup.ts` bottom export (existing Foundation-plan route handler) to call `runSetupChecks` and return its JSON:
+Append the authenticated validator handler to `src/routes/setup.ts`:
 
 ```ts
-export async function handleSetup(request: Request, env: Env): Promise<Response> {
-  const report = await runSetupChecks(env);
-  return new Response(JSON.stringify(report, null, 2), {
+export async function handleSetup(
+  request: Request,
+  env: Env,
+  fetcher: Fetcher = fetch.bind(globalThis),
+  clock: Clock = { now: () => new Date() },
+  probes?: SetupExternalProbes,
+): Promise<Response> {
+  if (!await verifyAdminBearer(
+    request,
+    env.ADMIN_ROUTE_TOKEN,
+  )) {
+    return Response.json(
+      { error: "unauthorized" },
+      { status: 401 },
+    );
+  }
+  const report = await runSetupChecks(
+    env,
+    fetcher,
+    clock,
+    probes ?? createSetupExternalProbes(
+      env,
+      fetcher,
+      clock,
+    ),
+  );
+  return Response.json(report, {
     status: report.ok ? 200 : 503,
-    headers: { "content-type": "application/json" },
   });
 }
+```
+
+Create the public readiness route. It performs no mutation and exposes only boolean state/error code, never credentials or customer data:
+
+```ts
+// src/routes/health.ts
+import type { Env, Fetcher } from "../env";
+import {
+  maximumAirtableProductNumber,
+  sequenceState,
+} from "./setup";
+
+export async function handleHealth(
+  env: Env,
+  fetcher: Fetcher = fetch.bind(globalThis),
+): Promise<Response> {
+  const running = await env.DB.prepare(
+    `SELECT COUNT(*) AS count
+     FROM import_runs
+     WHERE status = 'running'`,
+  ).first<{ count: number }>();
+  const importRunning = (running?.count ?? 0) > 0;
+  const sequence = await sequenceState(env);
+
+  if (!sequence?.bootstrapped) {
+    return Response.json({
+      ok: false,
+      importRunning,
+      code: "sequence_not_bootstrapped",
+    }, { status: 503 });
+  }
+
+  try {
+    const airtableMaximum = await maximumAirtableProductNumber(
+      env,
+      fetcher,
+    );
+    if (airtableMaximum >= sequence.nextValue) {
+      return Response.json({
+        ok: false,
+        importRunning,
+        code: "sequence_drift",
+      }, { status: 503 });
+    }
+  } catch {
+    return Response.json({
+      ok: false,
+      importRunning,
+      code: "airtable_unavailable",
+    }, { status: 503 });
+  }
+
+  return Response.json({ ok: true, importRunning });
+}
+```
+
+Register all three routes in `src/router.ts` before the `not_found` response:
+
+```ts
+if (request.method === "GET" && url.pathname === "/health") {
+  return handleHealth(env);
+}
+
+if (request.method === "GET" && url.pathname === "/setup") {
+  return handleSetup(request, env);
+}
+
+if (
+  request.method === "POST" &&
+  url.pathname === "/setup/bootstrap-sequence"
+) {
+  return handleBootstrapSequence(request, env);
+}
+```
+
+Add imports:
+
+```ts
+import { handleHealth } from "./routes/health";
+import {
+  handleBootstrapSequence,
+  handleSetup,
+} from "./routes/setup";
 ```
 
 - [ ] **Step 7: Run full check**
@@ -1246,13 +2314,13 @@ Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/routes/setup.ts src/db/sequence-repository.ts scripts/verify-airtable-schema.ts test/routes/setup.test.ts
-git commit -m "feat: implement setup validator covering all ten required checks"
+git add src/routes/setup.ts src/routes/health.ts src/router.ts scripts/verify-airtable-schema.ts test/routes/setup.test.ts test/routes/health.test.ts
+git commit -m "feat: add health and secure setup validation routes"
 ```
 
 ---
 
-### Task 9: Cost report endpoint
+### Task 8: Cost report endpoint
 
 **Files:**
 - Modify: `src/config.ts` (extend existing Zod schema)
@@ -1260,10 +2328,11 @@ git commit -m "feat: implement setup validator covering all ten required checks"
 - Create: `src/routes/usage.ts`
 - Modify: `src/router.ts` (register the new route)
 - Test: `test/monitoring/usage-report.test.ts`
+- Test: `test/routes/usage.test.ts`
 
 **Interfaces:**
-- Consumes: `getMonthlyUsage` from Task 1; `bangkokDateString` from `src/shared/time.ts`.
-- Produces: `buildCostReport(usage: Record<string, number>, config: AppConfig): CostReport` where `CostReport = { yearMonth: string; estimatedUsd: number; estimatedThb: number; overBudget: boolean; breakdown: Record<string, number> }`, consumed by Task 10's budget alarm.
+- Consumes: `getMonthlyUsage` and `getUsageTotal` from Task 1; `todayBangkokDate` from `src/shared/time.ts`. Monthly Claude tokens are combined with all-time net-new R2 bytes under synthetic key `r2_stored_bytes`.
+- Produces: `buildCostReport(usage: Record<string, number>, config: AppConfig, yearMonth: string): CostReport` where `CostReport = { yearMonth: string; estimatedUsd: number; estimatedThb: number; overBudget: boolean; breakdown: Record<string, number> }`, consumed by Task 9's budget alarm.
 
 - [ ] **Step 1: Extend the approved external config and camel-case runtime mapping**
 
@@ -1308,7 +2377,7 @@ import { buildCostReport } from "../../src/monitoring/usage-report";
 describe("buildCostReport", () => {
   it("estimates USD and THB cost from token and byte counters", () => {
     const report = buildCostReport(
-      { claude_input_tokens: 1_000_000, claude_output_tokens: 200_000, r2_bytes_written: 5 * 1024 * 1024 * 1024 },
+      { claude_input_tokens: 1_000_000, claude_output_tokens: 200_000, r2_stored_bytes: 5 * 1024 * 1024 * 1024 },
       { monthlyBudgetThb: 1000, usdToThbRate: 36, claudeInputPriceUsdPerMtok: 5, claudeOutputPriceUsdPerMtok: 25, r2PriceUsdPerGbMonth: 0.015 } as AppConfig,
       "2026-09",
     );
@@ -1321,7 +2390,7 @@ describe("buildCostReport", () => {
 
   it("flags overBudget false when comfortably under the configured ceiling", () => {
     const report = buildCostReport(
-      { claude_input_tokens: 50_000, claude_output_tokens: 20_000, r2_bytes_written: 200 * 1024 * 1024 },
+      { claude_input_tokens: 50_000, claude_output_tokens: 20_000, r2_stored_bytes: 200 * 1024 * 1024 },
       { monthlyBudgetThb: 1000, usdToThbRate: 36, claudeInputPriceUsdPerMtok: 5, claudeOutputPriceUsdPerMtok: 25, r2PriceUsdPerGbMonth: 0.015 } as AppConfig,
       "2026-09",
     );
@@ -1330,10 +2399,71 @@ describe("buildCostReport", () => {
 });
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+```ts
+// test/routes/usage.test.ts
+import { describe, expect, it } from "vitest";
+import { recordUsage } from "../../src/db/usage-repository";
+import { handleUsage } from "../../src/routes/usage";
+import { testEnv } from "../helpers/env";
 
-Run: `npx vitest run test/monitoring/usage-report.test.ts`
-Expected: FAIL — module does not exist.
+describe("GET /usage", () => {
+  it.each([
+    undefined,
+    "Bearer wrong-token",
+  ])("rejects missing or wrong bearer before reading D1", async (authorization) => {
+    const env = {
+      ADMIN_ROUTE_TOKEN: "admin-secret",
+    } as ReturnType<typeof testEnv>;
+    const headers = authorization
+      ? { authorization }
+      : undefined;
+
+    const response = await handleUsage(
+      new Request("https://worker.example/usage", { headers }),
+      env,
+    );
+
+    expect(response.status).toBe(401);
+  });
+
+  it("returns the monthly report for the exact admin bearer", async () => {
+    const env = testEnv();
+    await recordUsage(
+      env.DB,
+      "claude_input_tokens",
+      1_000,
+      "2026-09-01",
+    );
+    await recordUsage(
+      env.DB,
+      "r2_bytes_added",
+      2_000,
+      "2026-08-31",
+    );
+
+    const response = await handleUsage(
+      new Request("https://worker.example/usage", {
+        headers: {
+          authorization: `Bearer ${env.ADMIN_ROUTE_TOKEN}`,
+        },
+      }),
+      env,
+      { now: () => new Date("2026-09-02T01:00:00.000Z") },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      yearMonth: "2026-09",
+      overBudget: false,
+    });
+  });
+});
+```
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `npx vitest run test/monitoring/usage-report.test.ts test/routes/usage.test.ts`
+Expected: FAIL because cost-report and authenticated usage-route modules do not exist.
 
 - [ ] **Step 4: Implement `buildCostReport`**
 
@@ -1352,7 +2482,7 @@ export interface CostReport {
 export function buildCostReport(usage: Record<string, number>, config: AppConfig, yearMonth: string): CostReport {
   const inputTokens = usage.claude_input_tokens ?? 0;
   const outputTokens = usage.claude_output_tokens ?? 0;
-  const r2Bytes = usage.r2_bytes_written ?? 0;
+  const r2Bytes = usage.r2_stored_bytes ?? 0;
 
   const claudeInputUsd = (inputTokens / 1_000_000) * config.claudeInputPriceUsdPerMtok;
   const claudeOutputUsd = (outputTokens / 1_000_000) * config.claudeOutputPriceUsdPerMtok;
@@ -1371,27 +2501,55 @@ export function buildCostReport(usage: Record<string, number>, config: AppConfig
 }
 ```
 
+`r2_stored_bytes` is the all-time sum of bytes for newly created content-addressed objects, not monthly write traffic. Multiplying current retained bytes by the monthly GB rate slightly overestimates objects added mid-month, which is intentional for a budget alarm and avoids undercounting indefinite retention.
+
 - [ ] **Step 5: Run test to verify it passes**
 
-Run: `npx vitest run test/monitoring/usage-report.test.ts`
-Expected: PASS (2 tests).
+Run: `npx vitest run test/monitoring/usage-report.test.ts test/routes/usage.test.ts`
+Expected: PASS (6 tests).
 
 - [ ] **Step 6: Wire an authenticated route**
 
 ```ts
 // src/routes/usage.ts
+import type { Clock } from "../shared/time";
 import type { Env } from "../env";
-import { getMonthlyUsage } from "../db/usage-repository";
-import { buildCostReport } from "../monitoring/usage-report";
-import { bangkokDateString } from "../shared/time";
 import { parseConfig } from "../config";
+import {
+  getMonthlyUsage,
+  getUsageTotal,
+} from "../db/usage-repository";
+import { buildCostReport } from "../monitoring/usage-report";
+import { verifyAdminBearer } from "../shared/admin-auth";
+import { todayBangkokDate } from "../shared/time";
 
-export async function handleUsage(request: Request, env: Env): Promise<Response> {
-  const yearMonth = bangkokDateString(new Date()).slice(0, 7);
-  const usage = await getMonthlyUsage(env.DB, yearMonth);
+export async function handleUsage(
+  request: Request,
+  env: Env,
+  clock: Clock = { now: () => new Date() },
+): Promise<Response> {
+  if (!await verifyAdminBearer(
+    request,
+    env.ADMIN_ROUTE_TOKEN,
+  )) {
+    return Response.json(
+      { error: "unauthorized" },
+      { status: 401 },
+    );
+  }
+
+  const yearMonth = todayBangkokDate(clock).slice(0, 7);
+  const monthly = await getMonthlyUsage(env.DB, yearMonth);
+  const usage = {
+    ...monthly,
+    r2_stored_bytes: await getUsageTotal(
+      env.DB,
+      "r2_bytes_added",
+    ),
+  };
   const config = parseConfig(env.APP_CONFIG_JSON);
   const report = buildCostReport(usage, config, yearMonth);
-  return new Response(JSON.stringify(report, null, 2), { headers: { "content-type": "application/json" } });
+  return Response.json(report);
 }
 ```
 
@@ -1405,36 +2563,43 @@ Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/config.ts src/monitoring/usage-report.ts src/routes/usage.ts src/router.ts test/monitoring/usage-report.test.ts
+git add src/config.ts src/monitoring/usage-report.ts src/routes/usage.ts src/router.ts test/monitoring/usage-report.test.ts test/routes/usage.test.ts
 git commit -m "feat: add monthly cost report endpoint backed by usage_metrics"
 ```
 
 ---
 
-### Task 10: Budget alarm cron and native Cloudflare notifications
+### Task 9: Budget alarm cron and native Cloudflare notifications
 
 **Files:**
 - Modify: `src/scheduled.ts` (existing cron router from Foundation plan)
-- Create: `docs/runbooks/operations.md` (§ "Cloudflare native usage alarms" section written in Task 14; this task adds the code-side budget alarm only)
 - Test: `test/scheduled.test.ts` (extend existing suite)
 
 **Interfaces:**
-- Consumes: `buildCostReport` from Task 9; `CommandChannel` (LINE push) client from `src/line/client.ts` (existing export, method `pushToAdminGroup(text: string): Promise<void>`).
-- Produces: `runBudgetAlarmCheck(env: Env): Promise<{ sent: boolean; report: CostReport }>`, invoked by the new cron entry and by Task 16's smoke test.
+- Consumes: `buildCostReport` from Task 8; `getMonthlyUsage`/`getUsageTotal` from Task 1; existing `createLineClient(...): LineClient` and `LineClient.pushMessage(toGroupId, text)` from `src/line/client.ts`; `AppConfig.lineAllowedGroupId`.
+- Produces: `runBudgetAlarmCheck(env: Env): Promise<{ sent: boolean; report: CostReport }>`, invoked only by the new scheduled cron branch. Task 15's deployment smoke remains non-mutating and validates `/usage` without sending an alarm.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
 // test/scheduled.test.ts (add to existing describe block)
 import { runBudgetAlarmCheck } from "../src/scheduled";
-import { getMonthlyUsage, recordUsage } from "../src/db/usage-repository";
+import { recordUsage } from "../src/db/usage-repository";
+import type { LineClient } from "../src/line/client";
 
 it("pushes a LINE alert to the admin group only when over budget", async () => {
   await recordUsage(env.DB, "claude_input_tokens", 50_000_000, "2026-09-01"); // deliberately huge
   const pushed: string[] = [];
-  const lineClient = { pushToAdminGroup: async (text: string) => { pushed.push(text); } };
+  const lineClient = {
+    pushMessage: async (_groupId: string, text: string) => {
+      pushed.push(text);
+    },
+  } as LineClient;
 
-  const result = await runBudgetAlarmCheck({ ...env, __lineClientOverride: lineClient } as any);
+  const result = await runBudgetAlarmCheck({
+    ...env,
+    __lineClientOverride: lineClient,
+  });
 
   expect(result.sent).toBe(true);
   expect(pushed[0]).toContain("บาท");
@@ -1451,29 +2616,55 @@ Expected: FAIL — `runBudgetAlarmCheck` not exported.
 
 ```ts
 // src/scheduled.ts — add alongside existing import/publication cron handlers
-import { getMonthlyUsage } from "./db/usage-repository";
-import { buildCostReport, type CostReport } from "./monitoring/usage-report";
-import { bangkokDateString } from "./shared/time";
+import {
+  getMonthlyUsage,
+  getUsageTotal,
+} from "./db/usage-repository";
+import {
+  buildCostReport,
+  type CostReport,
+} from "./monitoring/usage-report";
+import { todayBangkokDate } from "./shared/time";
 import { parseConfig } from "./config";
-import { buildLineClient } from "./line/client"; // existing factory from LINE plan
+import {
+  createLineClient,
+  type LineClient,
+} from "./line/client";
 
-export async function runBudgetAlarmCheck(env: Env & { __lineClientOverride?: { pushToAdminGroup(text: string): Promise<void> } }): Promise<{ sent: boolean; report: CostReport }> {
-  const yearMonth = bangkokDateString(new Date()).slice(0, 7);
-  const usage = await getMonthlyUsage(env.DB, yearMonth);
+export async function runBudgetAlarmCheck(
+  env: Env & { __lineClientOverride?: LineClient },
+): Promise<{ sent: boolean; report: CostReport }> {
+  const yearMonth = todayBangkokDate({
+    now: () => new Date(),
+  }).slice(0, 7);
+  const monthly = await getMonthlyUsage(env.DB, yearMonth);
+  const usage = {
+    ...monthly,
+    r2_stored_bytes: await getUsageTotal(
+      env.DB,
+      "r2_bytes_added",
+    ),
+  };
   const config = parseConfig(env.APP_CONFIG_JSON);
   const report = buildCostReport(usage, config, yearMonth);
 
-  if (!report.overBudget) return { sent: false, report };
+  if (!report.overBudget) {
+    return { sent: false, report };
+  }
 
-  const client = env.__lineClientOverride ?? buildLineClient(env);
-  await client.pushToAdminGroup(
+  const client = env.__lineClientOverride ?? createLineClient({
+    channelAccessToken: env.LINE_CHANNEL_ACCESS_TOKEN,
+    fetch: fetch.bind(globalThis),
+  });
+  await client.pushMessage(
+    config.lineAllowedGroupId,
     `⚠️ เกินงบประมาณรายเดือน: ประมาณการ ${report.estimatedThb.toFixed(0)} บาท (งบ ${config.monthlyBudgetThb} บาท) สำหรับเดือน ${yearMonth}`,
   );
   return { sent: true, report };
 }
 ```
 
-Add an exact `event.cron === "45 22 * * *"` branch to the existing scheduled handler and call `runBudgetAlarmCheck(env)`. This runs at 05:45 Asia/Bangkok, before the 06:00 import cron. Register the same expression in both environments in Task 11.
+Add an exact `event.cron === "45 22 * * *"` branch to the existing scheduled handler and call `runBudgetAlarmCheck(env)`. This runs at 05:45 Asia/Bangkok, before the 06:00 import cron. Register the same expression in both environments in Task 10.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1487,11 +2678,11 @@ git add src/scheduled.ts test/scheduled.test.ts
 git commit -m "feat: add daily budget alarm cron pushing LINE alert when over monthly ceiling"
 ```
 
-Note: this code-side alarm is the primary, test-covered mechanism. Cloudflare's account-level Notifications (dashboard: Notifications → Add → "Billing Usage Alert" / R2 storage / Workers request-count alerts) are a secondary, dashboard-configured safety net with no reliable scriptable API contract to pin in tests — Task 14 documents the exact dashboard steps as a manual runbook procedure so they are configured once during handoff, not left as an untested guess in application code.
+Note: this code-side alarm is the primary, test-covered mechanism. Cloudflare's account-level Notifications (dashboard: Notifications → Add → "Billing Usage Alert" / R2 storage / Workers request-count alerts) are a secondary, dashboard-configured safety net with no reliable scriptable API contract to pin in tests — Task 12 documents the exact dashboard steps as a manual runbook procedure so they are configured once during handoff, not left as an untested guess in application code.
 
 ---
 
-### Task 11: Staging and production deployment configuration
+### Task 10: Staging and production deployment configuration
 
 **Files:**
 - Modify: `wrangler.jsonc` (existing single-environment file from Foundation plan)
@@ -1499,9 +2690,9 @@ Note: this code-side alarm is the primary, test-covered mechanism. Cloudflare's 
 **Interfaces:**
 - Consumes: non-secret configuration keys listed in spec §15; the `IMPORT_WORKFLOW`/`PUBLICATION_WORKFLOW` Workflow bindings and `DB`/`IMAGES_BUCKET`/`IMAGES` bindings already declared in the base config.
 
-- [ ] **Step 1: Replace `wrangler.jsonc` with portable named environments**
+- [ ] **Step 1: Add portable named environments without removing local bindings**
 
-Resource IDs are intentionally omitted until the deployment runbook creates each customer-owned D1 database. `APP_CONFIG_JSON` is installed by `wrangler secret put` in Task 12, so environment-specific customer IDs never need dummy values in committed source.
+Preserve the top-level local D1, R2, Images, and both Workflow bindings created by Import Task 1/15 and Publication Task 10; `vitest.config.ts` reads those top-level bindings. Resource IDs are intentionally omitted only from the new remote environments until the deployment runbook creates each customer-owned D1 database. `APP_CONFIG_JSON` is installed by `wrangler secret put` in Task 11, so environment-specific customer IDs never need dummy values in committed source.
 
 ```jsonc
 {
@@ -1509,6 +2700,33 @@ Resource IDs are intentionally omitted until the deployment runbook creates each
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "snazzy-automation-local",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "IMAGES_BUCKET",
+      "bucket_name": "snazzy-automation-local-images"
+    }
+  ],
+  "images": { "binding": "IMAGES" },
+  "workflows": [
+    {
+      "binding": "IMPORT_WORKFLOW",
+      "name": "snazzy-import-workflow-local",
+      "class_name": "ImportWorkflow"
+    },
+    {
+      "binding": "PUBLICATION_WORKFLOW",
+      "name": "snazzy-publication-workflow-local",
+      "class_name": "PublicationWorkflow"
+    }
+  ],
   "env": {
     "staging": {
       "name": "snazzy-automation-staging",
@@ -1544,12 +2762,14 @@ Resource IDs are intentionally omitted until the deployment runbook creates each
 }
 ```
 
+Cron ownership is fixed in both environments: `45 22 * * *` runs the daily budget alarm, `0 23 * * *` triggers import after the upload cutoff, and `30 23 * * *` triggers publication.
+
 - [ ] **Step 2: Verify the portable config is valid JSONC**
 
 Run: `node -e 'const fs=require("node:fs"); JSON.parse(fs.readFileSync("wrangler.jsonc","utf8")); console.log("wrangler config JSON valid")'`
 Expected: `wrangler config JSON valid`.
 
-Remote Wrangler validation occurs in Task 12 after exact D1 IDs are inserted.
+Remote Wrangler validation occurs in Task 11 after exact D1 IDs are inserted.
 
 - [ ] **Step 3: Commit**
 
@@ -1560,7 +2780,7 @@ git commit -m "feat: add staging and production wrangler environments with full 
 
 ---
 
-### Task 12: Deployment runbook
+### Task 11: Deployment runbook
 
 **Files:**
 - Create: `docs/runbooks/deployment.md`
@@ -1581,73 +2801,155 @@ git commit -m "feat: add staging and production wrangler environments with full 
 
 ## One-time per environment (staging first, then production)
 
-1. Create the D1 database and record its ID:
+1. Create staging resources:
    ```bash
    npx wrangler d1 create snazzy-automation-staging
+   npx wrangler r2 bucket create snazzy-automation-staging-images
+   npx wrangler r2 object put \
+     snazzy-automation-staging-images/assets/collage-base-1080.jpg \
+     --file docs/runbooks/collage-base-1080.jpg \
+     --remote
    ```
-   Copy the returned `database_id` into `wrangler.jsonc` under `env.staging.d1_databases[0].database_id`.
+   Copy the exact returned D1 `database_id` into `env.staging.d1_databases[0].database_id` in `wrangler.jsonc`. Do not continue while that property is absent. Validate the real binding:
+   ```bash
+   npx wrangler deploy --dry-run --env staging
+   ```
 
 2. Apply migrations:
    ```bash
    npm run db:migrate:staging
    ```
-   Expected: `Migrations to be applied: 0001_initial.sql, 0002_usage_metrics.sql` then `✅ Successfully applied`.
+   Expected: `0001_initial.sql`, `0002_publication.sql`, `0003_line_inventory.sql`, and `0004_usage_metrics.sql` applied successfully.
 
-3. Create the R2 bucket:
-   ```bash
-   npx wrangler r2 bucket create snazzy-automation-staging-images
-   ```
-
-4. Set secrets (repeat per secret; wrangler prompts for the value):
+3. Install every secret. Keep the admin token in the current shell because authenticated setup and smoke commands need the same value:
    ```bash
    npx wrangler secret put AIRTABLE_TOKEN --env staging
-   npx wrangler secret put LINE_CHANNEL_SECRET --env staging
+
+   read -r -s -p "LINE channel secret: " LINE_CHANNEL_SECRET
+   printf '%s' "$LINE_CHANNEL_SECRET" |
+     npx wrangler secret put LINE_CHANNEL_SECRET --env staging
+   export LINE_CHANNEL_SECRET
+
    npx wrangler secret put LINE_CHANNEL_ACCESS_TOKEN --env staging
    npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON --env staging
    npx wrangler secret put ANTHROPIC_API_KEY --env staging
    npx wrangler secret put ICLOUD_SHARED_ALBUM_TOKEN --env staging
+
+   read -r -s -p "Asset URL signing secret: " ASSET_URL_SIGNING_SECRET
+   printf '%s' "$ASSET_URL_SIGNING_SECRET" |
+     npx wrangler secret put ASSET_URL_SIGNING_SECRET --env staging
+
+   read -r -s -p "Admin route token: " ADMIN_ROUTE_TOKEN
+   printf '%s' "$ADMIN_ROUTE_TOKEN" |
+     npx wrangler secret put ADMIN_ROUTE_TOKEN --env staging
+   export ADMIN_ROUTE_TOKEN
    ```
 
-5. Set the `APP_CONFIG_JSON` binding value (customer-specific IDs, not secret but base/table/folder IDs):
-   ```bash
-   npx wrangler secret put APP_CONFIG_JSON --env staging
-   ```
-   Paste a single-line JSON object:
-   ```json
-   {"AIRTABLE_BASE_ID":"appXXXXXXXXXXXXXX","AIRTABLE_PRODUCTS_TABLE_ID":"tblXXXXXXXXXXXXXX","AIRTABLE_PUBLICATION_RUNS_TABLE_ID":"tblYYYYYYYYYYYYYY","LINE_ALLOWED_GROUP_ID":"CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX","GOOGLE_DRIVE_FOLDER_ID":"1abcDEF...","GOOGLE_TEMPLATE_DOC_ID":"1ghiJKL...","TIME_ZONE":"Asia/Bangkok","FIRST_IMPORT_CUTOFF_DATE":"2026-09-01"}
-   ```
-
-6. Deploy:
+4. Deploy once, then copy the exact URL Wrangler prints:
    ```bash
    npm run deploy:staging
+   read -r -p "Exact staging Worker base URL: " WORKER_BASE_URL
+   export WORKER_BASE_URL
    ```
-   Expected: `Deployed snazzy-automation-staging` with the Worker URL printed.
+   `WORKER_BASE_URL` must be the deployed origin only, with no trailing slash.
 
-7. Bootstrap the Product ID sequence (imports must be disabled in Airtable — no `Ready` Publication Runs, staff informed to pause enrichment):
+5. Export customer-owned non-secret IDs and the first import cutoff:
    ```bash
-   curl -X POST https://snazzy-automation-staging.<account>.workers.dev/setup/bootstrap-sequence
+   read -r -p "Airtable base ID: " AIRTABLE_BASE_ID
+   read -r -p "Airtable Products table ID: " AIRTABLE_PRODUCTS_TABLE_ID
+   read -r -p "Airtable Publication Runs table ID: " AIRTABLE_PUBLICATION_RUNS_TABLE_ID
+   read -r -p "Allowed LINE group ID: " LINE_ALLOWED_GROUP_ID
+   read -r -p "Google Drive folder ID: " GOOGLE_DRIVE_FOLDER_ID
+   read -r -p "Google template document ID: " GOOGLE_TEMPLATE_DOC_ID
+   read -r -p "First import cutoff ISO timestamp: " FIRST_IMPORT_CUTOFF_DATE
+   export AIRTABLE_BASE_ID AIRTABLE_PRODUCTS_TABLE_ID
+   export AIRTABLE_PUBLICATION_RUNS_TABLE_ID LINE_ALLOWED_GROUP_ID
+   export GOOGLE_DRIVE_FOLDER_ID GOOGLE_TEMPLATE_DOC_ID
+   export FIRST_IMPORT_CUTOFF_DATE
    ```
-   Expected JSON: `{"ok":true,"bootstrappedFrom":1}` (or the next number after scanning existing Airtable Product IDs).
 
-8. Run the setup validator:
+6. Generate complete `APP_CONFIG_JSON`, install it, and redeploy:
    ```bash
-   curl https://snazzy-automation-staging.<account>.workers.dev/setup
+   APP_CONFIG_JSON="$(node <<'NODE'
+   const required = [
+     "AIRTABLE_BASE_ID",
+     "AIRTABLE_PRODUCTS_TABLE_ID",
+     "AIRTABLE_PUBLICATION_RUNS_TABLE_ID",
+     "LINE_ALLOWED_GROUP_ID",
+     "GOOGLE_DRIVE_FOLDER_ID",
+     "GOOGLE_TEMPLATE_DOC_ID",
+     "WORKER_BASE_URL",
+     "FIRST_IMPORT_CUTOFF_DATE",
+   ];
+   for (const name of required) {
+     if (!process.env[name]) throw new Error(`${name} missing`);
+   }
+   process.stdout.write(JSON.stringify({
+     AIRTABLE_BASE_ID: process.env.AIRTABLE_BASE_ID,
+     AIRTABLE_PRODUCTS_TABLE_ID: process.env.AIRTABLE_PRODUCTS_TABLE_ID,
+     AIRTABLE_PUBLICATION_RUNS_TABLE_ID: process.env.AIRTABLE_PUBLICATION_RUNS_TABLE_ID,
+     LINE_ALLOWED_GROUP_ID: process.env.LINE_ALLOWED_GROUP_ID,
+     GOOGLE_DRIVE_FOLDER_ID: process.env.GOOGLE_DRIVE_FOLDER_ID,
+     GOOGLE_TEMPLATE_DOC_ID: process.env.GOOGLE_TEMPLATE_DOC_ID,
+     PUBLIC_BASE_URL: process.env.WORKER_BASE_URL,
+     TIME_ZONE: "Asia/Bangkok",
+     IMPORT_CRON: "0 23 * * *",
+     PUBLICATION_CRON: "30 23 * * *",
+     UPLOAD_CUTOFF_MINUTES: 30,
+     IMPORT_RETRY_LIMIT: 5,
+     PUBLICATION_RETRY_LIMIT: 5,
+     PRODUCT_ID_PREFIX: "A",
+     PRODUCT_ID_INITIAL_NUMBER: 1,
+     CLAUDE_MODEL: "claude-opus-5",
+     CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150000,
+     SOLDOUT_CONFIRMATION_ENABLED: true,
+     FIRST_IMPORT_CUTOFF_DATE: process.env.FIRST_IMPORT_CUTOFF_DATE,
+     MONTHLY_BUDGET_THB: 1000,
+     USD_TO_THB_RATE: 36,
+     CLAUDE_INPUT_PRICE_USD_PER_MTOK: 5,
+     CLAUDE_OUTPUT_PRICE_USD_PER_MTOK: 25,
+     R2_PRICE_USD_PER_GB_MONTH: 0.015,
+   }));
+   NODE
+   )"
+   printf '%s' "$APP_CONFIG_JSON" |
+     npx wrangler secret put APP_CONFIG_JSON --env staging
+   npm run deploy:staging
    ```
-   Expected: HTTP 200 and `"ok": true` with all ten checks `"ok": true`. If `icloud_phase_zero` or any other check fails, stop and resolve before continuing — see `docs/feasibility/icloud-phase-0-report.md`.
 
-9. Register the LINE webhook URL (`https://snazzy-automation-staging.<account>.workers.dev/line/webhook`) in the LINE Developers console for the staging channel.
+7. Bootstrap Product ID sequence once. Pause staff imports during this scan:
+   ```bash
+   curl --fail-with-body \
+     -X POST \
+     -H "Authorization: Bearer $ADMIN_ROUTE_TOKEN" \
+     "$WORKER_BASE_URL/setup/bootstrap-sequence"
+   ```
+   Expected: `{"ok":true,"bootstrappedFrom":N}`, where `N` is one greater than maximum valid Airtable `A-<NUMBER>` or `PRODUCT_ID_INITIAL_NUMBER` when no valid ID exists. A second call must return HTTP 409.
 
-10. Run the smoke test (Task 16):
+8. Run authenticated setup validator:
+   ```bash
+   curl --fail-with-body \
+     -H "Authorization: Bearer $ADMIN_ROUTE_TOKEN" \
+     "$WORKER_BASE_URL/setup"
+   ```
+   Expected: HTTP 200 and all eleven checks `ok: true`. Missing and wrong bearer values must return HTTP 401. Stop on any failed check; `icloud_phase_zero` also requires `docs/feasibility/icloud-phase-0-report.md` to say `PASS`.
+
+9. Register `$WORKER_BASE_URL/line/webhook` in LINE Developers console for staging channel.
+
+10. Run smoke test:
     ```bash
-    npm run smoke:staging
+    WORKER_BASE_URL="$WORKER_BASE_URL" \
+    ADMIN_ROUTE_TOKEN="$ADMIN_ROUTE_TOKEN" \
+    LINE_CHANNEL_SECRET="$LINE_CHANNEL_SECRET" \
+    npm run smoke
     ```
-    Expected: `SMOKE TEST PASSED` (see Task 16 for exact output).
+    Expected: `SMOKE TEST PASSED`.
 
-11. Repeat steps 1–10 with `--env production`, a separate D1 database, R2 bucket, LINE channel, and Airtable base/tables.
+11. Create `snazzy-automation-production` D1 and `snazzy-automation-production-images` R2 resources. Repeat steps 1–10 with every `--env staging` changed to `--env production`, `npm run db:migrate:staging` changed to `npm run db:migrate:production`, and `npm run deploy:staging` changed to `npm run deploy:production`. At step 4, read the exact production Worker origin into the same `WORKER_BASE_URL` variable. Use production customer IDs and secrets, copy the exact production `database_id` into `env.production.d1_databases[0].database_id`, and rerun `npx wrangler deploy --dry-run --env production` before migration or deploy. Commit both real D1 IDs in `wrangler.jsonc` after successful dry-run validation; resource IDs are customer-owned identifiers, not secrets.
 
 ## Rollback
 
-`npx wrangler rollback --env <environment>` reverts the Worker to the previous deployed version. D1 migrations are additive-only in this project (no destructive migrations are ever written) so no migration rollback step exists — a `wrangler rollback` alone is sufficient to undo a bad deploy.
+Use `npx wrangler rollback --env staging` or `npx wrangler rollback --env production` to restore the prior Worker version. D1 migrations are additive-only; rollback never deletes D1 data and no reverse migration runs.
 ```
 
 - [ ] **Step 2: Commit**
@@ -1659,7 +2961,7 @@ git commit -m "docs: add deployment runbook for staging and production"
 
 ---
 
-### Task 13: Operations runbook
+### Task 12: Operations runbook
 
 **Files:**
 - Create: `docs/runbooks/operations.md`
@@ -1686,7 +2988,7 @@ git commit -m "docs: add deployment runbook for staging and production"
 
 ## Cloudflare native usage alarms (one-time dashboard setup)
 
-Configure these once per environment as a defense-in-depth layer alongside the code-side budget alarm from Task 10 of the hardening plan:
+Configure these once per environment as a defense-in-depth layer alongside the code-side budget alarm from Task 9 of the hardening plan:
 
 1. Cloudflare dashboard → **Notifications** → **Add**.
 2. Alert type **Billing Usage Alert** → threshold set to the account's expected monthly ceiling in USD (roughly $22 per the cost model in the design doc §17, rounded up to $30 for headroom) → delivery: customer's operations email.
@@ -1703,7 +3005,9 @@ Add one row immediately after each policy is created; use the actual creation da
 `GET /usage` on the deployed Worker returns the current month's estimated spend:
 
 ```bash
-curl "$WORKER_BASE_URL/usage"
+curl --fail-with-body \
+  -H "Authorization: Bearer $ADMIN_ROUTE_TOKEN" \
+  "$WORKER_BASE_URL/usage"
 ```
 
 ```json
@@ -1756,12 +3060,16 @@ git commit -m "docs: add operations runbook covering daily cycle, alarms, and di
 
 ---
 
-### Task 14: Album rotation runbook
+### Task 13: Album rotation runbook
 
 **Files:**
-- Create: `docs/runbooks/album-rotation.md`
+- Modify: `docs/runbooks/album-rotation.md`
 
-- [ ] **Step 1: Write the runbook**
+**Interfaces:**
+- Consumes: the Phase 0 rotation procedure and source-key proof created by Foundation Task 16, plus public `GET /health` and authenticated `GET /setup` from Hardening Task 7.
+- Produces: final production rotation procedure. Replace the feasibility-era runbook body with the complete content below; do not recreate the file or remove the source-identity safety explanation.
+
+- [ ] **Step 1: Replace the feasibility runbook with the production runbook**
 
 ```markdown
 # iCloud Shared Album Rotation Runbook
@@ -1770,7 +3078,7 @@ Apple limits a Shared Album to 5,000 items. Rotate before hitting that ceiling �
 
 ## Steps
 
-1. Confirm no import is currently running: `GET /health` on the deployed Worker should report no `import_running` state, or wait for the current `ImportWorkflow` to reach a terminal state.
+1. Confirm no import is currently running: `GET /health` on the deployed Worker must return HTTP 200 with `"ok": true` and `"importRunning": false`. Otherwise wait for the current `ImportWorkflow` to reach a terminal state and check again.
 2. On the staff iPhone/iPad, create a new iCloud Shared Album (e.g. `Snazzy Shoot 2027`) and share it publicly to get its new public link/token.
 3. Update the Cloudflare secret to point at the new album:
    ```bash
@@ -1784,7 +3092,9 @@ Apple limits a Shared Album to 5,000 items. Rotate before hitting that ceiling �
    (paste the full JSON blob with only `FIRST_IMPORT_CUTOFF_DATE` changed).
 5. Run the setup validator to confirm the new album is reachable and the marker-detection probe still passes:
    ```bash
-   curl "$WORKER_BASE_URL/setup"
+   curl --fail-with-body \
+     -H "Authorization: Bearer $ADMIN_ROUTE_TOKEN" \
+     "$WORKER_BASE_URL/setup"
    ```
    Expected: `"icloud_phase_zero"` check `"ok": true`.
 6. Leave the previous album unchanged and do not delete or unshare it — it remains the permanent archive for its date range. D1 keys every `photo_assets` row by `(source_album_id, apple_photo_id)`, so identifiers from the old and new album can never collide even though Apple reuses photo IDs across separate albums.
@@ -1806,7 +3116,7 @@ git commit -m "docs: add iCloud Shared Album rotation runbook"
 
 ---
 
-### Task 15: Credential rotation runbook
+### Task 14: Credential rotation runbook
 
 **Files:**
 - Create: `docs/runbooks/credential-rotation.md`
@@ -1816,23 +3126,33 @@ git commit -m "docs: add iCloud Shared Album rotation runbook"
 ```markdown
 # Credential Rotation Runbook
 
-Every secret in `wrangler.jsonc`/`wrangler secret put` can be rotated without a code change — this is the property the handoff acceptance test (Task 17) proves for one credential.
+Every secret in `wrangler.jsonc`/`wrangler secret put` can be rotated without a code change — this is the property the handoff acceptance test (Task 16) proves for one credential.
 
 ## General procedure (applies to every secret)
 
 1. Generate/obtain the new credential from the issuing system (Airtable personal access token, LINE channel access token, Google service-account key, Anthropic API key, or a fresh iCloud album token per the rotation runbook).
-2. Set it on the target environment:
+2. Set the credential being rotated with its exact command:
    ```bash
-   npx wrangler secret put <SECRET_NAME> --env production
+   npx wrangler secret put AIRTABLE_TOKEN --env production
+   npx wrangler secret put LINE_CHANNEL_SECRET --env production
+   npx wrangler secret put LINE_CHANNEL_ACCESS_TOKEN --env production
+   npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON --env production
+   npx wrangler secret put ANTHROPIC_API_KEY --env production
+   npx wrangler secret put ICLOUD_SHARED_ALBUM_TOKEN --env production
+   npx wrangler secret put ASSET_URL_SIGNING_SECRET --env production
+   npx wrangler secret put ADMIN_ROUTE_TOKEN --env production
    ```
+   Run only command for credential being rotated. For `ADMIN_ROUTE_TOKEN`, export new value as `ADMIN_ROUTE_TOKEN` before steps 3–4.
 3. Run the setup validator to confirm the new credential is recognized:
    ```bash
-   curl "$WORKER_BASE_URL/setup"
+   curl --fail-with-body \
+     -H "Authorization: Bearer $ADMIN_ROUTE_TOKEN" \
+     "$WORKER_BASE_URL/setup"
    ```
    Expected: the check tied to that credential (`airtable_schema`, `line_webhook_config`, `google_template_access`, `claude_credential`, or `icloud_phase_zero`) reports `"ok": true`.
 4. Run the smoke test to prove an end-to-end operation using the new credential succeeds:
    ```bash
-   npm run smoke:production
+   npm run smoke
    ```
 5. Only after the smoke test passes, revoke the old credential at the issuing system. Never revoke before the new one is confirmed working — this avoids a self-inflicted outage.
 6. Record the rotation below.
@@ -1844,6 +3164,8 @@ Every secret in `wrangler.jsonc`/`wrangler secret put` can be rotated without a 
 - **`GOOGLE_SERVICE_ACCOUNT_JSON`**: create a new key for the existing service account (do not create a new service account, since Drive folder sharing is already scoped to the existing one) via Google Cloud Console → IAM → Service Accounts → Keys → Add Key; deactivate the old key after step 5.
 - **`ANTHROPIC_API_KEY`**: create a new key in the Anthropic Console under the same workspace; revoke the old key after step 5.
 - **`ICLOUD_SHARED_ALBUM_TOKEN`**: rotating this token alone (without creating a new album) only makes sense if the public share link was regenerated for the same album; if the 5,000-item limit is the reason, use the Album Rotation Runbook instead, which also sets a new cutoff date.
+- **`ASSET_URL_SIGNING_SECRET`**: existing signed URLs expire and become invalid after rotation. Wait at least 15 minutes—the maximum planned signed-URL TTL—before revoking any separately stored old value.
+- **`ADMIN_ROUTE_TOKEN`**: update operator password storage and current shell immediately. Verify missing and old bearer values return 401, then verify new bearer succeeds on `/setup` and `/usage`.
 
 ## Rotation log
 
@@ -1862,47 +3184,132 @@ git commit -m "docs: add credential rotation runbook"
 
 ---
 
-### Task 16: Smoke test script and fresh-account rehearsal
+### Task 15: Smoke test script and fresh-account rehearsal
 
 **Files:**
 - Create: `scripts/smoke-test.ts`
 - Test: `test/acceptance/smoke.test.ts`
 
 **Interfaces:**
-- Consumes: `runSetupChecks` (Task 8), `parseCommand` (`src/line/parser.ts`), and the deployed Worker's HTTP routes `/health`, `/setup`, `/upload`, `/docs`, `/usage`, `/line/webhook`.
-- Produces: a `main()` CLI entrypoint invoked by `npm run smoke:staging` / `npm run smoke:production`; no other code depends on this script.
+- Consumes: response contracts exposed by the deployed Worker's `GET /health`, authenticated `GET /setup`, authenticated `GET /usage`, and signed `POST /line/webhook` routes. The smoke script remains non-mutating: it does not trigger `/upload`, `/docs`, inventory changes, or the budget alarm.
+- Produces: a `main()` CLI entrypoint invoked by `WORKER_BASE_URL=... ADMIN_ROUTE_TOKEN=... LINE_CHANNEL_SECRET=... npm run smoke`; no other code depends on this script.
 
 - [ ] **Step 1: Write the failing unit test for the smoke check logic**
 
 ```ts
 // test/acceptance/smoke.test.ts
-import { describe, it, expect, vi } from "vitest";
-import { runSmokeChecks } from "../../scripts/smoke-test";
+import { describe, expect, it, vi } from "vitest";
+import {
+  runSmokeChecks,
+  signLineBodyForSmoke,
+} from "../../scripts/smoke-test";
+
+const baseUrl = "https://worker.example";
+const adminToken = "admin-secret";
+const lineSecret = "line-secret";
 
 describe("runSmokeChecks", () => {
-  it("passes when health, setup, and search all respond successfully", async () => {
-    const fakeFetch = vi.fn(async (url: string) => {
-      if (url.endsWith("/health")) return new Response(JSON.stringify({ ok: true }), { status: 200 });
-      if (url.endsWith("/setup")) return new Response(JSON.stringify({ ok: true, checks: [] }), { status: 200 });
-      if (url.includes("/line/webhook")) return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  it("checks auth rejection, setup, usage, and real LINE HMAC", async () => {
+    const lineBody = JSON.stringify({ events: [] });
+    const expectedSignature = await signLineBodyForSmoke(
+      lineSecret,
+      lineBody,
+    );
+    const fakeFetch = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input);
+      const authorization = new Headers(init?.headers)
+        .get("authorization");
+      if (url.endsWith("/health")) {
+        return Response.json({ ok: true });
+      }
+      if (url.endsWith("/setup") && !authorization) {
+        return Response.json(
+          { error: "unauthorized" },
+          { status: 401 },
+        );
+      }
+      if (url.endsWith("/setup")) {
+        expect(authorization).toBe(`Bearer ${adminToken}`);
+        return Response.json({ ok: true, checks: [] });
+      }
+      if (url.endsWith("/usage")) {
+        expect(authorization).toBe(`Bearer ${adminToken}`);
+        return Response.json({
+          yearMonth: "2026-09",
+          estimatedUsd: 0,
+          estimatedThb: 0,
+          overBudget: false,
+          breakdown: {},
+        });
+      }
+      if (url.endsWith("/line/webhook")) {
+        expect(init?.body).toBe(lineBody);
+        expect(new Headers(init?.headers).get("x-line-signature"))
+          .toBe(expectedSignature);
+        return Response.json({ ok: true });
+      }
       throw new Error(`unexpected URL ${url}`);
     });
 
-    const result = await runSmokeChecks("https://snazzy-automation-staging.example.workers.dev", fakeFetch as any);
+    const result = await runSmokeChecks(
+      baseUrl,
+      adminToken,
+      lineSecret,
+      fakeFetch as typeof fetch,
+    );
+
     expect(result.passed).toBe(true);
-    expect(result.steps.map((s) => s.name)).toEqual(["health", "setup", "search"]);
+    expect(result.steps.map((step) => step.name)).toEqual([
+      "health",
+      "setup_auth",
+      "setup",
+      "usage",
+      "line_signature",
+    ]);
   });
 
-  it("fails fast and reports which step failed when /setup reports not ok", async () => {
-    const fakeFetch = vi.fn(async (url: string) => {
-      if (url.endsWith("/health")) return new Response(JSON.stringify({ ok: true }), { status: 200 });
-      if (url.endsWith("/setup")) return new Response(JSON.stringify({ ok: false, checks: [{ name: "claude_credential", ok: false, detail: "missing" }] }), { status: 503 });
-      throw new Error(`unexpected URL ${url}`);
+  it("fails fast and names failed setup dependency", async () => {
+    const fakeFetch = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input);
+      if (url.endsWith("/health")) {
+        return Response.json({ ok: true });
+      }
+      if (
+        url.endsWith("/setup") &&
+        !new Headers(init?.headers).has("authorization")
+      ) {
+        return Response.json(
+          { error: "unauthorized" },
+          { status: 401 },
+        );
+      }
+      return Response.json({
+        ok: false,
+        checks: [{
+          name: "claude_credential",
+          ok: false,
+          detail: "missing",
+        }],
+      }, { status: 503 });
     });
 
-    const result = await runSmokeChecks("https://snazzy-automation-staging.example.workers.dev", fakeFetch as any);
+    const result = await runSmokeChecks(
+      baseUrl,
+      adminToken,
+      lineSecret,
+      fakeFetch as typeof fetch,
+    );
+
     expect(result.passed).toBe(false);
-    expect(result.steps.find((s) => s.name === "setup")?.detail).toContain("claude_credential");
+    expect(result.steps.find((step) => step.name === "setup")?.detail)
+      .toContain("claude_credential");
+    expect(fakeFetch).toHaveBeenCalledTimes(3);
   });
 });
 ```
@@ -1916,60 +3323,174 @@ Expected: FAIL — `runSmokeChecks` not exported.
 
 ```ts
 // scripts/smoke-test.ts
-export interface SmokeStep { name: string; ok: boolean; detail: string; }
-export interface SmokeResult { passed: boolean; steps: SmokeStep[]; }
+import { z } from "zod";
 
-export async function runSmokeChecks(baseUrl: string, fetchFn: typeof fetch): Promise<SmokeResult> {
-  const steps: SmokeStep[] = [];
+const HealthSchema = z.object({ ok: z.boolean() });
+const SetupSchema = z.object({
+  ok: z.boolean(),
+  checks: z.array(z.object({
+    name: z.string(),
+    ok: z.boolean(),
+    detail: z.string(),
+  })),
+});
+const UsageSchema = z.object({
+  yearMonth: z.string().regex(/^\d{4}-\d{2}$/),
+  estimatedUsd: z.number().nonnegative(),
+  estimatedThb: z.number().nonnegative(),
+  overBudget: z.boolean(),
+  breakdown: z.record(z.string(), z.number()),
+});
 
-  const healthRes = await fetchFn(`${baseUrl}/health`);
-  const healthBody = (await healthRes.json()) as { ok: boolean };
-  steps.push({ name: "health", ok: healthRes.ok && healthBody.ok, detail: healthRes.ok ? "reachable" : `HTTP ${healthRes.status}` });
-  if (!steps.at(-1)!.ok) return { passed: false, steps };
-
-  const setupRes = await fetchFn(`${baseUrl}/setup`);
-  const setupBody = (await setupRes.json()) as { ok: boolean; checks: Array<{ name: string; ok: boolean; detail: string }> };
-  const failing = setupBody.checks?.filter((c) => !c.ok) ?? [];
-  steps.push({
-    name: "setup",
-    ok: setupBody.ok,
-    detail: setupBody.ok ? "all checks ok" : failing.map((c) => `${c.name}: ${c.detail}`).join("; "),
-  });
-  if (!steps.at(-1)!.ok) return { passed: false, steps };
-
-  // Exercise one representative LINE-shaped webhook call end-to-end (search is read-only and safe to run in production).
-  const webhookRes = await fetchFn(`${baseUrl}/line/webhook`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-line-signature": "smoke-test-signature" },
-    body: JSON.stringify({ events: [{ type: "message", message: { type: "text", text: "/search A-0000" }, source: { type: "group", groupId: "smoke-test" }, replyToken: "smoke" }] }),
-  });
-  steps.push({ name: "search", ok: webhookRes.ok, detail: webhookRes.ok ? "webhook accepted" : `HTTP ${webhookRes.status}` });
-
-  return { passed: steps.every((s) => s.ok), steps };
+export interface SmokeStep {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+export interface SmokeResult {
+  passed: boolean;
+  steps: SmokeStep[];
 }
 
-async function main() {
-  const envArgIndex = process.argv.indexOf("--env");
-  const envName = envArgIndex >= 0 ? process.argv[envArgIndex + 1] : "staging";
-  const baseUrl = envName === "production"
-    ? "https://snazzy-automation-production.workers.dev"
-    : "https://snazzy-automation-staging.workers.dev";
-
-  const result = await runSmokeChecks(baseUrl, fetch);
-  for (const step of result.steps) {
-    console.log(`${step.ok ? "PASS" : "FAIL"} ${step.name}: ${step.detail}`);
+export async function signLineBodyForSmoke(
+  secret: string,
+  body: string,
+): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const bytes = new Uint8Array(await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(body),
+  ));
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
   }
-  if (result.passed) {
-    console.log("SMOKE TEST PASSED");
-    process.exit(0);
-  } else {
-    console.log("SMOKE TEST FAILED");
-    process.exit(1);
+  return btoa(binary);
+}
+
+export async function runSmokeChecks(
+  baseUrl: string,
+  adminToken: string,
+  lineChannelSecret: string,
+  fetchFn: typeof fetch,
+): Promise<SmokeResult> {
+  const steps: SmokeStep[] = [];
+  const stop = () => ({ passed: false, steps });
+  const adminHeaders = {
+    authorization: `Bearer ${adminToken}`,
+  };
+
+  const healthResponse = await fetchFn(`${baseUrl}/health`);
+  const health = HealthSchema.parse(await healthResponse.json());
+  steps.push({
+    name: "health",
+    ok: healthResponse.ok && health.ok,
+    detail: healthResponse.ok ? "reachable" : `HTTP ${healthResponse.status}`,
+  });
+  if (!steps.at(-1)!.ok) return stop();
+
+  const unauthorizedSetup = await fetchFn(`${baseUrl}/setup`);
+  steps.push({
+    name: "setup_auth",
+    ok: unauthorizedSetup.status === 401,
+    detail: `missing bearer returned HTTP ${unauthorizedSetup.status}`,
+  });
+  if (!steps.at(-1)!.ok) return stop();
+
+  const setupResponse = await fetchFn(`${baseUrl}/setup`, {
+    headers: adminHeaders,
+  });
+  const setup = SetupSchema.parse(await setupResponse.json());
+  const failing = setup.checks.filter((check) => !check.ok);
+  steps.push({
+    name: "setup",
+    ok: setupResponse.ok && setup.ok,
+    detail: setup.ok
+      ? "all eleven checks ok"
+      : failing.map((check) =>
+          `${check.name}: ${check.detail}`,
+        ).join("; "),
+  });
+  if (!steps.at(-1)!.ok) return stop();
+
+  const usageResponse = await fetchFn(`${baseUrl}/usage`, {
+    headers: adminHeaders,
+  });
+  const usage = UsageSchema.parse(await usageResponse.json());
+  steps.push({
+    name: "usage",
+    ok: usageResponse.ok,
+    detail: `${usage.yearMonth}: ${usage.estimatedThb.toFixed(2)} THB`,
+  });
+  if (!steps.at(-1)!.ok) return stop();
+
+  const lineBody = JSON.stringify({ events: [] });
+  const lineSignature = await signLineBodyForSmoke(
+    lineChannelSecret,
+    lineBody,
+  );
+  const webhookResponse = await fetchFn(`${baseUrl}/line/webhook`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-line-signature": lineSignature,
+    },
+    body: lineBody,
+  });
+  steps.push({
+    name: "line_signature",
+    ok: webhookResponse.ok,
+    detail: webhookResponse.ok
+      ? "valid HMAC accepted"
+      : `HTTP ${webhookResponse.status}`,
+  });
+
+  return {
+    passed: steps.every((step) => step.ok),
+    steps,
+  };
+}
+
+async function main(): Promise<void> {
+  const baseUrl = process.env.WORKER_BASE_URL;
+  const adminToken = process.env.ADMIN_ROUTE_TOKEN;
+  const lineSecret = process.env.LINE_CHANNEL_SECRET;
+  if (!baseUrl || !adminToken || !lineSecret) {
+    throw new Error(
+      "Set WORKER_BASE_URL, ADMIN_ROUTE_TOKEN, and LINE_CHANNEL_SECRET",
+    );
+  }
+  const result = await runSmokeChecks(
+    baseUrl.replace(/\/$/, ""),
+    adminToken,
+    lineSecret,
+    fetch,
+  );
+  for (const step of result.steps) {
+    console.log(
+      `${step.ok ? "PASS" : "FAIL"} ${step.name}: ${step.detail}`,
+    );
+  }
+  console.log(
+    result.passed ? "SMOKE TEST PASSED" : "SMOKE TEST FAILED",
+  );
+  if (!result.passed) {
+    process.exitCode = 1;
   }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main();
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  });
 }
 ```
 
@@ -1980,23 +3501,29 @@ Expected: PASS (2 tests).
 
 - [ ] **Step 5: Fresh-account rehearsal**
 
-Execute the full Deployment Runbook (Task 12) end-to-end against a throwaway/free-tier Cloudflare account distinct from the customer's real account — this proves the runbook contains no undocumented manual step and no hidden dependency on prior account state:
+Execute the full Deployment Runbook (Task 11) end-to-end against a throwaway/free-tier Cloudflare account distinct from the customer's real account — this proves the runbook contains no undocumented manual step and no hidden dependency on prior account state:
 
-1. Follow `docs/runbooks/deployment.md` steps 1–10 exactly as written, using placeholder Airtable/LINE/Google test accounts.
-2. At step 10, run `npm run smoke:staging` and confirm `SMOKE TEST PASSED`.
+1. Follow `docs/runbooks/deployment.md` steps 1–10 exactly as written, using a dedicated test Airtable base, LINE channel/group, Google Drive folder/template, Anthropic workspace key, and iCloud Shared Album. Record their exact IDs while following the runbook; do not invent placeholder IDs.
+2. At step 10, run `npm run smoke` with the exported `WORKER_BASE_URL`, `ADMIN_ROUTE_TOKEN`, and `LINE_CHANNEL_SECRET`, then confirm `SMOKE TEST PASSED`.
 3. Note any step in the runbook that required tribal knowledge not written down; fix `docs/runbooks/deployment.md` to close the gap.
-4. Tear down the throwaway account's resources (`npx wrangler d1 delete`, `npx wrangler r2 bucket delete`, `npx wrangler delete --env staging`) once the rehearsal is confirmed reproducible.
+4. After recording the successful rehearsal, delete only the dedicated Cloudflare test resources:
+   ```bash
+   npx wrangler delete --env staging
+   npx wrangler d1 delete snazzy-automation-staging
+   npx wrangler r2 bucket delete snazzy-automation-staging-images
+   ```
+   Remove dedicated external test resources through their owning consoles only after confirming they are not shared with production.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add scripts/smoke-test.ts test/acceptance/smoke.test.ts
-git commit -m "feat: add smoke test script exercising health, setup, and search end-to-end"
+git commit -m "feat: add authenticated deployment smoke checks"
 ```
 
 ---
 
-### Task 17: Handoff acceptance checklist and full suite run
+### Task 16: Handoff acceptance checklist and full suite run
 
 **Files:**
 - Create: `docs/runbooks/handoff-acceptance.md`
@@ -2018,15 +3545,18 @@ Run in order. Every item must be checked before customer handoff is considered c
   - [ ] `test/acceptance/redaction.test.ts` — no secret ever logged across a full import run.
   - [ ] `test/acceptance/smoke.test.ts` — smoke-check logic unit tests.
 - [ ] D1 migrations apply cleanly to a fresh local database: `npm run db:migrate:local` from a dropped/recreated local D1.
-- [ ] D1 migrations apply cleanly to fresh staging and production databases (proven during Task 16's fresh-account rehearsal).
-- [ ] `GET /setup` on staging returns `"ok": true` for all ten checks.
-- [ ] `GET /setup` on production returns `"ok": true` for all ten checks.
-- [ ] `npm run smoke:staging` prints `SMOKE TEST PASSED`.
-- [ ] `npm run smoke:production` prints `SMOKE TEST PASSED`.
-- [ ] Fresh-account rehearsal (Task 16, Step 5) completed on a throwaway Cloudflare account using only `docs/runbooks/deployment.md`, with zero undocumented manual steps.
-- [ ] One credential rotated on production following `docs/runbooks/credential-rotation.md` with no code change, verified via `/setup` and `npm run smoke:production`.
+- [ ] D1 migrations apply cleanly to fresh staging and production databases (proven during Task 15's fresh-account rehearsal).
+- [ ] Real staging and production D1 `database_id` values are present in `wrangler.jsonc`; neither binding contains an omitted or example ID.
+- [ ] Missing and wrong bearer tokens return HTTP 401 from `/setup` and `/usage` before any dependency access.
+- [ ] Authenticated `GET /setup` on staging returns `"ok": true` for all eleven named checks.
+- [ ] Authenticated `GET /setup` on production returns `"ok": true` for all eleven named checks.
+- [ ] Staging `npm run smoke`, with staging environment variables exported, prints `SMOKE TEST PASSED` and proves a real LINE HMAC is accepted.
+- [ ] Production `npm run smoke`, with production environment variables exported, prints `SMOKE TEST PASSED` and proves a real LINE HMAC is accepted.
+- [ ] Fresh-account rehearsal (Task 15, Step 5) completed on a dedicated Cloudflare test account using only `docs/runbooks/deployment.md`, with zero undocumented manual steps.
+- [ ] `ADMIN_ROUTE_TOKEN` rotated on production with no code change; old token returns HTTP 401 and new token succeeds on authenticated `/setup`, `/usage`, and `npm run smoke`.
+- [ ] One external-service credential rotated on production following `docs/runbooks/credential-rotation.md` with no code change, verified via authenticated `/setup` and `npm run smoke`.
 - [ ] `docs/runbooks/operations.md` change log has both native Cloudflare Notification policies recorded (Billing Usage Alert, R2 Storage).
-- [ ] `GET /usage` on production returns a plausible estimate (`estimatedThb` in the ฿0–1000 range for a fresh environment with no traffic yet).
+- [ ] Authenticated `GET /usage` on production returns a validated monthly report with plausible `estimatedThb` (`฿0–1000` for a fresh environment with no traffic yet).
 - [ ] Customer staff has received the printed `SNAZZY_PRODUCT_START_V1` marker cards and confirmed marker placement in a live test shoot.
 - [ ] Customer has been walked through `docs/runbooks/operations.md`, `docs/runbooks/album-rotation.md`, and `docs/runbooks/credential-rotation.md` at least once.
 - [ ] All account credentials (Airtable, Google, LINE, Anthropic, Cloudflare, iCloud) are confirmed customer-owned, not contractor-owned.
@@ -2048,7 +3578,7 @@ git commit -m "docs: add handoff acceptance checklist tying together all hardeni
 
 ## Plan Completion Definition
 
-This plan is complete only when every box in `docs/runbooks/handoff-acceptance.md` (Task 17) is checked, matching the index's global "Plan Completion Definition":
+This plan is complete only when every box in `docs/runbooks/handoff-acceptance.md` (Task 16) is checked, matching the index's global "Plan Completion Definition":
 
 - Phase 0 report passes every iCloud gate.
 - `npm run check` passes.

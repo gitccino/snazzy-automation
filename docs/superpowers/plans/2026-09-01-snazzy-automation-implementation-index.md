@@ -19,6 +19,7 @@
 - Product IDs use `A-<NUMBER>`; D1 becomes sole sequence authority after one-time Airtable bootstrap.
 - Original images remain in private R2 indefinitely under content hash.
 - Marker image never becomes Product attachment.
+- Each Airtable `Product Images` attachment uses a temporary signed ingestion URL plus `filename` equal to the private R2 object basename; publication reconstructs `assets/<filename>` and never treats the temporary URL as object identity.
 - Successful Product rows remain when another group fails.
 - Retry transient workflow steps up to five times after the initial attempt, with exponential backoff.
 - One final Google Doc per Airtable Publication Run.
@@ -79,10 +80,16 @@ npm install --save-dev typescript wrangler vitest@^4.1.0 @cloudflare/vitest-plug
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:acceptance": "vitest run test/acceptance",
+    "phase-zero": "tsx scripts/run-phase-zero.ts",
+    "phase-zero:report": "tsx scripts/write-phase-zero-report.ts",
+    "generate-marker": "tsx scripts/generate-marker.ts",
+    "setup:verify": "tsx scripts/verify-airtable-schema.ts",
+    "smoke": "tsx scripts/smoke-test.ts",
     "dev": "wrangler dev",
     "deploy:staging": "wrangler deploy --env staging",
     "deploy:production": "wrangler deploy --env production",
-    "db:migrate:local": "wrangler d1 migrations apply snazzy-automation --local",
+    "db:migrate:local": "wrangler d1 migrations apply snazzy-automation-local --local",
     "db:migrate:staging": "wrangler d1 migrations apply snazzy-automation-staging --remote",
     "db:migrate:production": "wrangler d1 migrations apply snazzy-automation-production --remote"
   }
@@ -149,94 +156,200 @@ export type Fetcher = typeof fetch;
 ├── vitest.config.ts
 ├── wrangler.jsonc
 ├── migrations/
-│   └── 0001_initial.sql
+│   ├── 0001_initial.sql
+│   ├── 0002_publication.sql
+│   ├── 0003_line_inventory.sql
+│   └── 0004_usage_metrics.sql
 ├── src/
-│   ├── index.ts                         # Worker fetch/scheduled entrypoint only
-│   ├── env.ts                           # Env binding and secret types
-│   ├── config.ts                        # Zod configuration parsing
-│   ├── router.ts                        # Native method/path dispatch
+│   ├── index.ts
+│   ├── env.ts
+│   ├── config.ts
+│   ├── router.ts
+│   ├── scheduled.ts
 │   ├── shared/
-│   │   ├── errors.ts                    # Typed operational errors and retry class
-│   │   ├── http.ts                      # JSON response and safe external fetch helpers
-│   │   ├── ids.ts                       # Correlation IDs and SHA-256 helpers
-│   │   ├── logger.ts                    # Structured redacted logging
-│   │   └── time.ts                      # Bangkok date and expiry functions
+│   │   ├── admin-auth.ts
+│   │   ├── errors.ts
+│   │   ├── http.ts
+│   │   ├── ids.ts
+│   │   ├── logger.ts
+│   │   └── time.ts
 │   ├── db/
-│   │   ├── audit.ts                     # Append-only audit writes
-│   │   ├── import-repository.ts         # Import runs, assets, groups, checkpoint
-│   │   ├── line-repository.ts           # Events, pending commands, reversible actions
-│   │   ├── publication-repository.ts    # Publication locks and cached outputs
-│   │   └── sequence-repository.ts       # Atomic Product ID allocation/bootstrap
+│   │   ├── audit.ts
+│   │   ├── import-repository.ts
+│   │   ├── line-repository.ts
+│   │   ├── publication-repository.ts
+│   │   ├── sequence-repository.ts
+│   │   └── usage-repository.ts
 │   ├── icloud/
-│   │   ├── types.ts                     # Album snapshot/source photo contracts
-│   │   ├── token.ts                     # Public token partition derivation
-│   │   ├── client.ts                    # Undocumented public-album HTTP adapter
-│   │   └── phase-zero-probe.ts          # Feasibility-only probe runner
+│   │   ├── types.ts
+│   │   ├── token.ts
+│   │   ├── client.ts
+│   │   └── phase-zero-probe.ts
 │   ├── import/
-│   │   ├── types.ts                     # Import params, group, result types
-│   │   ├── marker.ts                    # QR marker normalization/detection
-│   │   ├── grouping.ts                  # Marker-to-marker grouping
-│   │   ├── asset-store.ts               # Content-addressed R2 writes/signed URLs
-│   │   ├── airtable-products.ts          # Product read/create/delete/verify
-│   │   ├── service.ts                   # Testable import orchestration
-│   │   └── workflow.ts                  # ImportWorkflow step boundaries
+│   │   ├── types.ts
+│   │   ├── marker.ts
+│   │   ├── grouping.ts
+│   │   ├── asset-store.ts
+│   │   ├── airtable-products.ts
+│   │   ├── notify.ts
+│   │   ├── service.ts
+│   │   └── workflow.ts
 │   ├── publication/
-│   │   ├── types.ts                     # Publication/Product/caption contracts
-│   │   ├── airtable-runs.ts              # Ready runs, Product fields, status writes
-│   │   ├── validator.ts                  # Whole-run completeness validation
-│   │   ├── collage.ts                    # Cloudflare Images 2×2 composition
-│   │   ├── captions.ts                   # Official Anthropic SDK call and validation
-│   │   ├── google-auth.ts                # Service-account JWT with Web Crypto
-│   │   ├── google-docs.ts                # Drive copy, Docs batchUpdate, verification
-│   │   ├── service.ts                    # Testable publication orchestration
-│   │   └── workflow.ts                   # PublicationWorkflow step boundaries
+│   │   ├── types.ts
+│   │   ├── airtable-runs.ts
+│   │   ├── validator.ts
+│   │   ├── collage.ts
+│   │   ├── captions.ts
+│   │   ├── google-auth.ts
+│   │   ├── google-docs.ts
+│   │   ├── service.ts
+│   │   ├── trigger.ts
+│   │   └── workflow.ts
 │   ├── line/
-│   │   ├── types.ts                      # Webhook and command contracts
-│   │   ├── signature.ts                  # HMAC request verification
-│   │   ├── parser.ts                     # Command, Product ID, and price grammar
-│   │   ├── client.ts                     # Reply/push/flex-message REST client
-│   │   ├── messages.ts                   # Thai response builders
-│   │   ├── search.ts                     # /search handler
-│   │   ├── soldout.ts                    # pending and approval mutation
-│   │   ├── revert.ts                     # conflict-safe reverse mutation
-│   │   └── webhook.ts                    # deduplication and command routing
-│   ├── routes/
-│   │   ├── health.ts                     # liveness and dependency readiness
-│   │   ├── setup.ts                      # authenticated setup validator
-│   │   ├── upload.ts                     # manual ImportWorkflow trigger
-│   │   ├── docs.ts                       # manual PublicationWorkflow trigger
-│   │   └── line.ts                       # LINE webhook route
-│   └── scheduled.ts                      # cron routing by expression
+│   │   ├── types.ts
+│   │   ├── signature.ts
+│   │   ├── parser.ts
+│   │   ├── client.ts
+│   │   ├── airtable-inventory.ts
+│   │   ├── messages.ts
+│   │   ├── search.ts
+│   │   ├── soldout.ts
+│   │   ├── revert.ts
+│   │   └── webhook.ts
+│   ├── monitoring/
+│   │   └── usage-report.ts
+│   └── routes/
+│       ├── assets.ts
+│       ├── docs.ts
+│       ├── health.ts
+│       ├── line.ts
+│       ├── setup.ts
+│       ├── upload.ts
+│       └── usage.ts
 ├── scripts/
-│   ├── generate-marker.ts                # printable marker HTML/SVG generator
-│   ├── run-phase-zero.ts                 # invoke probe and write JSON result
-│   └── verify-airtable-schema.ts         # field-ID mapping check
+│   ├── generate-marker.ts
+│   ├── run-phase-zero.ts
+│   ├── smoke-test.ts
+│   ├── verify-airtable-schema.ts
+│   └── write-phase-zero-report.ts
 ├── test/
+│   ├── apply-migrations.ts
+│   ├── config.test.ts
+│   ├── router.test.ts
+│   ├── scheduled.test.ts
+│   ├── smoke.test.ts
 │   ├── helpers/
-│   │   ├── env.ts                        # typed test environment
-│   │   ├── fixtures.ts                   # explicit external payload fixtures
-│   │   └── fakes.ts                      # fetch/client fakes
+│   │   ├── env.ts
+│   │   ├── fakes.ts
+│   │   ├── fixtures.ts
+│   │   ├── import-fixtures.ts
+│   │   └── workflow-step.ts
 │   ├── shared/
+│   │   ├── admin-auth.test.ts
+│   │   ├── errors.test.ts
+│   │   ├── http.test.ts
+│   │   ├── ids.test.ts
+│   │   ├── logger.test.ts
+│   │   └── time.test.ts
+│   ├── db/
+│   │   ├── audit.test.ts
+│   │   ├── import-repository.test.ts
+│   │   ├── line-repository.test.ts
+│   │   ├── migrations.test.ts
+│   │   ├── publication-repository.test.ts
+│   │   ├── sequence-repository.test.ts
+│   │   └── usage-repository.test.ts
 │   ├── icloud/
+│   │   ├── album-rotation.test.ts
+│   │   ├── client.test.ts
+│   │   ├── phase-zero-probe.test.ts
+│   │   ├── redaction-audit.test.ts
+│   │   ├── streaming-feasibility.test.ts
+│   │   └── token.test.ts
 │   ├── import/
+│   │   ├── fixtures/
+│   │   │   ├── marker-clean.jpg
+│   │   │   ├── non-marker.jpg
+│   │   │   └── wrong-payload.jpg
+│   │   ├── airtable-products.test.ts
+│   │   ├── asset-store.test.ts
+│   │   ├── grouping.test.ts
+│   │   ├── marker.test.ts
+│   │   ├── notify.test.ts
+│   │   ├── service.test.ts
+│   │   └── workflow.test.ts
 │   ├── publication/
+│   │   ├── airtable-runs.test.ts
+│   │   ├── captions.test.ts
+│   │   ├── collage.test.ts
+│   │   ├── google-auth.test.ts
+│   │   ├── google-docs.test.ts
+│   │   ├── service.test.ts
+│   │   ├── trigger.test.ts
+│   │   ├── validator.test.ts
+│   │   └── workflow.test.ts
 │   ├── line/
+│   │   ├── airtable-inventory.test.ts
+│   │   ├── client.test.ts
+│   │   ├── messages.test.ts
+│   │   ├── parser.test.ts
+│   │   ├── publication-messages.test.ts
+│   │   ├── revert.test.ts
+│   │   ├── search.test.ts
+│   │   ├── signature.test.ts
+│   │   ├── soldout.test.ts
+│   │   ├── types.test.ts
+│   │   └── webhook.test.ts
+│   ├── monitoring/
+│   │   └── usage-report.test.ts
+│   ├── routes/
+│   │   ├── assets.test.ts
+│   │   ├── docs.test.ts
+│   │   ├── health.test.ts
+│   │   ├── line.test.ts
+│   │   ├── setup.test.ts
+│   │   ├── upload.test.ts
+│   │   └── usage.test.ts
+│   ├── scripts/
+│   │   ├── generate-marker.test.ts
+│   │   ├── run-phase-zero.test.ts
+│   │   └── write-phase-zero-report.test.ts
 │   └── acceptance/
+│       ├── import-acceptance.test.ts
+│       ├── import-batches.test.ts
+│       ├── line-acceptance.test.ts
+│       ├── publication.test.ts
+│       ├── retry-exhaustion.test.ts
+│       └── smoke.test.ts
 └── docs/
+    ├── superpowers/
+    │   ├── specs/
+    │   │   └── 2026-09-01-snazzy-automation-design.md
+    │   └── plans/
+    │       ├── 2026-09-01-snazzy-automation-implementation-index.md
+    │       ├── 2026-09-01-snazzy-foundation-icloud-feasibility.md
+    │       ├── 2026-09-01-snazzy-import-pipeline.md
+    │       ├── 2026-09-01-snazzy-publication-pipeline.md
+    │       ├── 2026-09-01-snazzy-line-inventory.md
+    │       └── 2026-09-01-snazzy-hardening-handoff.md
     ├── feasibility/
+    │   ├── icloud-phase-0-result.json
     │   └── icloud-phase-0-report.md
     └── runbooks/
-        ├── deployment.md
-        ├── operations.md
         ├── album-rotation.md
-        └── credential-rotation.md
+        ├── collage-base-1080.jpg
+        ├── credential-rotation.md
+        ├── deployment.md
+        ├── handoff-acceptance.md
+        ├── marker-card.svg
+        └── operations.md
 ```
 
 ## Cross-Plan Interfaces
 
 ### Environment
 
-`src/env.ts` defines bindings once; all plans extend this file without renaming existing members.
+`src/env.ts` defines bindings once; all plans extend this file without renaming existing members. `PUBLIC_BASE_URL` remains a validated non-secret member of `APP_CONFIG_JSON` (`AppConfig.publicBaseUrl`), not a duplicate top-level binding.
 
 ```ts
 import type { Workflow } from "cloudflare:workers";
@@ -303,7 +416,19 @@ export interface ImportRunResult {
   succeededProductIds: string[];
   failedGroups: Array<{ groupId: string; productId: string | null; errorCode: string }>;
 }
+
+export interface AirtableProductPayload {
+  productId: string;
+  systemGroupId: string;
+  uploadDate: string;
+  productImages: Array<{
+    url: string;
+    filename: string;
+  }>;
+}
 ```
+
+`AirtableProductPayload.productImages[].url` is temporary and exists only for Airtable attachment ingestion. `filename` is the stable private R2 basename preserved by Airtable when staff reorder attachments; publication validates it and reconstructs `assets/<filename>`.
 
 ### Publication contracts
 
@@ -314,6 +439,7 @@ export interface PublicationWorkflowParams { publicationRunId: string; trigger: 
 export interface PublicationProduct {
   airtableRecordId: string;
   productId: string;
+  /** Staff-ordered private R2 keys reconstructed as assets/<attachment filename>; never Airtable URLs. */
   orderedImageKeys: string[];
   brandName: string;
   modelName: string;
@@ -355,6 +481,7 @@ Suite is complete only when:
 - D1 migrations apply to fresh local, staging, and production databases.
 - Ten production-sized import batches meet acceptance criteria.
 - Publication tests prove missing-data block and one-final-document invariant.
+- Authenticated `/usage` returns a validated monthly cost report and rejects missing or incorrect bearer tokens.
 - Thirty LINE parser/command cases pass.
 - Fresh customer-owned deployment succeeds from runbook.
 - One credential rotation succeeds without code changes.

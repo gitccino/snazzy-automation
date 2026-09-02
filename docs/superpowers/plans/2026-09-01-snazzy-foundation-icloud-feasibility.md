@@ -255,7 +255,7 @@ Expected: both print a version (Node 20+).
 
 ```bash
 npm install zod jsqr jpeg-js
-npm install --save-dev typescript wrangler vitest@^4.1.0 @cloudflare/vitest-plugin @cloudflare/workers-types @types/jpeg-js tsx
+npm install --save-dev typescript wrangler vitest@^4.1.0 @cloudflare/vitest-plugin @cloudflare/workers-types @types/jpeg-js tsx qrcode @types/qrcode
 ```
 
 Commit `package-lock.json` in Step 8.
@@ -1299,6 +1299,17 @@ describe("createICloudClient.getSnapshot", () => {
     expect(snapshot.photos[1].applePhotoId).toBe("BBBB-2222");
   });
 
+  it("rejects malformed iCloud response bodies without exposing them", async () => {
+    const client = createICloudClient(
+      "TOKEN-XYZ",
+      scriptedFetcher([{ status: 200, body: { photos: "not-an-array" } }]),
+    );
+    await expect(client.getSnapshot()).rejects.toMatchObject({
+      code: "icloud_invalid_webstream_response",
+      retryable: false,
+    });
+  });
+
   it("returns photos in stable position order across two identical calls", async () => {
     const makeFetcher = () =>
       scriptedFetcher([
@@ -1369,21 +1380,50 @@ export type ImageSource = {
 
 ```ts
 // src/icloud/client.ts
+import { z } from "zod";
 import { discoverHost } from "./token";
 import type { AlbumSnapshot, ImageSource, SourcePhoto } from "./types";
+import { OperationalError } from "../shared/errors";
 import { safeFetch, type Fetcher } from "../shared/http";
 import { sha256Hex } from "../shared/ids";
 
-interface WebstreamPhoto {
-  photoGuid: string;
-  dateCreated: string;
-  derivatives: Record<string, { checksum: string }>;
-}
-interface WebstreamResponse {
-  photos: WebstreamPhoto[];
-}
-interface WebAssetUrlsResponse {
-  items: Record<string, { url_location: string; url_path: string }>;
+const DerivativesSchema = z.record(
+  z.string(),
+  z.object({ checksum: z.string().min(1) }),
+).refine((value) => Object.keys(value).length > 0);
+const WebstreamPhotoSchema = z.object({
+  photoGuid: z.string().min(1),
+  dateCreated: z.string().nullable().optional(),
+  derivatives: DerivativesSchema,
+});
+const WebstreamResponseSchema = z.object({
+  photos: z.array(WebstreamPhotoSchema),
+});
+const WebAssetUrlsResponseSchema = z.object({
+  items: z.record(
+    z.string(),
+    z.object({
+      url_location: z.string().min(1),
+      url_path: z.string().min(1),
+    }),
+  ),
+});
+type WebstreamPhoto = z.infer<typeof WebstreamPhotoSchema>;
+
+async function parseICloudJson<T>(
+  response: Response,
+  schema: z.ZodType<T>,
+  code: string,
+): Promise<T> {
+  try {
+    return schema.parse(await response.json());
+  } catch {
+    throw new OperationalError(
+      code,
+      "iCloud returned a malformed response",
+      false,
+    );
+  }
 }
 
 function pickBestDerivativeChecksum(photo: WebstreamPhoto): string {
@@ -1413,7 +1453,11 @@ export function createICloudClient(token: string, fetcher: Fetcher): ImageSource
       },
       { fetcher, redactUrlPatterns: redact }
     );
-    const webstream = (await webstreamRes.json()) as WebstreamResponse;
+    const webstream = await parseICloudJson(
+      webstreamRes,
+      WebstreamResponseSchema,
+      "icloud_invalid_webstream_response",
+    );
     const checksums = webstream.photos.map(pickBestDerivativeChecksum);
 
     const assetUrlsRes = await safeFetch(
@@ -1425,11 +1469,22 @@ export function createICloudClient(token: string, fetcher: Fetcher): ImageSource
       },
       { fetcher, redactUrlPatterns: redact }
     );
-    const assetUrls = (await assetUrlsRes.json()) as WebAssetUrlsResponse;
+    const assetUrls = await parseICloudJson(
+      assetUrlsRes,
+      WebAssetUrlsResponseSchema,
+      "icloud_invalid_asset_urls_response",
+    );
 
     const photos: SourcePhoto[] = webstream.photos.map((photo, index) => {
       const checksum = pickBestDerivativeChecksum(photo);
       const asset = assetUrls.items[checksum];
+      if (!asset) {
+        throw new OperationalError(
+          "icloud_missing_asset_url",
+          `iCloud omitted derivative ${checksum}`,
+          false,
+        );
+      }
       return {
         sourceAlbumId,
         applePhotoId: photo.photoGuid,
@@ -1454,7 +1509,7 @@ export function createICloudClient(token: string, fetcher: Fetcher): ImageSource
 - [ ] **Step 6: Run test to verify it passes**
 
 Run: `npm test -- test/icloud/client.test.ts`
-Expected: PASS — 3 tests passed.
+Expected: PASS — 5 tests passed.
 
 - [ ] **Step 7: Commit**
 
@@ -1469,25 +1524,93 @@ git commit -m "feat: add iCloud shared album client (snapshot + download)"
 
 **Files:**
 - Create: `src/import/marker.ts`
+- Create: `test/import/fixtures/marker-clean.jpg`
+- Create: `test/import/fixtures/non-marker.jpg`
+- Create: `test/import/fixtures/wrong-payload.jpg`
 - Test: `test/import/marker.test.ts`
 
 **Interfaces:**
 - Consumes: `jpeg-js`, `jsqr`.
 - Produces: `MARKER_PAYLOAD`, `isMarkerImage(jpegBytes): boolean` — consumed by `icloud/phase-zero-probe.ts` (Task 13, gate 5) and by the Import Pipeline plan's grouping logic.
 
-This task needs real JPEG fixtures containing a QR code. Rather than hand-encode JPEG bytes, generate them once with the marker generator from Task 11 and commit them as binary test fixtures — so Task 11 (marker generator) must land before this task's fixtures exist. Reorder: build Task 11's generator first, then come back to write these fixtures. To keep the plan's task order matching dependency order, this task is sequenced after Task 11 in execution even though it is numbered 10; the numbering reflects file-map order in the interfaces section above. Follow **execution order**, not numeric order: do Task 11 before Task 10's fixture-dependent steps (Steps 1–2 below assume the fixtures already exist).
+This task needs committed JPEG fixtures containing known QR payloads. Generate every fixture deterministically with the locked `qrcode` and `jpeg-js` dependencies; no manual screenshot, private Product image, machine-specific rasterizer, or later task is required.
 
-- [ ] **Step 1: Generate fixtures (requires Task 11 complete)**
+- [ ] **Step 1: Generate deterministic fixtures**
 
-Run:
+Generate two QR JPEGs and one controlled non-marker JPEG directly from pixel data:
+
 ```bash
-npx tsx scripts/generate-marker.ts --out test/import/fixtures/marker-card.svg
-```
-Then rasterize that SVG to two JPEG fixtures used by the test below and commit them as binary files:
-- `test/import/fixtures/marker-clean.jpg` — the marker card rendered straight-on, well-lit, in focus.
-- `test/import/fixtures/non-marker.jpg` — any ordinary product photo with no QR code.
+node --input-type=module <<'NODE'
+import fs from "node:fs";
+import path from "node:path";
+import QRCode from "qrcode";
+import jpeg from "jpeg-js";
 
-(Rasterization is a one-time manual/local step using any image tool, e.g. `rsvg-convert` or a browser screenshot; the plan does not automate SVG→JPEG conversion because it is a fixture-authoring step, not production code.)
+const fixtureDir = "test/import/fixtures";
+fs.mkdirSync(fixtureDir, { recursive: true });
+
+function writeQrJpeg(payload, filename) {
+  const qr = QRCode.create(payload, {
+    errorCorrectionLevel: "M",
+  });
+  const quietZone = 4;
+  const pixelsPerModule = 12;
+  const size =
+    (qr.modules.size + quietZone * 2) *
+    pixelsPerModule;
+  const data = Buffer.alloc(size * size * 4, 255);
+
+  for (let row = 0; row < qr.modules.size; row += 1) {
+    for (let column = 0;
+      column < qr.modules.size;
+      column += 1) {
+      if (qr.modules.get(row, column) !== 1) continue;
+      const startX =
+        (column + quietZone) * pixelsPerModule;
+      const startY =
+        (row + quietZone) * pixelsPerModule;
+      for (let y = startY;
+        y < startY + pixelsPerModule;
+        y += 1) {
+        for (let x = startX;
+          x < startX + pixelsPerModule;
+          x += 1) {
+          const offset = (y * size + x) * 4;
+          data[offset] = 0;
+          data[offset + 1] = 0;
+          data[offset + 2] = 0;
+        }
+      }
+    }
+  }
+
+  fs.writeFileSync(
+    path.join(fixtureDir, filename),
+    jpeg.encode({ data, width: size, height: size }, 95)
+      .data,
+  );
+}
+
+writeQrJpeg(
+  "SNAZZY_PRODUCT_START_V1",
+  "marker-clean.jpg",
+);
+writeQrJpeg("NOT_THE_MARKER", "wrong-payload.jpg");
+
+const size = 512;
+const nonMarker = Buffer.alloc(size * size * 4, 255);
+fs.writeFileSync(
+  path.join(fixtureDir, "non-marker.jpg"),
+  jpeg.encode({
+    data: nonMarker,
+    width: size,
+    height: size,
+  }, 95).data,
+);
+NODE
+```
+
+Expected: `marker-clean.jpg`, `wrong-payload.jpg`, and `non-marker.jpg` exist under `test/import/fixtures/`; generation uses no customer image or secret.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -1522,7 +1645,6 @@ describe("isMarkerImage", () => {
 });
 ```
 
-Generate `wrong-payload.jpg` the same way as Step 1 but pointing `generate-marker.ts --payload NOT_THE_MARKER` at a different constant, then rasterize.
 
 - [ ] **Step 3: Run test to verify it fails**
 
@@ -1571,22 +1693,16 @@ git commit -m "feat: add deterministic QR marker detection"
 
 **Files:**
 - Create: `scripts/generate-marker.ts`
+- Create: `docs/runbooks/marker-card.svg`
 - Test: `test/scripts/generate-marker.test.ts`
 
 **Interfaces:**
-- Consumes: `MARKER_PAYLOAD` is duplicated here as a CLI default rather than imported, because this script must be able to generate test fixtures for payloads *other than* the real constant (Task 10's `wrong-payload.jpg`); it is a fixture/print tool, not production code, so it takes `--payload` as an override.
-- Produces: an SVG file containing a scannable QR code plus a human-readable label, at the path given by `--out`. Consumed manually by Task 10 (rasterize to JPEG fixtures) and by staff printing the physical marker card.
-
-Run this task's steps before Task 10's fixture-dependent steps, per the execution-order note in Task 10.
+- Consumes: the exact marker payload `SNAZZY_PRODUCT_START_V1` from the approved marker contract. The constant is duplicated in this Node-only print script rather than importing Worker production code.
+- Produces: `generateMarkerSvg({ outPath }): Promise<void>` and a self-contained SVG containing the exact scannable QR payload plus human-readable label. Staff prints `docs/runbooks/marker-card.svg`; tests do not depend on manual rasterization.
 
 - [ ] **Step 1: Write the failing test**
 
-A QR encoder is needed to *build* the SVG (not just decode, which `jsqr` does). Add a QR-encoding dependency scoped to this script only, since production detection never encodes:
-
-```bash
-npm install --save-dev qrcode
-npm install --save-dev @types/qrcode
-```
+Foundation Task 1 already installed the test/print-only `qrcode` and `@types/qrcode` dev dependencies. Production marker detection still uses only `jsqr` and `jpeg-js`.
 
 ```ts
 // test/scripts/generate-marker.test.ts
@@ -1601,7 +1717,7 @@ describe("generateMarkerSvg", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "marker-"));
     const outPath = path.join(dir, "marker-card.svg");
 
-    await generateMarkerSvg({ payload: "SNAZZY_PRODUCT_START_V1", outPath });
+    await generateMarkerSvg({ outPath });
 
     expect(existsSync(outPath)).toBe(true);
     const svg = readFileSync(outPath, "utf-8");
@@ -1610,16 +1726,6 @@ describe("generateMarkerSvg", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("supports overriding the encoded payload for fixture generation", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "marker-"));
-    const outPath = path.join(dir, "wrong.svg");
-
-    await generateMarkerSvg({ payload: "NOT_THE_MARKER", outPath });
-
-    const svg = readFileSync(outPath, "utf-8");
-    expect(svg).toContain("NOT_THE_MARKER");
-    rmSync(dir, { recursive: true, force: true });
-  });
 });
 ```
 
@@ -1637,18 +1743,22 @@ import path from "node:path";
 import QRCode from "qrcode";
 
 export interface GenerateMarkerOptions {
-  payload: string;
   outPath: string;
 }
 
-export async function generateMarkerSvg({ payload, outPath }: GenerateMarkerOptions): Promise<void> {
-  const qrSvgFragment = await QRCode.toString(payload, { type: "svg", margin: 2, width: 600 });
-  const innerPaths = qrSvgFragment.replace(/^<svg[^>]*>/, "").replace(/<\/svg>$/, "");
+const MARKER_PAYLOAD = "SNAZZY_PRODUCT_START_V1";
+
+export async function generateMarkerSvg({ outPath }: GenerateMarkerOptions): Promise<void> {
+  const qrSvg = await QRCode.toString(MARKER_PAYLOAD, {
+    type: "svg",
+    margin: 2,
+    width: 600,
+  });
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="700" height="760" viewBox="0 0 700 760">
   <rect width="700" height="760" fill="#ffffff" />
-  <g transform="translate(50,40)">${innerPaths}</g>
-  <text x="350" y="720" font-family="sans-serif" font-size="24" text-anchor="middle">${payload}</text>
+  <g transform="translate(50,40)">${qrSvg}</g>
+  <text x="350" y="720" font-family="sans-serif" font-size="24" text-anchor="middle">${MARKER_PAYLOAD}</text>
 </svg>`;
 
   mkdirSync(path.dirname(outPath), { recursive: true });
@@ -1658,10 +1768,8 @@ export async function generateMarkerSvg({ payload, outPath }: GenerateMarkerOpti
 async function main() {
   const args = process.argv.slice(2);
   const outIndex = args.indexOf("--out");
-  const payloadIndex = args.indexOf("--payload");
   const outPath = outIndex >= 0 ? args[outIndex + 1] : "docs/runbooks/marker-card.svg";
-  const payload = payloadIndex >= 0 ? args[payloadIndex + 1] : "SNAZZY_PRODUCT_START_V1";
-  await generateMarkerSvg({ payload, outPath });
+  await generateMarkerSvg({ outPath });
   console.log(`wrote ${outPath}`);
 }
 
@@ -1673,16 +1781,26 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npm test -- test/scripts/generate-marker.test.ts`
-Expected: PASS — 2 tests passed.
+Expected: PASS — 1 test passed.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Generate the staff-printable marker card**
+
+Run:
 
 ```bash
-git add scripts/generate-marker.ts test/scripts/generate-marker.test.ts package.json package-lock.json
+npx tsx scripts/generate-marker.ts --out docs/runbooks/marker-card.svg
+```
+
+Expected: `docs/runbooks/marker-card.svg` exists, contains the exact `SNAZZY_PRODUCT_START_V1` label, and can be opened and printed without any external asset.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add scripts/generate-marker.ts test/scripts/generate-marker.test.ts docs/runbooks/marker-card.svg
 git commit -m "feat: add printable QR marker card generator"
 ```
 
-Now return to Task 10 Steps 1–6 (fixture generation, rasterization, and marker detection tests/implementation) before continuing to Task 12.
+Continue directly to Task 12. Task 10 already generated its independent JPEG fixtures and marker-detection implementation.
 
 ---
 
@@ -2035,6 +2153,7 @@ git commit -m "feat: add Phase 0 probe covering metadata, ordering, checkpoint, 
 
 **Files:**
 - Create: `scripts/run-phase-zero.ts`
+- Create at execution time: `docs/feasibility/icloud-phase-0-result.json`
 - Test: `test/scripts/run-phase-zero.test.ts`
 
 **Interfaces:**
@@ -2517,7 +2636,10 @@ Expected: PASS — all shared, config, iCloud, marker, and script tests green; `
 ```ts
 // test/scripts/write-phase-zero-report.test.ts
 import { describe, expect, it } from "vitest";
-import { renderPhaseZeroReport } from "../../scripts/write-phase-zero-report";
+import {
+  parsePhaseZeroResult,
+  renderPhaseZeroReport,
+} from "../../scripts/write-phase-zero-report";
 import type { PhaseZeroReport } from "../../src/icloud/phase-zero-probe";
 
 const computedGates: PhaseZeroReport["gates"] = [
@@ -2538,6 +2660,10 @@ const report: PhaseZeroReport = {
 };
 
 describe("renderPhaseZeroReport", () => {
+  it("rejects malformed probe output before rendering", () => {
+    expect(() => parsePhaseZeroResult({ overall: "PASS" })).toThrow();
+  });
+
   it("renders all ten gates, computes the final decision, and never includes the album token", () => {
     const markdown = renderPhaseZeroReport(report, {
       operator: "customer operator",
@@ -2568,7 +2694,34 @@ Expected: FAIL — `Cannot find module '../../scripts/write-phase-zero-report'`.
 // scripts/write-phase-zero-report.ts
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { z } from "zod";
 import type { GateId, GateResult, PhaseZeroReport } from "../src/icloud/phase-zero-probe";
+
+const PhaseZeroResultSchema = z.object({
+  generatedAt: z.string().min(1),
+  sourceAlbumId: z.string().min(1),
+  gates: z.array(z.object({
+    gate: z.enum([
+      "metadata-consistency",
+      "stable-ordering",
+      "checkpoint-discovery",
+      "stream-download-no-buffer",
+      "marker-detection",
+      "zero-duplicates",
+      "transient-error-recovery",
+      "no-secrets-in-logs",
+      "acceptable-quality",
+      "album-rotation-rehearsed",
+    ]),
+    pass: z.boolean(),
+    evidence: z.string(),
+  })),
+  overall: z.enum(["PASS", "FAIL"]),
+});
+
+export function parsePhaseZeroResult(input: unknown): PhaseZeroReport {
+  return PhaseZeroResultSchema.parse(input);
+}
 
 type ManualGate = { pass: boolean; evidence: string };
 
@@ -2661,7 +2814,9 @@ function required(name: string): string {
 function main() {
   const resultPath = "docs/feasibility/icloud-phase-0-result.json";
   const outputPath = "docs/feasibility/icloud-phase-0-report.md";
-  const report = JSON.parse(readFileSync(resultPath, "utf8")) as PhaseZeroReport;
+  const report = parsePhaseZeroResult(
+    JSON.parse(readFileSync(resultPath, "utf8")),
+  );
   if (report.sourceAlbumId !== "[REDACTED]") throw new Error("Refusing to render an unredacted sourceAlbumId");
 
   const markdown = renderPhaseZeroReport(report, {
@@ -2691,7 +2846,7 @@ Add this script to `package.json`:
 - [ ] **Step 5: Run the renderer test**
 
 Run: `npm test -- test/scripts/write-phase-zero-report.test.ts`
-Expected: PASS — 1 test passed.
+Expected: PASS — 2 tests passed.
 
 - [ ] **Step 6: Run the real probe three times**
 

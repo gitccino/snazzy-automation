@@ -35,7 +35,7 @@
 
 ## Foundation Interfaces This Plan Extends
 
-Phase 0 must have passed before this plan starts. Foundation already provides `OperationalError`, `isRetryable`, `sha256Hex`, `newCorrelationId`, `Clock`, `nowBangkokIso`, `createLogger`, `MarkerDetector`, `createMarkerDetector`, `SourcePhoto`, `AlbumSnapshot`, `ImageSource`, `deriveSourceAlbumId`, and `createICloudClient`. This plan extends `AppConfig`, `Env`, Bangkok date helpers, and test helpers once in Task 0; later tasks consume those exact names without redefining them.
+Phase 0 must have passed before this plan starts. Foundation already provides `OperationalError`, `isRetryable`, `sha256Hex`, `newCorrelationId`, `Clock`, `nowBangkokIso`, `createLogger`, `MARKER_PAYLOAD`, `isMarkerImage`, `SourcePhoto`, `AlbumSnapshot`, `ImageSource`, `deriveSourceAlbumId`, and `createICloudClient`. This plan extends `AppConfig`, `Env`, Bangkok date helpers, and test helpers once in Task 0; Task 8 adds the production Cloudflare Images marker-normalization adapter; later tasks consume those exact names without redefining them.
 
 ---
 
@@ -48,7 +48,7 @@ Phase 0 must have passed before this plan starts. Foundation already provides `O
 - Modify: `test/config.test.ts`
 - Modify: `test/shared/time.test.ts`
 - Modify: `test/helpers/env.ts`
-- Create: `test/helpers/fakes.ts`
+- Modify: `test/helpers/fakes.ts`
 
 **Interfaces:**
 - Consumes: foundation `AppConfig`, `parseConfig`, `Clock`, `Env`, and `createTestEnv`.
@@ -741,8 +741,6 @@ export function createAuditLog(db: D1Database, ids: IdGenerator, clock: Clock): 
 }
 ```
 
-`Clock`/`IdGenerator` are re-exported from `src/env.ts` per the foundation's "External boundaries" decision; if the foundation instead put them in a separate `src/shared/types.ts`, adjust this one import line.
-
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/db/audit.test.ts`
@@ -913,6 +911,7 @@ Expected: FAIL — `Cannot find module '../../src/db/import-repository'`
 
 ```ts
 // src/db/import-repository.ts
+import { z } from "zod";
 import type { Clock, IdGenerator } from "../env";
 
 export type ProductGroupState = "pending" | "importing" | "succeeded" | "failed";
@@ -949,21 +948,65 @@ export interface ImportRepository {
   setGroupState(id: string, state: ProductGroupState, patch?: Partial<{ productId: string; airtableRecordId: string; failureReason: string | null; attemptCount: number }>): Promise<void>;
 }
 
-function toAssetRow(r: Record<string, unknown>): PhotoAssetRow {
+const PhotoAssetDbRowSchema = z.object({
+  id: z.string().min(1),
+  source_album_id: z.string().min(1),
+  apple_photo_id: z.string().min(1),
+  content_hash: z.string().min(1),
+  r2_key: z.string().min(1),
+  position: z.number().int().nonnegative(),
+  is_marker: z.union([z.literal(0), z.literal(1)]),
+  import_run_id: z.string().min(1),
+  created_at: z.string().min(1),
+});
+
+const ProductGroupDbRowSchema = z.object({
+  id: z.string().min(1),
+  import_run_id: z.string().min(1),
+  ordinal: z.number().int().nonnegative(),
+  group_hash: z.string().min(1),
+  state: z.enum(["pending", "importing", "succeeded", "failed"]),
+  product_id: z.string().min(1).nullable(),
+  airtable_record_id: z.string().min(1).nullable(),
+  first_photo_id: z.string().min(1),
+  last_photo_id: z.string().min(1),
+  attempt_count: z.number().int().nonnegative(),
+  failure_reason: z.string().nullable(),
+  created_at: z.string().min(1),
+  updated_at: z.string().min(1),
+});
+
+function toAssetRow(input: unknown): PhotoAssetRow {
+  const r = PhotoAssetDbRowSchema.parse(input);
   return {
-    id: r.id as string, sourceAlbumId: r.source_album_id as string, applePhotoId: r.apple_photo_id as string,
-    contentHash: r.content_hash as string, r2Key: r.r2_key as string, position: r.position as number,
-    isMarker: Boolean(r.is_marker), importRunId: r.import_run_id as string, createdAt: r.created_at as string,
+    id: r.id,
+    sourceAlbumId: r.source_album_id,
+    applePhotoId: r.apple_photo_id,
+    contentHash: r.content_hash,
+    r2Key: r.r2_key,
+    position: r.position,
+    isMarker: r.is_marker === 1,
+    importRunId: r.import_run_id,
+    createdAt: r.created_at,
   };
 }
 
-function toGroupRow(r: Record<string, unknown>): ProductGroupRow {
+function toGroupRow(input: unknown): ProductGroupRow {
+  const r = ProductGroupDbRowSchema.parse(input);
   return {
-    id: r.id as string, importRunId: r.import_run_id as string, ordinal: r.ordinal as number, groupHash: r.group_hash as string,
-    state: r.state as ProductGroupState, productId: (r.product_id as string | null) ?? null,
-    airtableRecordId: (r.airtable_record_id as string | null) ?? null, firstPhotoId: r.first_photo_id as string,
-    lastPhotoId: r.last_photo_id as string, attemptCount: r.attempt_count as number,
-    failureReason: (r.failure_reason as string | null) ?? null, createdAt: r.created_at as string, updatedAt: r.updated_at as string,
+    id: r.id,
+    importRunId: r.import_run_id,
+    ordinal: r.ordinal,
+    groupHash: r.group_hash,
+    state: r.state,
+    productId: r.product_id,
+    airtableRecordId: r.airtable_record_id,
+    firstPhotoId: r.first_photo_id,
+    lastPhotoId: r.last_photo_id,
+    attemptCount: r.attempt_count,
+    failureReason: r.failure_reason,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
   };
 }
 
@@ -1105,7 +1148,7 @@ Note the `upsertPendingGroup` insert-or-noop is deliberate: `group_hash` is a de
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/db/import-repository.test.ts`
-Expected: PASS (4 tests)
+Expected: PASS (5 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -1299,12 +1342,11 @@ export function createAssetStore(bucket: R2Bucket, config: { signingSecret: stri
   return {
     async putIfAbsent(contentHash, extension, body, contentType) {
       const r2Key = `assets/${contentHash}.${extension}`;
-      const existing = await bucket.head(r2Key);
-      if (existing !== null) {
-        return { r2Key, created: false };
-      }
-      await bucket.put(r2Key, body, { httpMetadata: { contentType } });
-      return { r2Key, created: true };
+      const created = await bucket.put(r2Key, body, {
+        onlyIf: { etagDoesNotMatch: "*" },
+        httpMetadata: { contentType },
+      });
+      return { r2Key, created: created !== null };
     },
 
     async signUrl(r2Key, ttlSeconds) {
@@ -1480,14 +1522,17 @@ git commit -m "feat(routes): serve R2 assets behind HMAC-signed, expiring URLs"
 
 ---
 
-### Task 8: Marker-to-marker grouping
+### Task 8: Cloudflare Images marker normalization and marker-to-marker grouping
 
 **Files:**
+- Modify: `src/import/marker.ts`
 - Create: `src/import/grouping.ts`
+- Test: `test/import/marker.test.ts`
 - Test: `test/import/grouping.test.ts`
 
 **Interfaces:**
-- Consumes: nothing external — pure function over a caller-supplied photo list.
+- Consumes: Foundation `isMarkerImage(jpegBytes)`; Cloudflare Images binding chain; pure caller-supplied photo list.
+- Produces `MarkerDetector.detect(bytes: ArrayBuffer): Promise<boolean>` and `createMarkerDetector(images: MarkerImagesBinding): MarkerDetector`, consumed by Task 12 and Task 14.
 - Produces (consumed by Task 12 `import/service.ts`):
 
 ```ts
@@ -1510,7 +1555,62 @@ export function groupByMarkers(photos: GroupingPhoto[]): GroupingResult;
 export function computeGroupHash(sourceAlbumId: string, photos: GroupingPhoto[]): Promise<string>;
 ```
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// test/import/marker.test.ts
+// Replace the existing marker import with this expanded import, then append the test.
+import {
+  createMarkerDetector,
+  isMarkerImage,
+  MARKER_PAYLOAD,
+  type MarkerImagesBinding,
+  type MarkerImageTransformer,
+} from "../../src/import/marker";
+
+it("normalizes source bytes through Cloudflare Images before QR detection", async () => {
+  const calls: Array<{ op: string; value: unknown }> = [];
+  const normalized = readFileSync(
+    "test/import/fixtures/marker-clean.jpg",
+  );
+  let transformer: MarkerImageTransformer;
+  transformer = {
+    transform(options) {
+      calls.push({ op: "transform", value: options });
+      return transformer;
+    },
+    async output(options) {
+      calls.push({ op: "output", value: options });
+      return {
+        response: () => new Response(normalized),
+      };
+    },
+  };
+  const images: MarkerImagesBinding = {
+    input(value) {
+      calls.push({ op: "input", value });
+      return transformer;
+    },
+  };
+  const source = new ArrayBuffer(8);
+
+  await expect(
+    createMarkerDetector(images).detect(source),
+  ).resolves.toBe(true);
+  expect(calls).toEqual([
+    { op: "input", value: source },
+    {
+      op: "transform",
+      value: {
+        width: 1024,
+        height: 1024,
+        fit: "contain",
+      },
+    },
+    { op: "output", value: { format: "image/jpeg" } },
+  ]);
+});
+```
 
 ```ts
 // test/import/grouping.test.ts
@@ -1531,16 +1631,16 @@ describe("groupByMarkers", () => {
     expect(result.orphanPhotos).toEqual([]);
     expect(result.groups).toHaveLength(2);
     expect(result.groups[0]).toMatchObject({ ordinal: 0, markerPhotoId: "m1" });
-    expect(result.groups[0].photos.map((p) => p.applePhotoId)).toEqual(["m1", "p1", "p2"]);
+    expect(result.groups[0]!.photos.map((p) => p.applePhotoId)).toEqual(["m1", "p1", "p2"]);
     expect(result.groups[1]).toMatchObject({ ordinal: 1, markerPhotoId: "m2" });
-    expect(result.groups[1].photos.map((p) => p.applePhotoId)).toEqual(["m2", "p3", "p4", "p5"]);
+    expect(result.groups[1]!.photos.map((p) => p.applePhotoId)).toEqual(["m2", "p3", "p4", "p5"]);
   });
 
   it("the final group ends at the snapshot boundary, no trailing marker required", () => {
     const photos = [photo("m1", 1, true), photo("p1", 2), photo("p2", 3)];
     const result = groupByMarkers(photos);
     expect(result.groups).toHaveLength(1);
-    expect(result.groups[0].photos.map((p) => p.applePhotoId)).toEqual(["m1", "p1", "p2"]);
+    expect(result.groups[0]!.photos.map((p) => p.applePhotoId)).toEqual(["m1", "p1", "p2"]);
   });
 
   it("photos before the first marker are reported as orphans, not a group", () => {
@@ -1548,7 +1648,7 @@ describe("groupByMarkers", () => {
     const result = groupByMarkers(photos);
     expect(result.orphanPhotos.map((p) => p.applePhotoId)).toEqual(["stray1", "stray2"]);
     expect(result.groups).toHaveLength(1);
-    expect(result.groups[0].markerPhotoId).toBe("m1");
+    expect(result.groups[0]!.markerPhotoId).toBe("m1");
   });
 
   it("a snapshot with no marker at all is entirely orphaned", () => {
@@ -1561,15 +1661,15 @@ describe("groupByMarkers", () => {
   it("sorts by position before grouping, independent of input array order", () => {
     const photos = [photo("p1", 2), photo("m1", 1, true)];
     const result = groupByMarkers(photos);
-    expect(result.groups[0].photos.map((p) => p.applePhotoId)).toEqual(["m1", "p1"]);
+    expect(result.groups[0]!.photos.map((p) => p.applePhotoId)).toEqual(["m1", "p1"]);
   });
 
   it("back-to-back markers with no photos between them produce a single-photo group", () => {
     const photos = [photo("m1", 1, true), photo("m2", 2, true), photo("p1", 3)];
     const result = groupByMarkers(photos);
     expect(result.groups).toHaveLength(2);
-    expect(result.groups[0].photos.map((p) => p.applePhotoId)).toEqual(["m1"]);
-    expect(result.groups[1].photos.map((p) => p.applePhotoId)).toEqual(["m2", "p1"]);
+    expect(result.groups[0]!.photos.map((p) => p.applePhotoId)).toEqual(["m1"]);
+    expect(result.groups[1]!.photos.map((p) => p.applePhotoId)).toEqual(["m2", "p1"]);
   });
 });
 
@@ -1596,12 +1696,57 @@ describe("computeGroupHash", () => {
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
-Run: `npx vitest run test/import/grouping.test.ts`
-Expected: FAIL — `Cannot find module '../../src/import/grouping'`
+Run: `npx vitest run test/import/marker.test.ts test/import/grouping.test.ts`
+Expected: FAIL — `createMarkerDetector` is not exported and `../../src/import/grouping` does not exist.
 
 - [ ] **Step 3: Write minimal implementation**
+
+Append the production adapter to Foundation's pure marker decoder:
+
+```ts
+// src/import/marker.ts (append)
+export interface MarkerImageTransformer {
+  transform(options: {
+    width: number;
+    height: number;
+    fit: "contain";
+  }): MarkerImageTransformer;
+  output(options: {
+    format: "image/jpeg";
+  }): Promise<{ response(): Response }>;
+}
+
+export interface MarkerImagesBinding {
+  input(value: ArrayBuffer | ReadableStream): MarkerImageTransformer;
+}
+
+export interface MarkerDetector {
+  detect(bytes: ArrayBuffer): Promise<boolean>;
+}
+
+export function createMarkerDetector(
+  images: MarkerImagesBinding,
+): MarkerDetector {
+  return {
+    async detect(bytes) {
+      const result = await images
+        .input(bytes)
+        .transform({
+          width: 1024,
+          height: 1024,
+          fit: "contain",
+        })
+        .output({ format: "image/jpeg" });
+      const normalized = new Uint8Array(
+        await result.response().arrayBuffer(),
+      );
+      return isMarkerImage(normalized);
+    },
+  };
+}
+```
 
 ```ts
 // src/import/grouping.ts
@@ -1635,20 +1780,33 @@ export function groupByMarkers(photos: GroupingPhoto[]): GroupingResult {
 
   const orphanPhotos = sorted.slice(0, firstMarkerIndex);
   const groups: GroupedProduct[] = [];
-  let ordinal = 0;
+  let currentMarkerPhotoId: string | null = null;
   let currentPhotos: GroupingPhoto[] = [];
 
-  for (let i = firstMarkerIndex; i < sorted.length; i++) {
-    const p = sorted[i];
-    if (p.isMarker && currentPhotos.length > 0) {
-      groups.push({ ordinal: ordinal++, markerPhotoId: currentPhotos[0].applePhotoId, photos: currentPhotos });
-      currentPhotos = [p];
-    } else {
-      currentPhotos.push(p);
+  for (const photo of sorted.slice(firstMarkerIndex)) {
+    if (photo.isMarker) {
+      if (currentMarkerPhotoId) {
+        groups.push({
+          ordinal: groups.length,
+          markerPhotoId: currentMarkerPhotoId,
+          photos: currentPhotos,
+        });
+      }
+
+      currentMarkerPhotoId = photo.applePhotoId;
+      currentPhotos = [photo];
+      continue;
     }
+
+    currentPhotos.push(photo);
   }
-  if (currentPhotos.length > 0) {
-    groups.push({ ordinal: ordinal++, markerPhotoId: currentPhotos[0].applePhotoId, photos: currentPhotos });
+
+  if (currentMarkerPhotoId) {
+    groups.push({
+      ordinal: groups.length,
+      markerPhotoId: currentMarkerPhotoId,
+      photos: currentPhotos,
+    });
   }
 
   return { groups, orphanPhotos };
@@ -1656,20 +1814,23 @@ export function groupByMarkers(photos: GroupingPhoto[]): GroupingResult {
 
 export async function computeGroupHash(sourceAlbumId: string, photos: GroupingPhoto[]): Promise<string> {
   const payload = `${sourceAlbumId}:${photos.map((p) => p.applePhotoId).join(",")}`;
-  return sha256Hex(new TextEncoder().encode(payload).buffer);
+  return sha256Hex(new TextEncoder().encode(payload));
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run focused and full checks**
 
-Run: `npx vitest run test/import/grouping.test.ts`
-Expected: PASS (9 tests)
+Run: `npx vitest run test/import/marker.test.ts test/import/grouping.test.ts`
+Expected: PASS (14 tests).
+
+Run: `npm run check`
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/import/grouping.ts test/import/grouping.test.ts
-git commit -m "feat(import): add deterministic marker-to-marker grouping"
+git add src/import/marker.ts src/import/grouping.ts test/import/marker.test.ts test/import/grouping.test.ts
+git commit -m "feat(import): normalize marker images and group products"
 ```
 
 ---
@@ -1689,7 +1850,7 @@ export interface AirtableProductPayload {
   productId: string;
   systemGroupId: string;
   uploadDate: string; // "YYYY-MM-DD"
-  productImageUrls: string[];
+  productImages: Array<{ url: string; filename: string }>;
 }
 export interface AirtableProductsClient {
   findBySystemGroupId(systemGroupId: string): Promise<{ recordId: string; productId: string } | null>;
@@ -1699,6 +1860,8 @@ export interface AirtableProductsClient {
 }
 export function createAirtableProductsClient(config: { baseId: string; tableId: string; token: string; fetch: Fetcher }): AirtableProductsClient;
 ```
+
+Each attachment `filename` is the persisted R2 key basename: `assets/<filename>`. Airtable preserves attachment order and filename when staff rearranges `Product Images`; Publication Task 2 reconstructs the first four private R2 keys without trusting expiring Airtable attachment URLs.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1728,7 +1891,10 @@ describe("airtable-products client", () => {
       productId: "A-501",
       systemGroupId: "grouphash-1",
       uploadDate: "2026-09-01",
-      productImageUrls: ["https://example.workers.dev/assets/a.jpg", "https://example.workers.dev/assets/b.jpg"],
+      productImages: [
+        { url: "https://example.workers.dev/assets/a.jpg", filename: "a.jpg" },
+        { url: "https://example.workers.dev/assets/b.jpg", filename: "b.jpg" },
+      ],
     });
 
     expect(result).toEqual({ recordId: "recNEW" });
@@ -1739,8 +1905,8 @@ describe("airtable-products client", () => {
         "Upload Date": "2026-09-01",
         "Inventory Status": "In",
         "Product Images": [
-          { url: "https://example.workers.dev/assets/a.jpg" },
-          { url: "https://example.workers.dev/assets/b.jpg" },
+          { url: "https://example.workers.dev/assets/a.jpg", filename: "a.jpg" },
+          { url: "https://example.workers.dev/assets/b.jpg", filename: "b.jpg" },
         ],
       },
     });
@@ -1810,8 +1976,25 @@ describe("airtable-products client", () => {
     ]);
     const client = createAirtableProductsClient({ ...config, fetch: fetchFake });
     await expect(
-      client.createProduct({ productId: "A-501", systemGroupId: "g1", uploadDate: "2026-09-01", productImageUrls: [] })
+      client.createProduct({ productId: "A-501", systemGroupId: "g1", uploadDate: "2026-09-01", productImages: [] })
     ).rejects.toMatchObject({ code: "airtable_rate_limited", retryable: true });
+  });
+
+  it("rejects a malformed successful Airtable response", async () => {
+    const fetchFake = fakeFetch([
+      {
+        match: (req) => req.method === "POST",
+        respond: () => new Response(JSON.stringify({ id: 42 }), { status: 200 }),
+      },
+    ]);
+    const client = createAirtableProductsClient({ ...config, fetch: fetchFake });
+
+    await expect(
+      client.createProduct({ productId: "A-501", systemGroupId: "g1", uploadDate: "2026-09-01", productImages: [] }),
+    ).rejects.toMatchObject({
+      code: "airtable_create_invalid_response",
+      retryable: false,
+    });
   });
 });
 ```
@@ -1825,14 +2008,32 @@ Expected: FAIL — `Cannot find module '../../src/import/airtable-products'`
 
 ```ts
 // src/import/airtable-products.ts
+import { z } from "zod";
 import type { Fetcher } from "../env";
 import { OperationalError } from "../shared/errors";
+
+const FindResponseSchema = z.object({
+  records: z.array(z.object({
+    id: z.string().min(1),
+    fields: z.object({ "Product ID": z.string().min(1) }),
+  })),
+});
+
+const CreateResponseSchema = z.object({
+  id: z.string().min(1),
+});
+
+const VerifyResponseSchema = z.object({
+  fields: z.object({
+    "Product Images": z.array(z.object({ url: z.string().min(1) })).optional(),
+  }),
+});
 
 export interface AirtableProductPayload {
   productId: string;
   systemGroupId: string;
   uploadDate: string;
-  productImageUrls: string[];
+  productImages: Array<{ url: string; filename: string }>;
 }
 
 export interface AirtableProductsClient {
@@ -1852,6 +2053,22 @@ async function throwOnError(response: Response, action: string): Promise<never> 
   throw new OperationalError(code, `Airtable ${action} failed with status ${response.status}`, retryable);
 }
 
+async function parseAirtableJson<T>(
+  response: Response,
+  schema: z.ZodType<T>,
+  action: string,
+): Promise<T> {
+  try {
+    return schema.parse(await response.json());
+  } catch {
+    throw new OperationalError(
+      `airtable_${action}_invalid_response`,
+      `Airtable returned a malformed ${action} response`,
+      false,
+    );
+  }
+}
+
 export function createAirtableProductsClient(config: { baseId: string; tableId: string; token: string; fetch: Fetcher }): AirtableProductsClient {
   const headers = { Authorization: `Bearer ${config.token}`, "content-type": "application/json" };
 
@@ -1862,7 +2079,7 @@ export function createAirtableProductsClient(config: { baseId: string; tableId: 
       url.searchParams.set("maxRecords", "1");
       const response = await config.fetch(url.toString(), { headers });
       if (!response.ok) await throwOnError(response, "find");
-      const body = (await response.json()) as { records: Array<{ id: string; fields: { "Product ID": string } }> };
+      const body = await parseAirtableJson(response, FindResponseSchema, "find");
       if (body.records.length === 0) return null;
       return { recordId: body.records[0].id, productId: body.records[0].fields["Product ID"] };
     },
@@ -1877,19 +2094,19 @@ export function createAirtableProductsClient(config: { baseId: string; tableId: 
             "System Group ID": payload.systemGroupId,
             "Upload Date": payload.uploadDate,
             "Inventory Status": "In",
-            "Product Images": payload.productImageUrls.map((url) => ({ url })),
+            "Product Images": payload.productImages,
           },
         }),
       });
       if (!response.ok) await throwOnError(response, "create");
-      const body = (await response.json()) as { id: string };
+      const body = await parseAirtableJson(response, CreateResponseSchema, "create");
       return { recordId: body.id };
     },
 
     async verifyProduct(recordId, expectedImageCount) {
       const response = await config.fetch(`${baseUrl(config.baseId, config.tableId)}/${recordId}`, { headers });
       if (!response.ok) await throwOnError(response, "verify");
-      const body = (await response.json()) as { fields: { "Product Images"?: Array<{ url: string }> } };
+      const body = await parseAirtableJson(response, VerifyResponseSchema, "verify");
       return (body.fields["Product Images"]?.length ?? 0) === expectedImageCount;
     },
 
@@ -1904,7 +2121,7 @@ export function createAirtableProductsClient(config: { baseId: string; tableId: 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/import/airtable-products.test.ts`
-Expected: PASS (6 tests)
+Expected: PASS (7 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -2962,16 +3179,29 @@ export async function processProductGroupAttempt(
 
   let createdRecordId: string | null = null;
   try {
-    const imageUrls = await Promise.all(
-      group.attachablePhotos.map((photo) =>
-        deps.assets.signUrl(photo.r2Key, deps.assetUrlTtlSeconds),
-      ),
+    const productImages = await Promise.all(
+      group.attachablePhotos.map(async (photo) => {
+        if (!/^assets\/[A-Za-z0-9._-]+$/.test(photo.r2Key)) {
+          throw new OperationalError(
+            "invalid_asset_key",
+            `Cannot expose malformed asset key for ${photo.applePhotoId}`,
+            false,
+          );
+        }
+        return {
+          url: await deps.assets.signUrl(
+            photo.r2Key,
+            deps.assetUrlTtlSeconds,
+          ),
+          filename: photo.r2Key.slice("assets/".length),
+        };
+      }),
     );
     const created = await deps.airtable.createProduct({
       productId,
       systemGroupId: group.groupId,
       uploadDate: todayBangkokDate(deps.clock),
-      productImageUrls: imageUrls,
+      productImages,
     });
     createdRecordId = created.recordId;
     await deps.repo.setGroupState(group.groupRowId, "importing", {
@@ -3310,7 +3540,7 @@ interface WorkflowStepLike {
 }
 
 interface ImportWorkflowOperations {
-  retryLimit: 5;
+  retryLimit: number;
   downloadAndGroup(): Promise<DownloadAndGroupOutcome>;
   processGroupAttempt(deps: ProcessGroupDeps, group: PersistedGroup, importRunId: string): Promise<{ outcome: "succeeded"; productId: string }>;
   recordExhaustedFailure(deps: ProcessGroupDeps, group: PersistedGroup, importRunId: string, error: unknown): Promise<{ productId: string | null; errorCode: string }>;
@@ -3485,7 +3715,7 @@ git commit -m "feat(import): add durable group retries with sibling isolation"
 - Test: `test/scheduled.test.ts`
 
 **Interfaces:**
-- Consumes: `Env.IMPORT_WORKFLOW`, `Env.ADMIN_ROUTE_TOKEN`, `deriveSourceAlbumId`, `ImportRepository`, `parseConfig`, `newCorrelationId`, and `handleGetAsset`.
+- Consumes: `Env.IMPORT_WORKFLOW`, `Env.ADMIN_ROUTE_TOKEN`, `deriveSourceAlbumId`, `ImportRepository`, `SequenceRepository.isBootstrapped`, `parseConfig`, `newCorrelationId`, and `handleGetAsset`.
 - Produces:
 
 ```ts
@@ -3526,12 +3756,36 @@ describe("verifyAdminBearer", () => {
 // test/routes/upload.test.ts
 import { describe, expect, it, vi } from "vitest";
 import { testEnv } from "../helpers/env";
+import { createSequenceRepository } from "../../src/db/sequence-repository";
 import { deriveSourceAlbumId } from "../../src/icloud/client";
 import { handleUploadTrigger } from "../../src/routes/upload";
 
+async function readyEnv() {
+  const env = testEnv();
+  await createSequenceRepository(env.DB).bootstrap(
+    "product_id",
+    1,
+  );
+  return env;
+}
+
 describe("handleUploadTrigger", () => {
-  it("persists the safe album digest and starts ImportWorkflow", async () => {
+  it("rejects every trigger before Product ID bootstrap", async () => {
     const env = testEnv();
+    const create = vi.fn();
+    env.IMPORT_WORKFLOW = { create } as typeof env.IMPORT_WORKFLOW;
+
+    const response = await handleUploadTrigger(env, "cron");
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      status: "sequence_not_bootstrapped",
+    });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("persists the safe album digest and starts ImportWorkflow", async () => {
+    const env = await readyEnv();
     const create = vi.fn().mockResolvedValue({ id: "instance-1" });
     env.IMPORT_WORKFLOW = { create } as typeof env.IMPORT_WORKFLOW;
 
@@ -3553,7 +3807,7 @@ describe("handleUploadTrigger", () => {
   });
 
   it("allows only one concurrent running import per album", async () => {
-    const env = testEnv();
+    const env = await readyEnv();
     const create = vi.fn().mockResolvedValue({ id: "instance-1" });
     env.IMPORT_WORKFLOW = { create } as typeof env.IMPORT_WORKFLOW;
 
@@ -3568,7 +3822,7 @@ describe("handleUploadTrigger", () => {
   });
 
   it("releases the running-run lock when Workflow creation fails", async () => {
-    const env = testEnv();
+    const env = await readyEnv();
     const create = vi.fn()
       .mockRejectedValueOnce(new Error("workflow unavailable"))
       .mockResolvedValueOnce({ id: "instance-2" });
@@ -3584,6 +3838,7 @@ describe("handleUploadTrigger", () => {
 // test/router.test.ts
 import { describe, expect, it, vi } from "vitest";
 import { testEnv } from "./helpers/env";
+import { createSequenceRepository } from "../src/db/sequence-repository";
 import { routeRequest } from "../src/router";
 
 describe("routeRequest", () => {
@@ -3603,6 +3858,10 @@ describe("routeRequest", () => {
 
   it("starts an admin-triggered import for the valid bearer token", async () => {
     const env = testEnv();
+    await createSequenceRepository(env.DB).bootstrap(
+      "product_id",
+      1,
+    );
     const create = vi.fn().mockResolvedValue({ id: "instance-1" });
     env.IMPORT_WORKFLOW = { create } as typeof env.IMPORT_WORKFLOW;
 
@@ -3626,11 +3885,16 @@ describe("routeRequest", () => {
 // test/scheduled.test.ts
 import { describe, expect, it, vi } from "vitest";
 import { testEnv } from "./helpers/env";
+import { createSequenceRepository } from "../src/db/sequence-repository";
 import { handleScheduled } from "../src/scheduled";
 
 describe("handleScheduled", () => {
   it("starts ImportWorkflow only for IMPORT_CRON", async () => {
     const env = testEnv();
+    await createSequenceRepository(env.DB).bootstrap(
+      "product_id",
+      1,
+    );
     const create = vi.fn().mockResolvedValue({ id: "instance-1" });
     env.IMPORT_WORKFLOW = { create } as typeof env.IMPORT_WORKFLOW;
 
@@ -3693,6 +3957,7 @@ export async function verifyAdminBearer(
 // src/routes/upload.ts
 import type { Env } from "../env";
 import { createImportRepository } from "../db/import-repository";
+import { createSequenceRepository } from "../db/sequence-repository";
 import { deriveSourceAlbumId } from "../icloud/client";
 import type { ImportWorkflowParams } from "../import/types";
 import { newCorrelationId } from "../shared/ids";
@@ -3708,6 +3973,14 @@ export async function handleUploadTrigger(
   const clock = { now: () => new Date() };
   const ids = { next: () => newCorrelationId() };
   const repo = createImportRepository(env.DB, ids, clock);
+  const sequences = createSequenceRepository(env.DB);
+
+  if (!await sequences.isBootstrapped("product_id")) {
+    return json(503, {
+      status: "sequence_not_bootstrapped",
+    });
+  }
+
   const sourceAlbumId = await deriveSourceAlbumId(
     env.ICLOUD_SHARED_ALBUM_TOKEN,
   );
@@ -3839,7 +4112,7 @@ Staging and production resource names and IDs are created and inserted by the ha
 - [ ] **Step 7: Run focused and full checks**
 
 Run: `npx vitest run test/shared/admin-auth.test.ts test/routes/upload.test.ts test/router.test.ts test/scheduled.test.ts`
-Expected: PASS (7 tests).
+Expected: PASS (8 tests).
 
 Run: `npm run check`
 Expected: PASS.
@@ -4070,7 +4343,7 @@ async function buildHarness(
       created.set(payload.systemGroupId, {
         recordId: response.recordId,
         productId: payload.productId,
-        imageCount: payload.productImageUrls.length,
+        imageCount: payload.productImages.length,
       });
       return response;
     },
