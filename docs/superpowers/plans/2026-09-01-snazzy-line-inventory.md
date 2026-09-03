@@ -72,8 +72,8 @@ test/acceptance/line-acceptance.test.ts
 - Test: `test/config.test.ts`
 
 **Interfaces:**
-- Consumes: existing `parseConfig(raw)` and `AppConfig`.
-- Produces: `ParsedCommand`, `ParseResult`, `LineActor`, `SaleValues`, `InventoryProduct`, `PendingLineCommand`, `ReversibleLineAction`; `AppConfig.lineAllowedGroupId` and `AppConfig.soldoutConfirmationEnabled` mapped from uppercase JSON keys.
+- Consumes: existing `parseConfig(raw)`, `AppConfig.lineAllowedGroupId`, and `Env.LINE_CHANNEL_ACCESS_TOKEN` from the Import plan.
+- Produces: `ParsedCommand`, `ParseResult`, `LineActor`, `SaleValues`, `InventoryProduct`, `PendingLineCommand`, `ReversibleLineAction`; `AppConfig.soldoutConfirmationEnabled` mapped from `SOLDOUT_CONFIRMATION_ENABLED`; `Env.LINE_CHANNEL_SECRET`.
 
 - [ ] **Step 1: Write failing contract tests**
 
@@ -101,24 +101,21 @@ describe("LINE domain contracts", () => {
 ```
 
 ```ts
-// append to test/config.test.ts
-it("maps uppercase LINE configuration to camelCase runtime fields", () => {
-  const config = parseConfig(JSON.stringify({
-    TIME_ZONE: "Asia/Bangkok",
-    UPLOAD_CUTOFF_MINUTES: 30,
-    PRODUCT_ID_PREFIX: "A",
-    LINE_ALLOWED_GROUP_ID: "C-admin",
-    SOLDOUT_CONFIRMATION_ENABLED: true,
-  }));
-  expect(config.lineAllowedGroupId).toBe("C-admin");
-  expect(config.soldoutConfirmationEnabled).toBe(true);
+// append to test/config.test.ts, reusing its complete fixture
+it("maps LINE confirmation configuration without replacing the existing group ID", () => {
+  const config = parseConfig({
+    ...validRawConfig,
+    SOLDOUT_CONFIRMATION_ENABLED: false,
+  });
+  expect(config.lineAllowedGroupId).toBe("Cgroup");
+  expect(config.soldoutConfirmationEnabled).toBe(false);
 });
 ```
 
 - [ ] **Step 2: Run tests and verify failure**
 
 Run: `npx vitest run test/line/types.test.ts test/config.test.ts`
-Expected: FAIL because `src/line/types.ts` and LINE config fields do not exist.
+Expected: FAIL because `src/line/types.ts` and `SOLDOUT_CONFIRMATION_ENABLED` do not exist.
 
 - [ ] **Step 3: Create domain types**
 
@@ -250,34 +247,32 @@ export function parseSupportedLineEvents(value: unknown): SupportedLineEvent[] {
 }
 ```
 
-- [ ] **Step 4: Extend `src/config.ts` with exact raw/runtime fields**
+- [ ] **Step 4: Extend `src/config.ts` and `src/env.ts` with only new LINE fields**
 
-Add these fields to existing Zod raw schema:
+Reuse `LINE_ALLOWED_GROUP_ID`, `AppConfig.lineAllowedGroupId`, its existing `parseConfig` mapping, and `Env.LINE_CHANNEL_ACCESS_TOKEN` from Import Task 0. Do not add them again.
+
+Add this field to the existing Zod raw schema:
 
 ```ts
-LINE_ALLOWED_GROUP_ID: z.string().min(1),
 SOLDOUT_CONFIRMATION_ENABLED: z.boolean().default(true),
 ```
 
-Add these fields to `AppConfig`:
+Add this field to `AppConfig`:
 
 ```ts
-lineAllowedGroupId: string;
 soldoutConfirmationEnabled: boolean;
 ```
 
-Add these mappings in `parseConfig`'s returned object:
+Add this mapping in `parseConfig`'s returned object:
 
 ```ts
-lineAllowedGroupId: parsed.LINE_ALLOWED_GROUP_ID,
 soldoutConfirmationEnabled: parsed.SOLDOUT_CONFIRMATION_ENABLED,
 ```
 
-Add these secret bindings to the existing `Env` interface in `src/env.ts`:
+Add only this new secret binding to the existing `Env` interface in `src/env.ts`:
 
 ```ts
 LINE_CHANNEL_SECRET: string;
-LINE_CHANNEL_ACCESS_TOKEN: string;
 ```
 
 - [ ] **Step 5: Verify focused and full checks**
@@ -1112,7 +1107,7 @@ git commit -m "feat(line): add Airtable inventory client"
 
 **Interfaces:**
 - Consumes: parser error codes, `InventoryClient`, existing `handleUploadTrigger(env, "line")`, existing `handleDocsTrigger(env, "line")`.
-- Produces: Thai message builders and `handleReadOnlyCommand`.
+- Produces: Thai message builders, `UploadTriggerResult`, `DocsTriggerResult`, and `handleReadOnlyCommand`; every import/publication trigger status has a distinct Thai reply.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -1130,18 +1125,118 @@ it("gives format guidance for ambiguous price", () => expect(parseErrorText("mul
 
 ```ts
 // test/line/search.test.ts
-import { describe, expect, it, vi } from "vitest";
-import { handleReadOnlyCommand } from "../../src/line/search";
+import { expect, it, vi } from "vitest";
+import {
+  handleReadOnlyCommand,
+  type DocsTriggerResult,
+  type ReadOnlyDeps,
+  type UploadTriggerResult,
+} from "../../src/line/search";
+
+function deps(
+  upload: UploadTriggerResult = {
+    status: "already_running",
+  },
+  docs: DocsTriggerResult = {
+    status: "no_ready_run",
+  },
+): ReadOnlyDeps {
+  return {
+    inventory: {
+      findByProductId: vi.fn().mockResolvedValue(null),
+    },
+    triggerUpload: vi
+      .fn<() => Promise<UploadTriggerResult>>()
+      .mockResolvedValue(upload),
+    triggerDocs: vi
+      .fn<() => Promise<DocsTriggerResult>>()
+      .mockResolvedValue(docs),
+  };
+}
 
 it("returns Thai not-found for unknown Product ID", async () => {
-  const text = await handleReadOnlyCommand({ type: "search", productId: "A-404" }, { inventory: { findByProductId: vi.fn().mockResolvedValue(null) }, triggerUpload: vi.fn(), triggerDocs: vi.fn() });
+  const text = await handleReadOnlyCommand(
+    { type: "search", productId: "A-404" },
+    deps(),
+  );
   expect(text).toContain("ไม่พบสินค้า A-404");
 });
-it("triggers upload through existing trigger service", async () => {
-  const triggerUpload = vi.fn().mockResolvedValue({ status: "started", id: "run-1" });
-  expect(await handleReadOnlyCommand({ type: "upload" }, { inventory: { findByProductId: vi.fn() }, triggerUpload, triggerDocs: vi.fn() })).toContain("เริ่มนำเข้า");
-  expect(triggerUpload).toHaveBeenCalledTimes(1);
-});
+
+const uploadCases: Array<[
+  result: UploadTriggerResult,
+  expected: string,
+]> = [
+  [
+    { status: "started", id: "import-1" },
+    "เริ่มนำเข้าแล้ว import-1",
+  ],
+  [
+    { status: "already_running" },
+    "มีงานนำเข้ากำลังทำงานอยู่",
+  ],
+  [
+    { status: "sequence_not_bootstrapped" },
+    "ยังเริ่มนำเข้าไม่ได้ เพราะยังไม่ได้ตั้งค่าลำดับรหัสสินค้า",
+  ],
+  [
+    { status: "workflow_start_failed" },
+    "เริ่มงานนำเข้าไม่สำเร็จ กรุณาลอง /upload อีกครั้ง",
+  ],
+];
+
+it.each(uploadCases)(
+  "maps upload result %j to its exact Thai reply",
+  async (result, expected) => {
+    const d = deps(result);
+    expect(await handleReadOnlyCommand(
+      { type: "upload" },
+      d,
+    )).toBe(expected);
+    expect(d.triggerUpload).toHaveBeenCalledTimes(1);
+  },
+);
+
+const docsCases: Array<[
+  result: DocsTriggerResult,
+  expected: string,
+]> = [
+  [
+    { status: "started", id: "run-1" },
+    "เริ่มสร้างเอกสารแล้ว run-1",
+  ],
+  [
+    { status: "restarted", id: "run-1" },
+    "เริ่มสร้างเอกสารใหม่แล้ว run-1",
+  ],
+  [
+    { status: "resumed", id: "run-1" },
+    "ทำงานสร้างเอกสารต่อแล้ว run-1",
+  ],
+  [
+    { status: "already_running", id: "run-1" },
+    "มีงานสร้างเอกสารกำลังทำงานอยู่ run-1",
+  ],
+  [
+    { status: "already_generated", id: "run-1" },
+    "สร้างเอกสารของ Publication Run นี้แล้ว run-1",
+  ],
+  [
+    { status: "no_ready_run" },
+    "ยังไม่มี Publication Run ที่พร้อมวันนี้",
+  ],
+];
+
+it.each(docsCases)(
+  "maps docs result %j to its exact Thai reply",
+  async (result, expected) => {
+    const d = deps({ status: "already_running" }, result);
+    expect(await handleReadOnlyCommand(
+      { type: "docs" },
+      d,
+    )).toBe(expected);
+    expect(d.triggerDocs).toHaveBeenCalledTimes(1);
+  },
+);
 ```
 
 - [ ] **Step 2: Run tests and verify failure**
@@ -1181,21 +1276,83 @@ import type { InventoryClient } from "./airtable-inventory";
 import { helpText, notFoundText, searchText } from "./messages";
 import type { ParsedCommand } from "./types";
 
-export interface TriggerResult { status: "started" | "already_running" | "no_ready_run"; id?: string; }
-export interface ReadOnlyDeps { inventory: Pick<InventoryClient, "findByProductId">; triggerUpload(): Promise<TriggerResult>; triggerDocs(): Promise<TriggerResult>; }
+export type UploadTriggerResult =
+  | { status: "started"; id: string }
+  | {
+      status:
+        | "already_running"
+        | "sequence_not_bootstrapped"
+        | "workflow_start_failed";
+    };
 
-export async function handleReadOnlyCommand(command: Extract<ParsedCommand, { type: "help" | "search" | "upload" | "docs" }>, deps: ReadOnlyDeps): Promise<string> {
+export type DocsTriggerResult =
+  | { status: "no_ready_run" }
+  | {
+      status:
+        | "started"
+        | "restarted"
+        | "resumed"
+        | "already_running"
+        | "already_generated";
+      id: string;
+    };
+
+export interface ReadOnlyDeps {
+  inventory: Pick<InventoryClient, "findByProductId">;
+  triggerUpload(): Promise<UploadTriggerResult>;
+  triggerDocs(): Promise<DocsTriggerResult>;
+}
+
+function uploadResultText(result: UploadTriggerResult): string {
+  switch (result.status) {
+    case "started":
+      return `เริ่มนำเข้าแล้ว ${result.id}`;
+    case "already_running":
+      return "มีงานนำเข้ากำลังทำงานอยู่";
+    case "sequence_not_bootstrapped":
+      return "ยังเริ่มนำเข้าไม่ได้ เพราะยังไม่ได้ตั้งค่าลำดับรหัสสินค้า";
+    case "workflow_start_failed":
+      return "เริ่มงานนำเข้าไม่สำเร็จ กรุณาลอง /upload อีกครั้ง";
+  }
+}
+
+function docsResultText(result: DocsTriggerResult): string {
+  switch (result.status) {
+    case "started":
+      return `เริ่มสร้างเอกสารแล้ว ${result.id}`;
+    case "restarted":
+      return `เริ่มสร้างเอกสารใหม่แล้ว ${result.id}`;
+    case "resumed":
+      return `ทำงานสร้างเอกสารต่อแล้ว ${result.id}`;
+    case "already_running":
+      return `มีงานสร้างเอกสารกำลังทำงานอยู่ ${result.id}`;
+    case "already_generated":
+      return `สร้างเอกสารของ Publication Run นี้แล้ว ${result.id}`;
+    case "no_ready_run":
+      return "ยังไม่มี Publication Run ที่พร้อมวันนี้";
+  }
+}
+
+export async function handleReadOnlyCommand(
+  command: Extract<
+    ParsedCommand,
+    { type: "help" | "search" | "upload" | "docs" }
+  >,
+  deps: ReadOnlyDeps,
+): Promise<string> {
   if (command.type === "help") return helpText();
   if (command.type === "search") {
-    const product = await deps.inventory.findByProductId(command.productId);
-    return product ? searchText(product) : notFoundText(command.productId);
+    const product = await deps.inventory.findByProductId(
+      command.productId,
+    );
+    return product
+      ? searchText(product)
+      : notFoundText(command.productId);
   }
   if (command.type === "upload") {
-    const result = await deps.triggerUpload();
-    return result.status === "started" ? `เริ่มนำเข้าแล้ว ${result.id ?? ""}`.trim() : "มีงานนำเข้ากำลังทำงานอยู่";
+    return uploadResultText(await deps.triggerUpload());
   }
-  const result = await deps.triggerDocs();
-  return result.status === "started" ? `เริ่มสร้างเอกสารแล้ว ${result.id ?? ""}`.trim() : "ยังไม่มี Publication Run ที่พร้อมวันนี้";
+  return docsResultText(await deps.triggerDocs());
 }
 ```
 
@@ -2345,18 +2502,22 @@ git commit -m "feat(line): add retry-safe revert"
 - Test: `test/routes/line.test.ts`
 
 **Interfaces:**
-- Consumes: all prior LINE tasks, internal `handleUploadTrigger(env, "line")`, internal `handleDocsTrigger(env, "line")`, `AuditLog`, and `Env` secrets/config.
-- Produces: `processLineEvents(events, deps)` and `handleLineRoute(request, env)`.
+- Consumes: all prior LINE tasks, internal `handleUploadTrigger(env, "line")`, typed `handleDocsTrigger(env, "line")`, `AuditLog`, and `Env` secrets/config.
+- Produces: `processLineEvents(events, deps)`, `parseUploadTriggerResponse(value)`, `toLineDocsTriggerResult(result)`, and `handleLineRoute(request, env)`; adapters preserve every trigger status instead of collapsing failures or resumed work.
 
 The route verifies HMAC over exact raw bytes before JSON parsing. Every supported event is atomically claimed before allowlist or command work. Successful and intentionally ignored events retain the claim; thrown processing errors delete it before propagating so LINE can retry safely.
 
-- [ ] **Step 1: Write failing raw-route security and validation tests**
+- [ ] **Step 1: Write failing raw-route security, validation, and trigger-adapter tests**
 
 ```ts
 // test/routes/line.test.ts
 import { expect, it, vi } from "vitest";
 import { testEnv } from "../helpers/env";
-import { handleLineRoute } from "../../src/routes/line";
+import {
+  handleLineRoute,
+  parseUploadTriggerResponse,
+  toLineDocsTriggerResult,
+} from "../../src/routes/line";
 
 async function sign(
   body: Uint8Array,
@@ -2460,6 +2621,56 @@ it("returns 400 for a signed malformed top-level payload", async () => {
   );
 
   expect(response.status).toBe(400);
+});
+
+it.each([
+  [
+    { status: "started", importRunId: "import-1" },
+    { status: "started", id: "import-1" },
+  ],
+  [
+    { status: "already_running" },
+    { status: "already_running" },
+  ],
+  [
+    { status: "sequence_not_bootstrapped" },
+    { status: "sequence_not_bootstrapped" },
+  ],
+  [
+    { status: "workflow_start_failed" },
+    { status: "workflow_start_failed" },
+  ],
+] as const)("preserves import trigger status %#", (body, expected) => {
+  expect(parseUploadTriggerResponse(body)).toEqual(expected);
+});
+
+it.each([
+  [
+    { status: "started", publicationRunId: "run-1" },
+    { status: "started", id: "run-1" },
+  ],
+  [
+    { status: "restarted", publicationRunId: "run-1" },
+    { status: "restarted", id: "run-1" },
+  ],
+  [
+    { status: "resumed", publicationRunId: "run-1" },
+    { status: "resumed", id: "run-1" },
+  ],
+  [
+    { status: "already_running", publicationRunId: "run-1" },
+    { status: "already_running", id: "run-1" },
+  ],
+  [
+    { status: "already_generated", publicationRunId: "run-1" },
+    { status: "already_generated", id: "run-1" },
+  ],
+  [
+    { status: "no_runnable_run" },
+    { status: "no_ready_run" },
+  ],
+] as const)("preserves publication trigger status %#", (result, expected) => {
+  expect(toLineDocsTriggerResult(result)).toEqual(expected);
 });
 ```
 
@@ -2856,20 +3067,57 @@ import type { Env } from "../env";
 import { createInventoryClient } from "../line/airtable-inventory";
 import { createLineClient } from "../line/client";
 import { verifyLineSignature } from "../line/signature";
-import { parseSupportedLineEvents } from "../line/types";
+import type {
+  DocsTriggerResult,
+  UploadTriggerResult,
+} from "../line/search";
+import {
+  parseSupportedLineEvents,
+  type SupportedLineEvent,
+} from "../line/types";
 import { processLineEvents } from "../line/webhook";
-import type { SupportedLineEvent } from "../line/types";
-import { handleDocsTrigger } from "./docs";
+import {
+  handleDocsTrigger,
+  type DocsTriggerResult as PublicationDocsTriggerResult,
+} from "./docs";
 import { handleUploadTrigger } from "./upload";
 
-const ImportTriggerResponseSchema = z.object({
-  status: z.string(),
-  importRunId: z.string().optional(),
-});
-const DocsTriggerResponseSchema = z.object({
-  status: z.string(),
-  publicationRunId: z.string().optional(),
-});
+const ImportTriggerResponseSchema = z.discriminatedUnion(
+  "status",
+  [
+    z.object({
+      status: z.literal("started"),
+      importRunId: z.string().min(1),
+    }),
+    z.object({ status: z.literal("already_running") }),
+    z.object({
+      status: z.literal("sequence_not_bootstrapped"),
+    }),
+    z.object({
+      status: z.literal("workflow_start_failed"),
+    }),
+  ],
+);
+
+export function parseUploadTriggerResponse(
+  value: unknown,
+): UploadTriggerResult {
+  const body = ImportTriggerResponseSchema.parse(value);
+  return body.status === "started"
+    ? { status: body.status, id: body.importRunId }
+    : { status: body.status };
+}
+
+export function toLineDocsTriggerResult(
+  result: PublicationDocsTriggerResult,
+): DocsTriggerResult {
+  return result.status === "no_runnable_run"
+    ? { status: "no_ready_run" }
+    : {
+        status: result.status,
+        id: result.publicationRunId,
+      };
+}
 
 export interface LineRouteOverride {
   process(events: SupportedLineEvent[]): Promise<void>;
@@ -2939,30 +3187,14 @@ export async function handleLineRoute(
     async triggerUpload() {
       const response =
         await handleUploadTrigger(env, "line");
-      const body = ImportTriggerResponseSchema.parse(
+      return parseUploadTriggerResponse(
         await response.json(),
       );
-      return {
-        status:
-          body.status === "started"
-            ? "started"
-            : "already_running",
-        id: body.importRunId,
-      };
     },
     async triggerDocs() {
-      const response =
-        await handleDocsTrigger(env, "line");
-      const body = DocsTriggerResponseSchema.parse(
-        await response.json(),
+      return toLineDocsTriggerResult(
+        await handleDocsTrigger(env, "line"),
       );
-      return {
-        status:
-          body.status === "started"
-            ? "started"
-            : "no_ready_run",
-        id: body.publicationRunId,
-      };
     },
   });
   return new Response("ok");
@@ -2989,7 +3221,7 @@ import { handleLineRoute } from "./routes/line";
 - [ ] **Step 6: Verify focused and full checks**
 
 Run: `npx vitest run test/routes/line.test.ts test/line/webhook.test.ts`
-Expected: PASS — 7 tests.
+Expected: PASS — 17 tests, including every import and publication trigger status.
 
 Run: `npm run check`
 Expected: PASS.

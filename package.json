@@ -1,0 +1,38 @@
+{
+  "name": "snazzy-automation",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "check": "npm run typecheck && npm test",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "wrangler dev",
+    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:production": "wrangler deploy --env production",
+    "phase-zero": "tsx --env-file=.env scripts/run-phase-zero.ts",
+    "phase-zero:report": "tsx scripts/write-phase-zero-report.ts",
+    "generate-marker": "tsx scripts/generate-marker.ts"
+  },
+  "dependencies": {
+    "jpeg-js": "^0.4.4",
+    "jsqr": "^1.4.0",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.1.3",
+    "@cloudflare/workers-types": "^5.20260903.1",
+    "@types/jpeg-js": "^0.3.0",
+    "@types/qrcode": "^1.5.6",
+    "qrcode": "^1.5.4",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.128.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260831.1": true
+  }
+}

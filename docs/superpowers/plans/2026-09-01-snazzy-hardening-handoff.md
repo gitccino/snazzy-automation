@@ -26,7 +26,7 @@
 - Use official `@anthropic-ai/sdk`; do not call Claude through raw HTTP.
 - Cloudflare compatibility date must be `2026-09-01` or later and include `nodejs_compat`.
 - Every non-trivial parser, state transition, money mutation, and trust boundary starts with a failing test.
-- Every task ends with focused tests, the full test command, and a commit.
+- Every task ends with focused tests, `npm run check`, and a commit.
 - This plan assumes Foundation, Import pipeline, Publication pipeline, and LINE inventory bot plans are already implemented and `npm run check` currently passes on `main`.
 
 ---
@@ -46,6 +46,9 @@ Foundation Task 1 already installs `tsx`. Add only the scripts implemented by th
 ```
 
 No `usage:alarms` script exists: Task 9 implements the code-side cron alarm, while account-level Cloudflare notifications remain documented dashboard setup.
+
+Run: `npm run check`
+Expected: PASS — registered scripts do not break typecheck or the full test suite.
 
 Commit:
 
@@ -190,7 +193,12 @@ export async function getUsageTotal(
 Run: `npx vitest run test/db/usage-repository.test.ts`
 Expected: PASS (2 tests).
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add migrations/0004_usage_metrics.sql src/db/usage-repository.ts test/db/usage-repository.test.ts
@@ -307,8 +315,15 @@ export async function requestCaptionBatch(
     response = await client.messages.create(
       buildRequestParams(model, products),
     );
-  } catch {
-    return { captions: [], missingProductIds: [...requestedIds] };
+  } catch (error) {
+    rethrowPermanentAnthropicError(
+      error,
+      "create_message",
+    );
+    return {
+      captions: [],
+      missingProductIds: [...requestedIds],
+    };
   }
 
   if (usageContext) {
@@ -2671,7 +2686,12 @@ Add an exact `event.cron === "45 22 * * *"` branch to the existing scheduled han
 Run: `npx vitest run test/scheduled.test.ts`
 Expected: PASS, including all pre-existing scheduled-handler tests.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/scheduled.ts test/scheduled.test.ts
@@ -2771,7 +2791,12 @@ Expected: `wrangler config JSON valid`.
 
 Remote Wrangler validation occurs in Task 11 after exact D1 IDs are inserted.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add wrangler.jsonc
@@ -2785,6 +2810,10 @@ git commit -m "feat: add staging and production wrangler environments with full 
 **Files:**
 - Create: `docs/runbooks/deployment.md`
 
+**Interfaces:**
+- Consumes: final `wrangler.jsonc`, migration scripts, setup/bootstrap routes, smoke script, customer-owned Cloudflare/Airtable/Google/LINE/Anthropic/iCloud configuration, and marker/base-canvas assets created by earlier plans.
+- Produces: exact staging-first deployment, migration, secret installation, setup validation, smoke, production repetition, and rollback procedure used by Tasks 15–16.
+
 - [ ] **Step 1: Write the runbook**
 
 ```markdown
@@ -2797,7 +2826,7 @@ git commit -m "feat: add staging and production wrangler environments with full 
 - Customer-owned Airtable base with Products and Publication Runs tables matching design §9.
 - Customer-owned Google Cloud service account with Docs + Drive API enabled, restricted to one Drive folder.
 - Customer-owned LINE Official Account and Messaging API channel with one admin group created.
-- Printed `SNAZZY_PRODUCT_START_V1` QR marker cards (`npm run -s tsx scripts/generate-marker.ts`).
+- Printed `SNAZZY_PRODUCT_START_V1` QR marker cards (`npm run generate-marker`).
 
 ## One-time per environment (staging first, then production)
 
@@ -2952,7 +2981,12 @@ git commit -m "feat: add staging and production wrangler environments with full 
 Use `npx wrangler rollback --env staging` or `npx wrangler rollback --env production` to restore the prior Worker version. D1 migrations are additive-only; rollback never deletes D1 data and no reverse migration runs.
 ```
 
-- [ ] **Step 2: Commit**
+- [ ] **Step 2: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 3: Commit**
 
 ```bash
 git add docs/runbooks/deployment.md
@@ -2965,6 +2999,10 @@ git commit -m "docs: add deployment runbook for staging and production"
 
 **Files:**
 - Create: `docs/runbooks/operations.md`
+
+**Interfaces:**
+- Consumes: deployed import/publication/LINE flows, authenticated `/setup` and `/usage` routes, D1 operational tables, LINE notifications, and Cloudflare native notification policies.
+- Produces: customer daily-cycle, manual retry, cost-alarm response, failed-import, failed-publication, and escalation procedure referenced by Task 16.
 
 - [ ] **Step 1: Write the runbook**
 
@@ -3051,7 +3089,12 @@ If `overBudget` is `true`, the daily budget alarm cron already pushed a LINE ale
 Any `/setup` check failing outside of a routine credential rotation window is a stop-the-line signal — do not let cron-triggered imports or publications run until `/setup` reports `"ok": true`.
 ```
 
-- [ ] **Step 2: Commit**
+- [ ] **Step 2: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 3: Commit**
 
 ```bash
 git add docs/runbooks/operations.md
@@ -3107,7 +3150,12 @@ Apple limits a Shared Album to 5,000 items. Rotate before hitting that ceiling �
 Append one row after every rotation. Record internal album names only; never record public links or tokens.
 ```
 
-- [ ] **Step 2: Commit**
+- [ ] **Step 2: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 3: Commit**
 
 ```bash
 git add docs/runbooks/album-rotation.md
@@ -3120,6 +3168,10 @@ git commit -m "docs: add iCloud Shared Album rotation runbook"
 
 **Files:**
 - Create: `docs/runbooks/credential-rotation.md`
+
+**Interfaces:**
+- Consumes: every Cloudflare secret binding, authenticated `/setup` and `/usage` behavior, `npm run smoke`, signed-asset TTL, and provider-specific credential ownership rules.
+- Produces: no-code per-credential rotation and verification procedure used by final handoff acceptance.
 
 - [ ] **Step 1: Write the runbook**
 
@@ -3175,7 +3227,12 @@ Every secret in `wrangler.jsonc`/`wrangler secret put` can be rotated without a 
 Append one row after each successful rotation. Record the secret name and verification commands, never the old or new value.
 ```
 
-- [ ] **Step 2: Commit**
+- [ ] **Step 2: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 3: Commit**
 
 ```bash
 git add docs/runbooks/credential-rotation.md
@@ -3514,7 +3571,12 @@ Execute the full Deployment Runbook (Task 11) end-to-end against a throwaway/fre
    ```
    Remove dedicated external test resources through their owning consoles only after confirming they are not shared with production.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add scripts/smoke-test.ts test/acceptance/smoke.test.ts
@@ -3527,6 +3589,10 @@ git commit -m "feat: add authenticated deployment smoke checks"
 
 **Files:**
 - Create: `docs/runbooks/handoff-acceptance.md`
+
+**Interfaces:**
+- Consumes: Phase 0 report, all focused and acceptance suites, four D1 migrations, real staging/production bindings, setup and smoke results, rotation rehearsals, Cloudflare notifications, and customer-owned credential evidence from Tasks 1–15.
+- Produces: final auditable release gate; production handoff is complete only when every checklist item is checked with actual evidence.
 
 - [ ] **Step 1: Write the checklist, mirroring the index's Plan Completion Definition and spec §18 handoff acceptance**
 
