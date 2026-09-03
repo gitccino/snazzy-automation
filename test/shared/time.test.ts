@@ -4,6 +4,7 @@ import {
   expiryFromNow,
   isPast,
   nowBangkokIso,
+  todayBangkokDate,
 } from "../../src/shared/time";
 
 const fixedClock = { now: () => new Date("2026-09-01T10:00:00.000Z") };
@@ -32,5 +33,12 @@ describe("expiryFromNow / isPast", () => {
     const expiry = expiryFromNow(10, fixedClock);
     const laterClock = { now: () => new Date("2026-09-01T10:11:00.000Z") };
     expect(isPast(expiry, laterClock)).toBe(true);
+  });
+});
+
+describe("todayBangkokDate", () => {
+  it("returns the Bangkok calendar date across a UTC day boundary", () => {
+    const clock = { now: () => new Date("2026-09-01T18:30:00.000Z") };
+    expect(todayBangkokDate(clock)).toBe("2026-09-02");
   });
 });

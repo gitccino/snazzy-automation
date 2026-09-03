@@ -35,3 +35,12 @@ export function expiryFromNow(minutes: number, clock: Clock): string {
 export function isPast(iso: string, clock: Clock): boolean {
   return clock.now().getTime() > new Date(iso).getTime();
 }
+
+export function todayBangkokDate(clock: Clock): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Bangkok",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(clock.now());
+}

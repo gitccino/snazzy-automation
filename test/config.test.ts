@@ -1,17 +1,36 @@
 import { describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config";
 
+const validRawConfig = {
+  TIME_ZONE: "Asia/Bangkok",
+  UPLOAD_CUTOFF_MINUTES: 30,
+  PRODUCT_ID_PREFIX: "A",
+  IMPORT_CRON: "0 23 * * *",
+  IMPORT_RETRY_LIMIT: 5,
+  PRODUCT_ID_INITIAL_NUMBER: 1,
+  FIRST_IMPORT_CUTOFF_DATE: "2026-09-01T00:00:00.000Z",
+  AIRTABLE_BASE_ID: "appBase",
+  AIRTABLE_PRODUCTS_TABLE_ID: "tblProducts",
+  LINE_ALLOWED_GROUP_ID: "Cgroup",
+  PUBLIC_BASE_URL: "https://snazzy-staging.example.workers.dev",
+} as const;
+
 describe("parseConfig", () => {
-  it("parses the approved uppercase JSON contract into camel-case runtime fields", () => {
-    const config = parseConfig(JSON.stringify({
-      TIME_ZONE: "Asia/Bangkok",
-      UPLOAD_CUTOFF_MINUTES: 30,
-      PRODUCT_ID_PREFIX: "A",
-    }));
+  it("parses the import uppercase JSON contract into camel-case runtime fields", () => {
+    const config = parseConfig(JSON.stringify(validRawConfig));
+
     expect(config).toEqual({
       timeZone: "Asia/Bangkok",
       uploadCutoffMinutes: 30,
       productIdPrefix: "A",
+      importCron: "0 23 * * *",
+      importRetryLimit: 5,
+      productIdInitialNumber: 1,
+      firstImportCutoffDate: "2026-09-01T00:00:00.000Z",
+      airtableBaseId: "appBase",
+      airtableProductsTableId: "tblProducts",
+      lineAllowedGroupId: "Cgroup",
+      publicBaseUrl: "https://snazzy-staging.example.workers.dev",
     });
   });
 
@@ -21,17 +40,22 @@ describe("parseConfig", () => {
 
   it("rejects a non-positive upload cutoff", () => {
     expect(() => parseConfig({
-      TIME_ZONE: "Asia/Bangkok",
+      ...validRawConfig,
       UPLOAD_CUTOFF_MINUTES: 0,
-      PRODUCT_ID_PREFIX: "A",
     })).toThrow();
   });
 
   it("rejects an empty Product ID prefix", () => {
     expect(() => parseConfig({
-      TIME_ZONE: "Asia/Bangkok",
-      UPLOAD_CUTOFF_MINUTES: 30,
+      ...validRawConfig,
       PRODUCT_ID_PREFIX: "",
+    })).toThrow();
+  });
+
+  it("rejects any import retry count other than five", () => {
+    expect(() => parseConfig({
+      ...validRawConfig,
+      IMPORT_RETRY_LIMIT: 4,
     })).toThrow();
   });
 });

@@ -18,3 +18,28 @@ export function createScriptedFetcher(script: ScriptedResponse[]) {
   };
   return { fetcher, calls };
 }
+
+import type { Clock, Fetcher, IdGenerator } from "../../src/env";
+
+export function fixedClock(iso: string): Clock {
+  return { now: () => new Date(iso) };
+}
+
+export function sequentialIdGenerator(prefix: string): IdGenerator {
+  let next = 1;
+  return { next: () => `${prefix}-${next++}` };
+}
+
+export function fakeFetch(
+  handlers: Array<{
+    match(request: Request): boolean;
+    respond(request: Request): Response | Promise<Response>;
+  }>,
+): Fetcher {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init);
+    const handler = handlers.find((candidate) => candidate.match(request));
+    if (!handler) throw new Error(`No fake fetch handler for ${request.method} ${request.url}`);
+    return handler.respond(request);
+  }) as Fetcher;
+}
