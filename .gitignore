@@ -6,3 +6,7 @@ dist/
 .debug/
 .env
 dataset
+*.DS_Store
+docs/explained
+others
+observe.ts
