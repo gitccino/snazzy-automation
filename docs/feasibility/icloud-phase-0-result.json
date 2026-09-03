@@ -1,0 +1,42 @@
+{
+  "generatedAt": "2026-09-04T00:33:14+07:00",
+  "sourceAlbumId": "[REDACTED]",
+  "gates": [
+    {
+      "gate": "metadata-consistency",
+      "pass": true,
+      "evidence": "polled twice: 28 then 28 photo ids, same-set=true"
+    },
+    {
+      "gate": "stable-ordering",
+      "pass": true,
+      "evidence": "position order identical across two polls=true"
+    },
+    {
+      "gate": "checkpoint-discovery",
+      "pass": true,
+      "evidence": "14 new photo id(s) found beyond a simulated checkpoint of 14"
+    },
+    {
+      "gate": "stream-download-no-buffer",
+      "pass": true,
+      "evidence": "28 photo(s) downloaded one-at-a-time; max single in-memory buffer 1130946 bytes (whole-batch buffering not attempted)"
+    },
+    {
+      "gate": "zero-duplicates",
+      "pass": true,
+      "evidence": "repeated poll produced 28 ids, 28 unique, same-set-as-first=true"
+    },
+    {
+      "gate": "marker-detection",
+      "pass": true,
+      "evidence": "6/6 planted marker photos detected"
+    },
+    {
+      "gate": "transient-error-recovery",
+      "pass": true,
+      "evidence": "not exercised this run"
+    }
+  ],
+  "overall": "PASS"
+}
