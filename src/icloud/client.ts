@@ -76,14 +76,14 @@ export function createICloudClient(token: string, fetcher: Fetcher): ImageSource
       WebstreamResponseSchema,
       "icloud_invalid_webstream_response",
     );
-    const checksums = webstream.photos.map(pickBestDerivativeChecksum);
+    const photoGuids = webstream.photos.map((photo) => photo.photoGuid);
 
     const assetUrlsRes = await safeFetch(
       `https://${host}/${token}/sharedstreams/webasseturls`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ photoGuids: checksums }),
+        body: JSON.stringify({ photoGuids }),
       },
       { fetcher, redactUrlPatterns: redact }
     );

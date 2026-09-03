@@ -46,6 +46,20 @@ describe("createICloudClient.getSnapshot", () => {
     expect(snapshot.photos[1]!.applePhotoId).toBe("BBBB-2222");
   });
 
+  it("requests webasseturls using photoGuids, not checksums", async () => {
+    const webassetBodies: unknown[] = [];
+    const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("webasseturls")) {
+        webassetBodies.push(JSON.parse(typeof init?.body === "string" ? init.body : "{}"));
+        return new Response(JSON.stringify(WEBASSETURLS_FIXTURE), { status: 200 });
+      }
+      return new Response(JSON.stringify(WEBSTREAM_FIXTURE), { status: 200 });
+    };
+    const client = createICloudClient("TOKEN-XYZ", fetcher);
+    await client.getSnapshot();
+    expect(webassetBodies).toEqual([{ photoGuids: ["AAAA-1111", "BBBB-2222"] }]);
+  });
+
   it("rejects malformed iCloud response bodies without exposing them", async () => {
     const client = createICloudClient(
       "TOKEN-XYZ",
