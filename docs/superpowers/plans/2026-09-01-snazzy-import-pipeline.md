@@ -29,7 +29,7 @@
 - Use current Cloudflare Vitest plugin: `@cloudflare/vitest-plugin` with Vitest 4.1 or later; do not use removed `@cloudflare/vitest-pool-workers` APIs.
 - Cloudflare compatibility date must be `2026-09-01` or later and include `nodejs_compat`.
 - Every non-trivial parser, state transition, money mutation, and trust boundary starts with a failing test.
-- Every task ends with focused tests, the full test command, and a commit.
+- Every task ends with focused tests, `npm run check`, and a commit.
 
 ---
 
@@ -58,20 +58,22 @@ Phase 0 must have passed before this plan starts. Foundation already provides `O
 
 ```ts
 // replace the successful parse case in test/config.test.ts
+const validRawConfig = {
+  TIME_ZONE: "Asia/Bangkok",
+  UPLOAD_CUTOFF_MINUTES: 30,
+  PRODUCT_ID_PREFIX: "A",
+  IMPORT_CRON: "0 23 * * *",
+  IMPORT_RETRY_LIMIT: 5,
+  PRODUCT_ID_INITIAL_NUMBER: 1,
+  FIRST_IMPORT_CUTOFF_DATE: "2026-09-01T00:00:00.000Z",
+  AIRTABLE_BASE_ID: "appBase",
+  AIRTABLE_PRODUCTS_TABLE_ID: "tblProducts",
+  LINE_ALLOWED_GROUP_ID: "Cgroup",
+  PUBLIC_BASE_URL: "https://snazzy-staging.example.workers.dev",
+} as const;
+
 it("parses the import uppercase JSON contract into camel-case runtime fields", () => {
-  const config = parseConfig(JSON.stringify({
-    TIME_ZONE: "Asia/Bangkok",
-    UPLOAD_CUTOFF_MINUTES: 30,
-    PRODUCT_ID_PREFIX: "A",
-    IMPORT_CRON: "0 23 * * *",
-    IMPORT_RETRY_LIMIT: 5,
-    PRODUCT_ID_INITIAL_NUMBER: 1,
-    FIRST_IMPORT_CUTOFF_DATE: "2026-09-01T00:00:00.000Z",
-    AIRTABLE_BASE_ID: "appBase",
-    AIRTABLE_PRODUCTS_TABLE_ID: "tblProducts",
-    LINE_ALLOWED_GROUP_ID: "Cgroup",
-    PUBLIC_BASE_URL: "https://snazzy-staging.example.workers.dev",
-  }));
+  const config = parseConfig(JSON.stringify(validRawConfig));
 
   expect(config).toEqual({
     timeZone: "Asia/Bangkok",
@@ -90,17 +92,8 @@ it("parses the import uppercase JSON contract into camel-case runtime fields", (
 
 it("rejects any import retry count other than five", () => {
   expect(() => parseConfig({
-    TIME_ZONE: "Asia/Bangkok",
-    UPLOAD_CUTOFF_MINUTES: 30,
-    PRODUCT_ID_PREFIX: "A",
-    IMPORT_CRON: "0 23 * * *",
+    ...validRawConfig,
     IMPORT_RETRY_LIMIT: 4,
-    PRODUCT_ID_INITIAL_NUMBER: 1,
-    FIRST_IMPORT_CUTOFF_DATE: null,
-    AIRTABLE_BASE_ID: "appBase",
-    AIRTABLE_PRODUCTS_TABLE_ID: "tblProducts",
-    LINE_ALLOWED_GROUP_ID: "Cgroup",
-    PUBLIC_BASE_URL: "https://snazzy.example.workers.dev",
   })).toThrow();
 });
 ```
@@ -636,7 +629,12 @@ The single `UPDATE ... RETURNING` statement is the atomicity guarantee: D1 seria
 Run: `npx vitest run test/db/sequence-repository.test.ts`
 Expected: PASS (4 tests)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/db/sequence-repository.ts test/db/sequence-repository.test.ts
@@ -746,7 +744,12 @@ export function createAuditLog(db: D1Database, ids: IdGenerator, clock: Clock): 
 Run: `npx vitest run test/db/audit.test.ts`
 Expected: PASS (1 test)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/db/audit.ts test/db/audit.test.ts
@@ -1150,7 +1153,12 @@ Note the `upsertPendingGroup` insert-or-noop is deliberate: `group_hash` is a de
 Run: `npx vitest run test/db/import-repository.test.ts`
 Expected: PASS (5 tests)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/db/import-repository.ts test/db/import-repository.test.ts
@@ -1230,7 +1238,12 @@ export interface ImportRunResult {
 Run: `npx tsc --noEmit`
 Expected: no new errors attributable to `src/import/types.ts`.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add src/import/types.ts
@@ -1390,7 +1403,12 @@ The signature check uses a constant-time comparison (`diff |=`) so a timing side
 Run: `npx vitest run test/import/asset-store.test.ts`
 Expected: PASS (3 tests)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/import/asset-store.ts test/import/asset-store.test.ts
@@ -1513,7 +1531,12 @@ export async function handleGetAsset(request: Request, env: Env, clock: Clock): 
 Run: `npx vitest run test/routes/assets.test.ts`
 Expected: PASS (4 tests)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/routes/assets.ts test/routes/assets.test.ts
@@ -2123,7 +2146,12 @@ export function createAirtableProductsClient(config: { baseId: string; tableId: 
 Run: `npx vitest run test/import/airtable-products.test.ts`
 Expected: PASS (7 tests)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/import/airtable-products.ts test/import/airtable-products.test.ts
@@ -2221,7 +2249,12 @@ export function createLineClient(config: { channelAccessToken: string; fetch: Fe
 Run: `npx vitest run test/line/client.test.ts`
 Expected: PASS (2 tests)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/line/client.ts test/line/client.test.ts
@@ -2366,7 +2399,12 @@ export async function sendImportSummary(
 Run: `npx vitest run test/import/notify.test.ts`
 Expected: PASS (5 tests)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/import/notify.ts test/import/notify.test.ts
@@ -2777,7 +2815,12 @@ export async function downloadAndGroupSnapshot(deps: ImportServiceDeps, importRu
 Run: `npx vitest run test/import/service.test.ts`
 Expected: PASS (6 tests)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/import/service.ts test/import/service.test.ts

@@ -25,7 +25,7 @@
 - Use current Cloudflare Vitest plugin: `@cloudflare/vitest-plugin` with Vitest 4.1 or later; do not use removed `@cloudflare/vitest-pool-workers` APIs.
 - Cloudflare compatibility date must be `2026-09-01` or later and include `nodejs_compat`.
 - Every non-trivial parser, state transition, money mutation, and trust boundary starts with a failing test.
-- Every task ends with focused tests, the full test command, and a commit.
+- Every task ends with focused tests, `npm run check`, and a commit.
 - Anthropic client uses `maxRetries: 0`; Cloudflare Workflow `step.do()` owns durable retry count and backoff.
 - Idempotency keys: Workflow instance `publication-<airtablePublicationRunId>`; Cloudflare custom Workflow IDs do not allow colons. Publication final output unique key is the Airtable Publication Run ID.
 
@@ -696,6 +696,30 @@ describe("findRunnableRunForDate", () => {
       findRunnableRunForDate(fetcher, config, "token", "2026-09-01"),
     ).rejects.toThrow(/invalid attachment filename/i);
   });
+
+  it.each([
+    [429, true],
+    [422, false],
+  ])(
+    "classifies Airtable status %i with retryable=%s",
+    async (status, retryable) => {
+      const fetcher = vi.fn<Fetcher>().mockResolvedValue(
+        jsonResponse({}, status),
+      );
+
+      await expect(
+        findRunnableRunForDate(
+          fetcher,
+          config,
+          "token",
+          "2026-09-01",
+        ),
+      ).rejects.toMatchObject({
+        code: "airtable_runs_fetch_failed",
+        retryable,
+      });
+    },
+  );
 });
 
 describe("status writes", () => {
@@ -779,20 +803,23 @@ claudeModel: parsed.CLAUDE_MODEL,
 claudeRequestInputTokenLimit: parsed.CLAUDE_REQUEST_INPUT_TOKEN_LIMIT,
 ```
 
-Append these tests to `test/config.test.ts`, reusing that file's existing complete `validRawConfig` fixture:
+Extend the existing `validRawConfig` object in `test/config.test.ts` with these fields so later plans inherit one complete fixture:
+
+```ts
+PUBLICATION_CRON: "30 23 * * *",
+PUBLICATION_RETRY_LIMIT: 5,
+AIRTABLE_PUBLICATION_RUNS_TABLE_ID: "tblRuns",
+GOOGLE_DRIVE_FOLDER_ID: "folder-1",
+GOOGLE_TEMPLATE_DOC_ID: "template-1",
+CLAUDE_MODEL: "claude-opus-5",
+CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150_000,
+```
+
+Append these tests to `test/config.test.ts`:
 
 ```ts
 it("maps every publication config key", () => {
-  const config = parseConfig({
-    ...validRawConfig,
-    PUBLICATION_CRON: "30 23 * * *",
-    PUBLICATION_RETRY_LIMIT: 5,
-    AIRTABLE_PUBLICATION_RUNS_TABLE_ID: "tblRuns",
-    GOOGLE_DRIVE_FOLDER_ID: "folder-1",
-    GOOGLE_TEMPLATE_DOC_ID: "template-1",
-    CLAUDE_MODEL: "claude-opus-5",
-    CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150_000,
-  });
+  const config = parseConfig(validRawConfig);
   expect(config).toMatchObject({
     publicationCron: "30 23 * * *",
     publicationRetryLimit: 5,
@@ -811,13 +838,6 @@ it.each([
 ])("rejects invalid publication %s", (_name, patch) => {
   expect(() => parseConfig({
     ...validRawConfig,
-    PUBLICATION_CRON: "30 23 * * *",
-    PUBLICATION_RETRY_LIMIT: 5,
-    AIRTABLE_PUBLICATION_RUNS_TABLE_ID: "tblRuns",
-    GOOGLE_DRIVE_FOLDER_ID: "folder-1",
-    GOOGLE_TEMPLATE_DOC_ID: "template-1",
-    CLAUDE_MODEL: "claude-opus-5",
-    CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150_000,
     ...patch,
   })).toThrow();
 });
@@ -833,6 +853,7 @@ Use the interfaces shown in the Interfaces block above verbatim.
 // src/publication/airtable-runs.ts
 import { z } from "zod";
 import type { AppConfig } from "../config";
+import { OperationalError } from "../shared/errors";
 import type { Fetcher } from "../shared/http";
 import type { PublicationProduct, PublicationRun } from "./types";
 
@@ -853,6 +874,18 @@ function airtableUrl(
 
 function authHeaders(token: string): HeadersInit {
   return { Authorization: `Bearer ${token}`, "content-type": "application/json" };
+}
+
+function airtableHttpError(
+  code: string,
+  action: string,
+  status: number,
+): OperationalError {
+  return new OperationalError(
+    code,
+    `Airtable ${action} failed with status ${status}`,
+    status === 429 || status >= 500,
+  );
 }
 
 const AirtableRunRecordSchema = z.object({
@@ -901,7 +934,11 @@ async function fetchLinkedProducts(
   const url = `${airtableUrl(config, config.airtableProductsTableId)}?filterByFormula=${encodeURIComponent(formula)}`;
   const response = await fetcher(url, { headers: authHeaders(token) });
   if (!response.ok) {
-    throw new Error(`airtable products fetch failed with status ${response.status}`);
+    throw airtableHttpError(
+      "airtable_products_fetch_failed",
+      "products fetch",
+      response.status,
+    );
   }
   const body = z.object({
     records: z.array(AirtableProductRecordSchema),
@@ -932,7 +969,11 @@ export async function findRunnableRunForDate(
   const url = `${airtableUrl(config, config.airtablePublicationRunsTableId)}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=1`;
   const response = await fetcher(url, { headers: authHeaders(token) });
   if (!response.ok) {
-    throw new Error(`airtable runs fetch failed with status ${response.status}`);
+    throw airtableHttpError(
+      "airtable_runs_fetch_failed",
+      "runs fetch",
+      response.status,
+    );
   }
   const body = z.object({
     records: z.array(AirtableRunRecordSchema),
@@ -958,7 +999,11 @@ export async function loadRunById(
   const url = airtableUrl(config, config.airtablePublicationRunsTableId, `/${airtableRunId}`);
   const response = await fetcher(url, { headers: authHeaders(token) });
   if (!response.ok) {
-    throw new Error(`airtable run fetch failed with status ${response.status}`);
+    throw airtableHttpError(
+      "airtable_run_fetch_failed",
+      "run fetch",
+      response.status,
+    );
   }
   const body = AirtableRunRecordSchema.parse(await response.json());
   const products = await fetchLinkedProducts(fetcher, config, token, body.fields.Products ?? []);
@@ -984,7 +1029,11 @@ async function patchRun(
     body: JSON.stringify({ fields }),
   });
   if (!response.ok) {
-    throw new Error(`airtable run update failed with status ${response.status}`);
+    throw airtableHttpError(
+      "airtable_run_update_failed",
+      "run update",
+      response.status,
+    );
   }
 }
 
@@ -1041,7 +1090,11 @@ export async function updateProductCollage(
     body: JSON.stringify({ fields: { "4-in-1 Image": [{ url: signedCollageUrl }] } }),
   });
   if (!response.ok) {
-    throw new Error(`airtable product collage update failed with status ${response.status}`);
+    throw airtableHttpError(
+      "airtable_product_collage_update_failed",
+      "product collage update",
+      response.status,
+    );
   }
 }
 ```
@@ -1065,7 +1118,7 @@ ANTHROPIC_API_KEY: string;
 - [ ] **Step 7: Run test to verify it passes**
 
 Run: `npx vitest run test/publication/airtable-runs.test.ts`
-Expected: PASS — 7 tests green.
+Expected: PASS — 9 tests green.
 
 - [ ] **Step 8: Full check and commit**
 
@@ -1787,6 +1840,89 @@ describe("planCaptionBatches", () => {
     expect(batches.every((batch) => batch.length === 1)).toBe(true);
     expect(batches.map((batch) => batch[0]!.productId)).toEqual(["A-1001", "A-1002", "A-1003", "A-1004"]);
   });
+
+  it("uses the smallest number of deterministic Product-ID-ordered batches", async () => {
+    const tokenWeights = new Map([
+      ["A-1001", 700],
+      ["A-1002", 100],
+      ["A-1003", 100],
+      ["A-1004", 100],
+      ["A-1005", 100],
+    ]);
+    const client = sdkClient({
+      countTokens: vi.fn().mockImplementation(
+        async ({ messages }: CountTokensParams) => {
+          const text = messages[0]!.content as string;
+          const productIds = [
+            ...text.matchAll(/Product ID: (A-\d+)/g),
+          ].map((match) => match[1]!);
+          return {
+            input_tokens: productIds.reduce(
+              (total, productId) =>
+                total + (tokenWeights.get(productId) ?? 0),
+              0,
+            ),
+          };
+        },
+      ),
+    });
+    const products = [
+      "A-1005",
+      "A-1001",
+      "A-1004",
+      "A-1002",
+      "A-1003",
+    ].map(
+      (id) => toCaptionRequestProducts([product(id)])[0]!,
+    );
+
+    const batches = await planCaptionBatches(
+      client,
+      "claude-opus-5",
+      products,
+      800,
+    );
+
+    expect(batches.map((batch) =>
+      batch.map(({ productId }) => productId))).toEqual([
+      ["A-1001", "A-1002"],
+      ["A-1003", "A-1004", "A-1005"],
+    ]);
+  });
+
+  it("rejects one Product that exceeds the configured input-token limit", async () => {
+    const client = sdkClient({
+      countTokens: vi.fn().mockResolvedValue({
+        input_tokens: 1_001,
+      }),
+    });
+
+    await expect(planCaptionBatches(
+      client,
+      "claude-opus-5",
+      [toCaptionRequestProducts([product("A-1001")])[0]!],
+      1_000,
+    )).rejects.toMatchObject({
+      code: "anthropic_input_too_large",
+      retryable: false,
+    });
+  });
+
+  it("classifies a permanent count-tokens rejection as non-retryable", async () => {
+    const client = sdkClient({
+      countTokens: vi.fn().mockRejectedValue({ status: 401 }),
+    });
+
+    await expect(planCaptionBatches(
+      client,
+      "claude-opus-5",
+      [toCaptionRequestProducts([product("A-1001")])[0]!],
+      1_000,
+    )).rejects.toMatchObject({
+      code: "anthropic_count_tokens_failed",
+      retryable: false,
+    });
+  });
 });
 
 describe("requestCaptionBatch", () => {
@@ -1856,6 +1992,24 @@ describe("requestCaptionBatch", () => {
     expect(outcome.missingProductIds).toEqual(["A-1001"]);
   });
 
+  it("classifies a permanent Messages API rejection as non-retryable", async () => {
+    const client = sdkClient({
+      create: vi.fn().mockRejectedValue({ status: 401 }),
+    });
+    const requested = [
+      toCaptionRequestProducts([product("A-1001")])[0]!,
+    ];
+
+    await expect(requestCaptionBatch(
+      client,
+      "claude-opus-5",
+      requested,
+    )).rejects.toMatchObject({
+      code: "anthropic_create_message_failed",
+      retryable: false,
+    });
+  });
+
   it("marks every requested Product ID for retry when returned IDs don't match the requested set", async () => {
     const client = sdkClient({
       create: vi.fn().mockResolvedValue(
@@ -1912,6 +2066,7 @@ Expected: FAIL — `Cannot find module '../../src/publication/captions'`.
 // src/publication/captions.ts
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { OperationalError } from "../shared/errors";
 import type { CaptionSet, PublicationProduct } from "./types";
 
 export interface CaptionRequestProduct {
@@ -2008,37 +2163,109 @@ function buildRequestParams(model: string, products: CaptionRequestProduct[]) {
   };
 }
 
+function apiStatus(error: unknown): number | null {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("status" in error)
+  ) {
+    return null;
+  }
+  const status = (error as { status?: unknown }).status;
+  return typeof status === "number" ? status : null;
+}
+
+function rethrowPermanentAnthropicError(
+  error: unknown,
+  action: "count_tokens" | "create_message",
+): void {
+  const status = apiStatus(error);
+  if (
+    status !== null &&
+    status >= 400 &&
+    status < 500 &&
+    status !== 429
+  ) {
+    throw new OperationalError(
+      `anthropic_${action}_failed`,
+      `Anthropic ${action} failed with status ${status}`,
+      false,
+    );
+  }
+}
+
+async function countInputTokens(
+  client: Pick<Anthropic, "messages">,
+  model: string,
+  products: CaptionRequestProduct[],
+): Promise<number> {
+  const params = buildRequestParams(model, products);
+  try {
+    const result = await client.messages.countTokens({
+      model: params.model,
+      messages: params.messages,
+      tools: params.tools,
+    });
+    return result.input_tokens;
+  } catch (error) {
+    rethrowPermanentAnthropicError(
+      error,
+      "count_tokens",
+    );
+    throw error;
+  }
+}
+
 export async function planCaptionBatches(
   client: Pick<Anthropic, "messages">,
   model: string,
   products: CaptionRequestProduct[],
   inputTokenLimit: number,
 ): Promise<CaptionRequestProduct[][]> {
-  const sorted = [...products].sort((a, b) => a.productId.localeCompare(b.productId));
-  return splitToFit(client, model, sorted, inputTokenLimit);
-}
+  const sorted = [...products].sort(
+    (a, b) => a.productId.localeCompare(b.productId),
+  );
+  const batches: CaptionRequestProduct[][] = [];
+  let current: CaptionRequestProduct[] = [];
 
-async function splitToFit(
-  client: Pick<Anthropic, "messages">,
-  model: string,
-  products: CaptionRequestProduct[],
-  inputTokenLimit: number,
-): Promise<CaptionRequestProduct[][]> {
-  if (products.length <= 1) return [products];
-  const params = buildRequestParams(model, products);
-  const { input_tokens } = await client.messages.countTokens({
-    model: params.model,
-    messages: params.messages,
-    tools: params.tools,
-  });
-  if (input_tokens <= inputTokenLimit) return [products];
+  for (const product of sorted) {
+    const candidate = [...current, product];
+    const candidateTokens = await countInputTokens(
+      client,
+      model,
+      candidate,
+    );
+    if (candidateTokens <= inputTokenLimit) {
+      current = candidate;
+      continue;
+    }
 
-  const mid = Math.ceil(products.length / 2);
-  const left = products.slice(0, mid);
-  const right = products.slice(mid);
-  const leftBatches = await splitToFit(client, model, left, inputTokenLimit);
-  const rightBatches = await splitToFit(client, model, right, inputTokenLimit);
-  return [...leftBatches, ...rightBatches];
+    if (current.length === 0) {
+      throw new OperationalError(
+        "anthropic_input_too_large",
+        `Product ${product.productId} exceeds the configured Claude input-token limit`,
+        false,
+      );
+    }
+
+    batches.push(current);
+    const singleTokens = await countInputTokens(
+      client,
+      model,
+      [product],
+    );
+    if (singleTokens > inputTokenLimit) {
+      throw new OperationalError(
+        "anthropic_input_too_large",
+        `Product ${product.productId} exceeds the configured Claude input-token limit`,
+        false,
+      );
+    }
+    current = [product];
+  }
+
+  if (current.length > 0) batches.push(current);
+  return batches;
 }
 
 export async function requestCaptionBatch(
@@ -2049,9 +2276,18 @@ export async function requestCaptionBatch(
   const requestedIds = new Set(products.map((p) => p.productId));
   let response: Anthropic.Messages.Message;
   try {
-    response = await client.messages.create(buildRequestParams(model, products));
-  } catch {
-    return { captions: [], missingProductIds: [...requestedIds] };
+    response = await client.messages.create(
+      buildRequestParams(model, products),
+    );
+  } catch (error) {
+    rethrowPermanentAnthropicError(
+      error,
+      "create_message",
+    );
+    return {
+      captions: [],
+      missingProductIds: [...requestedIds],
+    };
   }
 
   const toolUse = response.content.find(
@@ -2114,7 +2350,7 @@ export async function generateCaptionsForRun(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/publication/captions.test.ts`
-Expected: PASS — 9 tests green.
+Expected: PASS — 13 tests green.
 
 - [ ] **Step 5: Full check and commit**
 
@@ -2293,6 +2529,36 @@ describe("createGoogleAuthClient", () => {
     expect(second).toBe("token-2");
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
+
+  it.each([
+    [429, true],
+    [400, false],
+  ])(
+    "classifies token endpoint status %i with retryable=%s",
+    async (status, retryable) => {
+      const clock = {
+        now: () => new Date("2026-09-01T05:00:00.000Z"),
+      };
+      const fetcher = vi.fn<Fetcher>().mockResolvedValue(
+        new Response(null, { status }),
+      );
+      const client = createGoogleAuthClient(
+        JSON.stringify({
+          client_email:
+            "svc@example.iam.gserviceaccount.com",
+          private_key: privateKeyPem,
+        }),
+        clock,
+        fetcher,
+      );
+
+      await expect(client.getAccessToken())
+        .rejects.toMatchObject({
+          code: "google_token_exchange_failed",
+          retryable,
+        });
+    },
+  );
 });
 ```
 
@@ -2306,6 +2572,7 @@ Expected: FAIL — `Cannot find module '../../src/publication/google-auth'`.
 ```ts
 // src/publication/google-auth.ts
 import { z } from "zod";
+import { OperationalError } from "../shared/errors";
 import type { Clock } from "../shared/time";
 import type { Fetcher } from "../shared/http";
 
@@ -2394,7 +2661,11 @@ export function createGoogleAuthClient(serviceAccountJsonText: string, clock: Cl
       });
 
       if (!response.ok) {
-        throw new Error(`google token exchange failed with status ${response.status}`);
+        throw new OperationalError(
+          "google_token_exchange_failed",
+          `Google token exchange failed with status ${response.status}`,
+          response.status === 429 || response.status >= 500,
+        );
       }
 
       const body = TokenResponseSchema.parse(await response.json());
@@ -2409,7 +2680,7 @@ export function createGoogleAuthClient(serviceAccountJsonText: string, clock: Cl
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/publication/google-auth.test.ts`
-Expected: PASS — 5 tests green.
+Expected: PASS — 7 tests green.
 
 - [ ] **Step 5: Full check and commit**
 
@@ -2827,6 +3098,30 @@ describe("finalizeDocument", () => {
       name: "Publication 2026-09-01",
     });
   });
+
+  it.each([
+    [429, true],
+    [403, false],
+  ])(
+    "classifies Drive status %i with retryable=%s",
+    async (status, retryable) => {
+      const fetcher = vi.fn<Fetcher>().mockResolvedValue(
+        new Response(null, { status }),
+      );
+
+      await expect(
+        finalizeDocument(
+          fetcher,
+          tokenProvider(),
+          "doc-1",
+          "Publication 2026-09-01",
+        ),
+      ).rejects.toMatchObject({
+        code: "google_drive_rename_failed",
+        retryable,
+      });
+    },
+  );
 });
 
 describe("deleteDocument", () => {
@@ -2850,6 +3145,7 @@ Expected: FAIL — `Cannot find module '../../src/publication/google-docs'`.
 ```ts
 // src/publication/google-docs.ts
 import { z } from "zod";
+import { OperationalError } from "../shared/errors";
 import type { AccessTokenProvider } from "./google-auth";
 import type { Fetcher } from "../shared/http";
 
@@ -2919,6 +3215,18 @@ export type GoogleDocsRequest =
 const DRIVE_BASE = "https://www.googleapis.com/drive/v3";
 const DOCS_BASE = "https://docs.googleapis.com/v1";
 
+function googleHttpError(
+  code: string,
+  action: string,
+  status: number,
+): OperationalError {
+  return new OperationalError(
+    code,
+    `Google ${action} failed with status ${status}`,
+    status === 429 || status >= 500,
+  );
+}
+
 async function authHeaders(tokenProvider: AccessTokenProvider): Promise<HeadersInit> {
   const token = await tokenProvider.getAccessToken();
   return { Authorization: `Bearer ${token}`, "content-type": "application/json" };
@@ -2953,7 +3261,11 @@ export async function findTemporaryDocument(
   url.searchParams.set("pageSize", "2");
   const response = await fetcher(url, { headers: await authHeaders(tokenProvider) });
   if (!response.ok) {
-    throw new Error(`google drive lookup failed with status ${response.status}`);
+    throw googleHttpError(
+      "google_drive_lookup_failed",
+      "Drive lookup",
+      response.status,
+    );
   }
   const body = await parseGoogleJson(response, DriveFilesSchema, "drive lookup");
   if ((body.files?.length ?? 0) > 1) {
@@ -2980,7 +3292,11 @@ export async function copyTemplate(
     }),
   });
   if (!response.ok) {
-    throw new Error(`google drive copy failed with status ${response.status}`);
+    throw googleHttpError(
+      "google_drive_copy_failed",
+      "Drive copy",
+      response.status,
+    );
   }
   const body = await parseGoogleJson(response, DriveFileSchema, "drive copy");
   return body.id;
@@ -3142,7 +3458,11 @@ export async function fillTemplate(
 ): Promise<void> {
   const getResponse = await fetcher(`${DOCS_BASE}/documents/${docId}`, { headers: await authHeaders(tokenProvider) });
   if (!getResponse.ok) {
-    throw new Error(`google docs get failed with status ${getResponse.status}`);
+    throw googleHttpError(
+      "google_docs_get_failed",
+      "Docs get",
+      getResponse.status,
+    );
   }
   const doc = await parseGoogleJson(getResponse, GoogleDocSchema, "docs get");
   const fullText = extractPlainText(doc);
@@ -3170,7 +3490,11 @@ export async function fillTemplate(
     body: JSON.stringify({ requests }),
   });
   if (!batchResponse.ok) {
-    throw new Error(`google docs batchUpdate failed with status ${batchResponse.status}`);
+    throw googleHttpError(
+      "google_docs_batch_update_failed",
+      "Docs batchUpdate",
+      batchResponse.status,
+    );
   }
 }
 
@@ -3182,7 +3506,11 @@ export async function verifyDocumentContainsProducts(
 ): Promise<{ ok: true } | { ok: false; missingProductIds: string[] }> {
   const response = await fetcher(`${DOCS_BASE}/documents/${docId}`, { headers: await authHeaders(tokenProvider) });
   if (!response.ok) {
-    throw new Error(`google docs get failed with status ${response.status}`);
+    throw googleHttpError(
+      "google_docs_get_failed",
+      "Docs get",
+      response.status,
+    );
   }
   const doc = await parseGoogleJson(response, GoogleDocSchema, "docs get");
   const fullText = extractPlainText(doc);
@@ -3205,7 +3533,11 @@ export async function finalizeDocument(
     body: JSON.stringify({ name: finalTitle }),
   });
   if (!response.ok) {
-    throw new Error(`google drive rename failed with status ${response.status}`);
+    throw googleHttpError(
+      "google_drive_rename_failed",
+      "Drive rename",
+      response.status,
+    );
   }
   return `https://docs.google.com/document/d/${docId}/edit`;
 }
@@ -3216,7 +3548,11 @@ export async function deleteDocument(fetcher: Fetcher, tokenProvider: AccessToke
     headers: await authHeaders(tokenProvider),
   });
   if (!response.ok && response.status !== 404) {
-    throw new Error(`google drive delete failed with status ${response.status}`);
+    throw googleHttpError(
+      "google_drive_delete_failed",
+      "Drive delete",
+      response.status,
+    );
   }
 }
 ```
@@ -3224,7 +3560,7 @@ export async function deleteDocument(fetcher: Fetcher, tokenProvider: AccessToke
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/publication/google-docs.test.ts`
-Expected: PASS — 12 tests green.
+Expected: PASS — 14 tests green.
 
 - [ ] **Step 5: Full check and commit**
 
@@ -3707,6 +4043,69 @@ describe("publication stages", () => {
     expect(deps.bucket.put).not.toHaveBeenCalled();
   });
 
+  it("treats malformed cached captions as missing and replaces them", async () => {
+    await env.DB.prepare(
+      `INSERT INTO publication_jobs
+         (publication_run_id, state, correlation_id, attempt_count, created_at, updated_at)
+       VALUES (?, 'generating', ?, 0, ?, ?)`,
+    ).bind(
+      "rec-run-1",
+      "corr-1",
+      clock.now().toISOString(),
+      clock.now().toISOString(),
+    ).run();
+    await env.DB.prepare(
+      `INSERT INTO publication_product_cache
+         (publication_run_id, product_id, collage_r2_key, captions_json, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).bind(
+      "rec-run-1",
+      "A-1001",
+      "products/A-1001/collage/1080x1080.jpg",
+      "{malformed",
+      clock.now().toISOString(),
+    ).run();
+    const create = vi.fn().mockResolvedValue({
+      content: [{
+        type: "tool_use",
+        id: "tool-1",
+        name: "submit_captions",
+        input: {
+          captions: [{
+            productId: "A-1001",
+            drafts: ["หนึ่ง", "สอง", "สาม"],
+          }],
+        },
+      }],
+      usage: {
+        input_tokens: 100,
+        output_tokens: 50,
+      },
+    });
+    const deps = baseDeps({
+      anthropic: {
+        messages: {
+          countTokens: vi.fn().mockResolvedValue({
+            input_tokens: 100,
+          }),
+          create,
+        },
+      } as unknown as PublicationServiceDeps["anthropic"],
+    });
+
+    const prepared = await preparePublicationOutputs(
+      deps,
+      validated,
+    );
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(prepared.outputs[0]!.captionDrafts).toEqual([
+      "หนึ่ง",
+      "สอง",
+      "สาม",
+    ]);
+  });
+
   it("rediscovers a copied Drive document when D1 persistence was missed", async () => {
     await env.DB.prepare(
       `INSERT INTO publication_jobs
@@ -3885,13 +4284,21 @@ function airtableRunUrl(config: AppConfig, runId: string): string {
 
 function cachedDrafts(value: string | null): [string, string, string] | null {
   if (!value) return null;
-  const parsed: unknown = JSON.parse(value);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return null;
+  }
+
   if (
     Array.isArray(parsed) &&
     parsed.length === 3 &&
     parsed.every((draft) =>
       typeof draft === "string" &&
-      draft.trim().length > 0 &&
+      draft === draft.trim() &&
+      draft.length > 0 &&
       draft.length <= 400 &&
       /[ก-๙]/.test(draft),
     )
@@ -5282,6 +5689,10 @@ function toolResponse(products: PublicationProduct[]) {
         })),
       },
     }],
+    usage: {
+      input_tokens: products.length * 100,
+      output_tokens: products.length * 50,
+    },
   };
 }
 
@@ -5606,7 +6017,13 @@ describe("publication acceptance", () => {
       anthropic: {
         messages: {
           countTokens: vi.fn().mockResolvedValue({ input_tokens: 1_000 }),
-          create: vi.fn().mockResolvedValue({ content: [] }),
+          create: vi.fn().mockResolvedValue({
+            content: [],
+            usage: {
+              input_tokens: 0,
+              output_tokens: 0,
+            },
+          }),
         },
       } as unknown as PublicationServiceDeps["anthropic"],
     });
@@ -5676,13 +6093,20 @@ describe("publication acceptance", () => {
 
     const fillFetch = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({
-        body: { content: [{ paragraph: { elements: [
-          {
+        body: { content: [
+          { paragraph: { elements: [{
             startIndex: 1,
-            endIndex: 42,
-            textRun: { content: "{{PRODUCTS}}suffix{{END_PRODUCTS}}" },
-          },
-        ] } }] },
+            endIndex: 21,
+            textRun: { content: "{{PUBLICATION_DATE}}" },
+          }] } },
+          { paragraph: { elements: [{
+            startIndex: 21,
+            endIndex: 55,
+            textRun: {
+              content: "{{PRODUCTS}}suffix{{END_PRODUCTS}}",
+            },
+          }] } },
+        ] },
       })))
       .mockResolvedValueOnce(new Response(JSON.stringify({ documentId: "temp-doc-1" })))
       .mockResolvedValueOnce(new Response(JSON.stringify({

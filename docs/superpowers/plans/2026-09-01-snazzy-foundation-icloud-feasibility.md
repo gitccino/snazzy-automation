@@ -22,7 +22,7 @@
 - Use current Cloudflare Vitest plugin: `@cloudflare/vitest-plugin` with Vitest 4.1 or later; do not use removed `@cloudflare/vitest-pool-workers` APIs.
 - Cloudflare compatibility date must be `2026-09-01` or later and include `nodejs_compat`.
 - Every non-trivial parser, state transition, money mutation, and trust boundary starts with a failing test.
-- Every task ends with focused tests, the full test command, and a commit.
+- Every task ends with focused tests, `npm run check`, and a commit.
 - Marker contract is the printed QR card containing exactly `SNAZZY_PRODUCT_START_V1`.
 - Marker detection path: normalize to JPEG ≤1024×1024, decode with `jpeg-js`, read with `jsqr`, match exact constant only.
 - **Hard stop:** no import, publication, or LINE implementation begins until this plan's Phase 0 report says `PASS`. If it says `FAIL`, stop, record evidence, and write a replacement `ImageSource` plan — do not alter downstream contracts.
@@ -131,9 +131,8 @@ export function safeFetch(
 
 // src/config.ts
 export interface AppConfig {
-  timeZone: string;
+  timeZone: "Asia/Bangkok";
   uploadCutoffMinutes: number;
-  icloudAlbumToken: string;
   productIdPrefix: string;
 }
 export function parseConfig(raw: unknown): AppConfig;
@@ -454,7 +453,12 @@ export async function sha256Hex(data: ArrayBuffer | Uint8Array): Promise<string>
 Run: `npm test -- test/shared/ids.test.ts`
 Expected: PASS — 3 tests passed.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/shared/ids.ts test/shared/ids.test.ts
@@ -568,7 +572,12 @@ export function isPast(iso: string, clock: Clock): boolean {
 Run: `npm test -- test/shared/time.test.ts`
 Expected: PASS — 4 tests passed.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/shared/time.ts test/shared/time.test.ts
@@ -650,7 +659,12 @@ export function isRetryable(error: unknown): boolean {
 Run: `npm test -- test/shared/errors.test.ts`
 Expected: PASS — 4 tests passed.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/shared/errors.ts test/shared/errors.test.ts
@@ -770,7 +784,12 @@ export function createLogger(base: LogFields) {
 Run: `npm test -- test/shared/logger.test.ts`
 Expected: PASS — 3 tests passed.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/shared/logger.ts test/shared/logger.test.ts
@@ -912,7 +931,12 @@ export async function safeFetch(
 Run: `npm test -- test/shared/http.test.ts`
 Expected: PASS — 5 tests passed.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/shared/http.ts test/shared/http.test.ts
@@ -1024,7 +1048,12 @@ export interface Env {
 Run: `npm test -- test/config.test.ts`
 Expected: PASS — 4 tests passed.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/config.ts src/env.ts test/config.test.ts
@@ -1194,7 +1223,12 @@ export async function discoverHost(token: string, fetcher: Fetcher): Promise<Hos
 Run: `npm test -- test/icloud/token.test.ts`
 Expected: PASS — 4 tests passed.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/icloud/token.ts test/icloud/token.test.ts test/helpers/fakes.ts
@@ -1511,7 +1545,12 @@ export function createICloudClient(token: string, fetcher: Fetcher): ImageSource
 Run: `npm test -- test/icloud/client.test.ts`
 Expected: PASS — 5 tests passed.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/icloud/types.ts src/icloud/client.ts test/icloud/client.test.ts test/helpers/fixtures.ts
@@ -1680,7 +1719,12 @@ Note: production code (Import Pipeline plan) asks the Cloudflare Images binding 
 Run: `npm test -- test/import/marker.test.ts`
 Expected: PASS — 4 tests passed.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/import/marker.ts test/import/marker.test.ts test/import/fixtures/
@@ -1793,7 +1837,12 @@ npx tsx scripts/generate-marker.ts --out docs/runbooks/marker-card.svg
 
 Expected: `docs/runbooks/marker-card.svg` exists, contains the exact `SNAZZY_PRODUCT_START_V1` label, and can be opened and printed without any external asset.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add scripts/generate-marker.ts test/scripts/generate-marker.test.ts docs/runbooks/marker-card.svg
@@ -1853,7 +1902,12 @@ describe("iCloud client logging never leaks the token or derivative URLs", () =>
 Run: `npm test -- test/icloud/redaction-audit.test.ts`
 Expected: PASS immediately if Tasks 5 and 9 were implemented correctly — this is a regression test, not new red/green work. If it FAILS, that is a real bug in `client.ts`'s error messages or `logger.ts`'s redaction pattern; fix the offending file (not this test) before proceeding.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add test/icloud/redaction-audit.test.ts
@@ -2140,7 +2194,12 @@ export async function runPhaseZeroProbe(
 Run: `npm test -- test/icloud/phase-zero-probe.test.ts`
 Expected: PASS — 7 tests passed.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/icloud/phase-zero-probe.ts test/icloud/phase-zero-probe.test.ts
@@ -2365,7 +2424,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 Run: `npm test -- test/scripts/run-phase-zero.test.ts`
 Expected: PASS — 3 tests passed.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add scripts/run-phase-zero.ts test/scripts/run-phase-zero.test.ts
@@ -2450,7 +2514,12 @@ describe("100-500 image streaming feasibility", () => {
 Run: `npm test -- test/icloud/streaming-feasibility.test.ts`
 Expected: on first run before this task, `stream-download-no-buffer` gate logic already exists from Task 13, so this is a regression/scale test — Expected: PASS at 100, 250, and 500 counts. If any size fails or times out, that is real evidence for the Phase 0 report (record it, do not weaken the assertion to force a pass).
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add test/icloud/streaming-feasibility.test.ts
@@ -2605,7 +2674,12 @@ composite key remains distinct — proven by
 `test/icloud/album-rotation.test.ts`.
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the full repository check**
+
+Run: `npm run check`
+Expected: PASS — typecheck and full test suite green.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add docs/runbooks/album-rotation.md test/icloud/album-rotation.test.ts

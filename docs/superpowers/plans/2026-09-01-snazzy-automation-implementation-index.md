@@ -39,7 +39,7 @@
 - Use current Cloudflare Vitest plugin: `@cloudflare/vitest-plugin` with Vitest 4.1 or later; do not use removed `@cloudflare/vitest-pool-workers` APIs.
 - Cloudflare compatibility date must be `2026-09-01` or later and include `nodejs_compat`.
 - Every non-trivial parser, state transition, money mutation, and trust boundary starts with failing test.
-- Every task ends with focused tests, full test command, and commit.
+- Every task ends with focused tests, `npm run check`, and a commit.
 
 ---
 
@@ -471,6 +471,31 @@ export interface SaleValues { inventoryStatus: "In" | "Out"; soldPrice: number |
 ```
 
 `Sold By` stores stable LINE user ID plus current display name as `"<display name> (<user ID>)"`. With confirmation enabled, actor is Approve-button user; otherwise actor is `/soldout` sender.
+
+## Approved-Spec Coverage Matrix
+
+This matrix is the final coverage check against `docs/superpowers/specs/2026-09-01-snazzy-automation-design.md`. Sections 1–3 define scope and non-goals rather than standalone code; every later requirement maps to concrete tasks and runnable proof.
+
+| Approved spec section | Implemented by | Runnable or review proof |
+|---|---|---|
+| §§1–3 Executive summary, goals, non-goals | This index plus every plan's Goal and Global Constraints | Full file-map review and `npm run check`; no local daemon, VPS, Redis, Postgres, n8n, Make, AI grouping, or automatic social posting appears in any task. |
+| §4 Operating assumptions | Foundation Tasks 1, 7; Import Task 0; Hardening Tasks 10–16 | Config tests, staging/production bindings, deployment and handoff checklists. |
+| §5 System boundaries | Foundation Tasks 1, 7; Import Tasks 6–7, 14–15; Publication Tasks 1, 4A, 10; LINE Task 10 | Worker route tests, Workflow tests, D1 migration tests, private asset-route tests. |
+| §6 Cloudflare components | Import Tasks 1, 6–8, 14–15; Publication Tasks 1, 4, 4A, 10; LINE Tasks 2, 10; Hardening Tasks 1, 8–10 | D1, R2, Images, Workflow, cron, route, and usage endpoint focused tests. |
+| §7 iCloud feasibility gate | Foundation Tasks 8–17 | Phase 0 JSON/report, redaction audit, 100–500 image streaming harness, transient-recovery gate, album-rotation rehearsal, hard stop on any failed gate. |
+| §8 Import workflow | Import Tasks 1–16 | Import unit tests plus `test/acceptance/import-acceptance.test.ts` and `test/acceptance/import-batches.test.ts`. |
+| §9 Airtable model and ownership | Import Task 9; Publication Task 2; LINE Task 6; Hardening Task 7 | Airtable payload tests and setup schema validator covering every system-, human-, and computed field. |
+| §10 Publication workflow | Publication Tasks 1–11; Hardening Tasks 2, 6 | Publication unit/Workflow tests and seven-case publication acceptance suite, including one-document and exhausted-cleanup invariants. |
+| §11 LINE command system | LINE Tasks 1–11 | Signature-before-parse, allowlist, parser, confirmation, sold-out, revert, dedupe, and thirty-case acceptance tests. |
+| §12 Idempotency and consistency | Import Tasks 1–4, 6, 12–15; Publication Tasks 1, 7, 9–10; LINE Tasks 2, 8–10 | D1 uniqueness/state tests, atomic R2 conditional write, Drive `appProperties` recovery, one-time LINE tokens, duplicate-trigger acceptance cases. |
+| §13 Error handling and LINE logs | Foundation Tasks 4–6; Import Tasks 10–14; Publication Tasks 2, 5–10; LINE Tasks 5, 7–10; Hardening Tasks 4, 6 | Retryable/permanent error classification, six-attempt Workflow tests, sibling isolation, Thai success/failure logs, cleanup only after exhaustion. |
+| §14 Security | Foundation Tasks 7, 12; Import Tasks 6–7, 15; LINE Tasks 3, 10; Hardening Tasks 3, 7, 10, 14 | Secret-redaction audit, HMAC signatures, constant-time admin bearer checks, auth-before-I/O tests, customer-owned secrets and credential-rotation rehearsal. |
+| §15 Deployment and configuration | Foundation Tasks 1, 7; Import Tasks 0, 15; Publication Tasks 2, 10; LINE Task 1; Hardening Tasks 7, 9–16 | Exact `wrangler.jsonc` environments, cron bindings, migrations, setup verification, deploy/smoke commands, runbooks, fresh-account rehearsal. |
+| §16 Monitoring | Hardening Tasks 1–3, 8–9, 15–16 | Usage repository, authenticated `/usage`, daily budget alarm, health/smoke checks, full handoff acceptance. |
+| §17 Cost model | Hardening Tasks 1–2, 8–9 | Claude token and newly retained R2-byte metrics, monthly cost calculation tests, threshold notification tests. |
+| §18 Test strategy | Foundation Tasks 12–17; Import Task 16; Publication Task 11; LINE Task 11; Hardening Tasks 4–6, 15–16 | Focused tests, acceptance suites, production-sized batches, retry exhaustion, smoke test, and final `npm run check`. |
+| §19 Delivery plan | Plan Order and Stop Gates in this index; all five implementation plans; Hardening Tasks 10–16 | Phase 0 blocks deployment; each task ends with focused checks, full check, and commit; final handoff checklist gates production acceptance. |
+| §20 Final decisions | Fixed Low-Level Decisions and Cross-Plan Interfaces in this index | Exact migration order, IDs, marker payload, Bangkok-time helpers, workflow states, signed assets, model, and parser contracts are repeated in task interfaces and tests. |
 
 ## Plan Completion Definition
 
