@@ -11,7 +11,7 @@
     "dev": "wrangler dev",
     "deploy:staging": "wrangler deploy --env staging",
     "deploy:production": "wrangler deploy --env production",
-    "phase-zero": "tsx scripts/run-phase-zero.ts",
+    "phase-zero": "tsx --env-file=.env scripts/run-phase-zero.ts",
     "phase-zero:report": "tsx scripts/write-phase-zero-report.ts",
     "generate-marker": "tsx scripts/generate-marker.ts"
   },
