@@ -350,15 +350,28 @@ describe("downloadAndGroupSnapshot", () => {
     });
   });
 
-  it("finds a prepended pair below the old checkpoint and groups by current positions", async () => {
+  it("keeps the cutoff as a lower bound while finding a prepended pair after checkpoint", async () => {
     const sourceAlbumId = `album-${crypto.randomUUID()}`;
     const firstRunId = crypto.randomUUID();
     const firstSnapshot: AlbumSnapshot = {
       sourceAlbumId,
       fetchedAt: "2026-09-01T08:00:00.000Z",
       photos: [
-        { ...sourcePhoto("m-old", 1), sourceAlbumId },
-        { ...sourcePhoto("p-old", 2), sourceAlbumId },
+        {
+          ...sourcePhoto("historical", 1),
+          sourceAlbumId,
+          captureAt: "2026-08-31T23:59:59.000Z",
+        },
+        {
+          ...sourcePhoto("m-old", 2),
+          sourceAlbumId,
+          captureAt: "2026-09-01T00:00:00.000Z",
+        },
+        {
+          ...sourcePhoto("p-old", 3),
+          sourceAlbumId,
+          captureAt: "2026-09-01T00:01:00.000Z",
+        },
       ],
     };
     const firstDeps = await buildDeps(
@@ -366,6 +379,7 @@ describe("downloadAndGroupSnapshot", () => {
       firstSnapshot,
       new Set(["m-old"]),
     );
+    firstDeps.firstImportCutoffDate = "2026-09-01T00:00:00.000Z";
     await firstDeps.repo.createImportRun({
       id: firstRunId,
       sourceAlbumId,
@@ -390,10 +404,31 @@ describe("downloadAndGroupSnapshot", () => {
       sourceAlbumId,
       fetchedAt: "2026-09-01T09:00:00.000Z",
       photos: [
-        { ...sourcePhoto("m-new", 1), sourceAlbumId },
-        { ...sourcePhoto("p-new", 2), sourceAlbumId },
-        { ...sourcePhoto("m-old", 3), sourceAlbumId },
-        { ...sourcePhoto("p-old", 4), sourceAlbumId },
+        {
+          ...sourcePhoto("m-new", 1),
+          sourceAlbumId,
+          captureAt: "2026-09-01T00:02:00.000Z",
+        },
+        {
+          ...sourcePhoto("p-new", 2),
+          sourceAlbumId,
+          captureAt: "2026-09-01T00:03:00.000Z",
+        },
+        {
+          ...sourcePhoto("historical", 3),
+          sourceAlbumId,
+          captureAt: "2026-08-31T23:59:59.000Z",
+        },
+        {
+          ...sourcePhoto("m-old", 4),
+          sourceAlbumId,
+          captureAt: "2026-09-01T00:00:00.000Z",
+        },
+        {
+          ...sourcePhoto("p-old", 5),
+          sourceAlbumId,
+          captureAt: "2026-09-01T00:01:00.000Z",
+        },
       ],
     };
     const secondImageSource: ImageSource = {
@@ -401,6 +436,9 @@ describe("downloadAndGroupSnapshot", () => {
         return secondSnapshot;
       },
       async download(photo) {
+        if (photo.applePhotoId === "historical") {
+          throw new Error("historical pre-cutoff photo was downloaded");
+        }
         if (photo.applePhotoId === "m-old" || photo.applePhotoId === "p-old") {
           throw new Error(`old photo was downloaded: ${photo.applePhotoId}`);
         }
@@ -415,7 +453,6 @@ describe("downloadAndGroupSnapshot", () => {
       ...firstDeps,
       imageSource: secondImageSource,
       ids: sequentialIdGenerator(`${sourceAlbumId}-second-id`),
-      firstImportCutoffDate: "2026-09-02T00:00:00.000Z",
     };
     await secondDeps.repo.createImportRun({
       id: secondRunId,
@@ -428,7 +465,7 @@ describe("downloadAndGroupSnapshot", () => {
       secondRunId,
     );
 
-    expect(secondOutcome.checkpointPosition).toBe(4);
+    expect(secondOutcome.checkpointPosition).toBe(5);
     expect(secondOutcome.pendingGroups).toHaveLength(1);
     expect(secondOutcome.pendingGroups[0]).toMatchObject({
       ordinal: 0,

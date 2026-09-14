@@ -57,7 +57,7 @@ export async function downloadAndGroupSnapshot(
   const savedCheckpoint = await deps.repo.getCheckpoint(deps.sourceAlbumId);
   const firstImportCutoffDate = deps.firstImportCutoffDate;
   const eligiblePhotos =
-    savedCheckpoint !== null || firstImportCutoffDate === null
+    firstImportCutoffDate === null
       ? snapshot.photos
       : snapshot.photos.filter(
           (photo) =>
