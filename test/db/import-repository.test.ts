@@ -25,6 +25,75 @@ describe("import-repository", () => {
     expect(await r.getCheckpoint(albumId)).toBe(42);
   });
 
+  it("marks a running import run as start_failed", async () => {
+    const r = repo();
+    const albumId = `album-${crypto.randomUUID()}`;
+    const runId = crypto.randomUUID();
+    await r.createImportRun({ id: runId, sourceAlbumId: albumId, trigger: "cron" });
+
+    await r.markImportRunStartFailed(runId);
+
+    expect(await r.hasRunningImportRun(albumId)).toBe(false);
+  });
+
+  it("refuses finalization and checkpoint advancement while a group is non-terminal", async () => {
+    const r = repo();
+    const albumId = `album-${crypto.randomUUID()}`;
+    const runId = crypto.randomUUID();
+    await r.createImportRun({ id: runId, sourceAlbumId: albumId, trigger: "cron" });
+    await r.upsertPendingGroup({
+      id: crypto.randomUUID(), importRunId: runId, ordinal: 0, groupHash: `hash-${crypto.randomUUID()}`,
+      firstPhotoId: "apple-1", lastPhotoId: "apple-2",
+    });
+
+    await expect(r.finalizeImportRun({
+      id: runId, sourceAlbumId: albumId, status: "completed", orphanPhotoCount: 0, checkpointPosition: 42,
+    })).rejects.toThrow(/cannot finalize import run/);
+    expect(await r.hasRunningImportRun(albumId)).toBe(true);
+    expect(await r.getCheckpoint(albumId)).toBeNull();
+  });
+
+  it("refuses stale, mismatched, and already-finished finalization without moving a checkpoint", async () => {
+    const r = repo();
+    const albumId = `album-${crypto.randomUUID()}`;
+    const runId = crypto.randomUUID();
+    await r.createImportRun({ id: runId, sourceAlbumId: albumId, trigger: "cron" });
+
+    await expect(r.finalizeImportRun({
+      id: runId, sourceAlbumId: `${albumId}-wrong`, status: "completed", orphanPhotoCount: 0, checkpointPosition: 42,
+    })).rejects.toThrow(/cannot finalize import run/);
+    expect(await r.getCheckpoint(`${albumId}-wrong`)).toBeNull();
+    await expect(r.finalizeImportRun({
+      id: crypto.randomUUID(), sourceAlbumId: albumId, status: "completed", orphanPhotoCount: 0, checkpointPosition: 42,
+    })).rejects.toThrow(/cannot finalize import run/);
+    expect(await r.getCheckpoint(albumId)).toBeNull();
+
+    await r.finalizeImportRun({
+      id: runId, sourceAlbumId: albumId, status: "completed", orphanPhotoCount: 0, checkpointPosition: 42,
+    });
+    await expect(r.finalizeImportRun({
+      id: runId, sourceAlbumId: albumId, status: "completed", orphanPhotoCount: 0, checkpointPosition: 99,
+    })).rejects.toThrow(/cannot finalize import run/);
+    expect(await r.getCheckpoint(albumId)).toBe(42);
+  });
+
+  it("keeps checkpoints monotonic across completed runs", async () => {
+    const r = repo();
+    const albumId = `album-${crypto.randomUUID()}`;
+    const firstRunId = crypto.randomUUID();
+    await r.createImportRun({ id: firstRunId, sourceAlbumId: albumId, trigger: "cron" });
+    await r.finalizeImportRun({
+      id: firstRunId, sourceAlbumId: albumId, status: "completed", orphanPhotoCount: 0, checkpointPosition: 42,
+    });
+    const secondRunId = crypto.randomUUID();
+    await r.createImportRun({ id: secondRunId, sourceAlbumId: albumId, trigger: "line" });
+    await r.finalizeImportRun({
+      id: secondRunId, sourceAlbumId: albumId, status: "completed", orphanPhotoCount: 0, checkpointPosition: 7,
+    });
+
+    expect(await r.getCheckpoint(albumId)).toBe(42);
+  });
+
   it("rejects a second running import for the same album at the database boundary", async () => {
     const r = repo();
     const albumId = `album-${crypto.randomUUID()}`;
@@ -87,5 +156,29 @@ describe("import-repository", () => {
     await r.setGroupState(group.id, "failed", { failureReason: "airtable_timeout", attemptCount: 1 });
     const failed = await r.findGroupByHash(group.groupHash);
     expect(failed).toMatchObject({ state: "failed", failureReason: "airtable_timeout", attemptCount: 1 });
+  });
+
+  it("preserves failureReason when setGroupState omits it", async () => {
+    const r = repo();
+    const runId = crypto.randomUUID();
+    await r.createImportRun({ id: runId, sourceAlbumId: `album-${crypto.randomUUID()}`, trigger: "cron" });
+    const group = await r.upsertPendingGroup({ id: crypto.randomUUID(), importRunId: runId, ordinal: 0, groupHash: `hash-${crypto.randomUUID()}`, firstPhotoId: "apple-1", lastPhotoId: "apple-2" });
+    await r.setGroupState(group.id, "failed", { failureReason: "airtable_timeout" });
+
+    await r.setGroupState(group.id, "failed", { attemptCount: 2 });
+
+    expect(await r.findGroupByHash(group.groupHash)).toMatchObject({ failureReason: "airtable_timeout", attemptCount: 2 });
+  });
+
+  it("clears failureReason only when setGroupState explicitly receives null", async () => {
+    const r = repo();
+    const runId = crypto.randomUUID();
+    await r.createImportRun({ id: runId, sourceAlbumId: `album-${crypto.randomUUID()}`, trigger: "cron" });
+    const group = await r.upsertPendingGroup({ id: crypto.randomUUID(), importRunId: runId, ordinal: 0, groupHash: `hash-${crypto.randomUUID()}`, firstPhotoId: "apple-1", lastPhotoId: "apple-2" });
+    await r.setGroupState(group.id, "failed", { failureReason: "airtable_timeout" });
+
+    await r.setGroupState(group.id, "failed", { failureReason: null });
+
+    expect(await r.findGroupByHash(group.groupHash)).toMatchObject({ failureReason: null });
   });
 });

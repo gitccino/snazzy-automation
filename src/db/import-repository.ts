@@ -135,20 +135,32 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
 
     async finalizeImportRun(input) {
       const now = clock.now().toISOString();
-      await db.batch([
+      const results = await db.batch([
         db.prepare(
           `UPDATE import_runs
            SET status = ?, finished_at = ?, orphan_photo_count = ?
-           WHERE id = ? AND source_album_id = ? AND status = 'running'`,
+           WHERE id = ?
+             AND source_album_id = ?
+             AND status = 'running'
+             AND NOT EXISTS (
+               SELECT 1
+               FROM product_groups
+               WHERE import_run_id = import_runs.id
+                 AND state IN ('pending', 'importing')
+             )`,
         ).bind(input.status, now, input.orphanPhotoCount, input.id, input.sourceAlbumId),
         db.prepare(
           `INSERT INTO import_checkpoints (source_album_id, last_position, updated_at)
-           VALUES (?, ?, ?)
+           SELECT ?, ?, ?
+           WHERE changes() = 1
            ON CONFLICT(source_album_id) DO UPDATE SET
              last_position = MAX(import_checkpoints.last_position, excluded.last_position),
              updated_at = excluded.updated_at`,
         ).bind(input.sourceAlbumId, input.checkpointPosition, now),
       ]);
+      if (results[0]?.meta.changes !== 1) {
+        throw new Error(`cannot finalize import run "${input.id}"`);
+      }
     },
 
     async findAssetByContentHash(contentHash) {
@@ -210,7 +222,7 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
              state = ?,
              product_id = COALESCE(?, product_id),
              airtable_record_id = COALESCE(?, airtable_record_id),
-             failure_reason = ?,
+             failure_reason = CASE WHEN ? THEN ? ELSE failure_reason END,
              attempt_count = COALESCE(?, attempt_count),
              updated_at = ?
            WHERE id = ?`,
@@ -219,7 +231,8 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
           state,
           patch.productId ?? null,
           patch.airtableRecordId ?? null,
-          "failureReason" in patch ? patch.failureReason ?? null : null,
+          "failureReason" in patch ? 1 : 0,
+          patch.failureReason ?? null,
           patch.attemptCount ?? null,
           clock.now().toISOString(),
           id,
