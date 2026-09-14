@@ -14,15 +14,15 @@ export async function handleGetAsset(request: Request, env: Env, clock: Clock): 
     throw error;
   }
 
-  const expParam = url.searchParams.get("exp");
-  const sig = url.searchParams.get("sig");
-  if (r2Key === "" || expParam === null || sig === null) {
+  const expParams = url.searchParams.getAll("exp");
+  const sigParams = url.searchParams.getAll("sig");
+  if (r2Key === "" || expParams.length !== 1 || sigParams.length !== 1) {
     return forbidden();
   }
 
-  const expiresAt = Number(expParam);
+  const expiresAt = Number(expParams[0]);
   const nowSeconds = Math.floor(clock.now().getTime() / 1000);
-  const valid = await verifyAssetToken(r2Key, expiresAt, sig, env.ASSET_URL_SIGNING_SECRET, nowSeconds);
+  const valid = await verifyAssetToken(r2Key, expiresAt, sigParams[0]!, env.ASSET_URL_SIGNING_SECRET, nowSeconds);
   if (!valid) {
     return forbidden();
   }
