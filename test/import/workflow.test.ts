@@ -160,6 +160,23 @@ describe("runImportWorkflow", () => {
       events.push("record-g1");
       return { productId: "A-501", errorCode: "airtable_rate_limited" };
     });
+    const finalize = vi.fn(async () => {
+      events.push("finalize");
+    });
+    const notify = vi.fn(async () => {
+      events.push("notify");
+    });
+    const expectedResult = {
+      importRunId: "run-1",
+      succeededProductIds: ["A-502"],
+      failedGroups: [
+        {
+          groupId: "row-g1",
+          productId: "A-501",
+          errorCode: "airtable_rate_limited",
+        },
+      ],
+    };
 
     const result = await runImportWorkflow(
       processDeps(),
@@ -174,14 +191,39 @@ describe("runImportWorkflow", () => {
         }),
         processGroupAttempt: process,
         recordExhaustedFailure: record,
-        finalize: vi.fn().mockResolvedValue(undefined),
-        notify: vi.fn().mockResolvedValue(undefined),
+        finalize,
+        notify,
       },
     );
 
-    expect(
-      step.calls.find((call) => call.name === "process-group-row-g1"),
-    ).toMatchObject({ attempts: 6 });
+    expect(step.calls).toEqual([
+      { name: "download-and-group", options: null, attempts: 1 },
+      {
+        name: "process-group-row-g1",
+        options: {
+          retries: {
+            limit: 5,
+            delay: "10 seconds",
+            backoff: "exponential",
+          },
+        },
+        attempts: 6,
+      },
+      { name: "record-failed-group-row-g1", options: null, attempts: 1 },
+      {
+        name: "process-group-row-g2",
+        options: {
+          retries: {
+            limit: 5,
+            delay: "10 seconds",
+            backoff: "exponential",
+          },
+        },
+        attempts: 1,
+      },
+      { name: "finalize-checkpoint", options: null, attempts: 1 },
+      { name: "send-import-summary", options: null, attempts: 1 },
+    ]);
     expect(events).toEqual([
       "process-g1",
       "process-g1",
@@ -191,18 +233,12 @@ describe("runImportWorkflow", () => {
       "process-g1",
       "record-g1",
       "process-g2",
+      "finalize",
+      "notify",
     ]);
-    expect(result).toEqual({
-      importRunId: "run-1",
-      succeededProductIds: ["A-502"],
-      failedGroups: [
-        {
-          groupId: "row-g1",
-          productId: "A-501",
-          errorCode: "airtable_rate_limited",
-        },
-      ],
-    });
+    expect(result).toEqual(expectedResult);
+    expect(finalize).toHaveBeenCalledWith(true, 0, 10);
+    expect(notify).toHaveBeenCalledWith(expectedResult, null);
   });
 
   it("converts a non-retryable operational error once while preserving its code for failure recording", async () => {
