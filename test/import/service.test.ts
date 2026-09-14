@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
+import { NonRetryableError } from "cloudflare:workflows";
 import { testEnv } from "../helpers/env";
 import { fixedClock, sequentialIdGenerator } from "../helpers/fakes";
 import { createImportRepository } from "../../src/db/import-repository";
+import { createSequenceRepository } from "../../src/db/sequence-repository";
+import { createAuditLog } from "../../src/db/audit";
 import { createAssetStore } from "../../src/import/asset-store";
+import type { AirtableProductsClient } from "../../src/import/airtable-products";
 import {
   downloadAndGroupSnapshot,
+  finalizeImportRun,
+  processProductGroupAttempt,
+  recordExhaustedGroupFailure,
   type ImportServiceDeps,
+  type PersistedGroup,
+  type ProcessGroupDeps,
 } from "../../src/import/service";
 import type {
   AlbumSnapshot,
@@ -13,6 +22,7 @@ import type {
   SourcePhoto,
 } from "../../src/icloud/types";
 import type { MarkerDetector } from "../../src/import/marker";
+import { OperationalError } from "../../src/shared/errors";
 
 function sourcePhoto(id: string, position: number): SourcePhoto {
   return {
@@ -75,6 +85,117 @@ async function buildDeps(
     sourceAlbumId,
     firstImportCutoffDate: null,
   };
+}
+
+function fakeAirtable(
+  overrides: Partial<AirtableProductsClient> = {},
+): AirtableProductsClient {
+  return {
+    findBySystemGroupId: async () => null,
+    createProduct: async () => ({ recordId: "rec-created" }),
+    verifyProduct: async () => true,
+    deleteProduct: async () => {},
+    ...overrides,
+  };
+}
+
+async function buildProcessDeps(
+  airtableOverrides: Partial<AirtableProductsClient> = {},
+  groupHash = `task13-group-${crypto.randomUUID()}`,
+): Promise<{ deps: ProcessGroupDeps; group: PersistedGroup }> {
+  const env = testEnv();
+  await env.DB.batch([
+    env.DB.prepare(
+      "DELETE FROM product_groups WHERE group_hash LIKE 'task13-group-%'",
+    ),
+    env.DB.prepare("DELETE FROM sequences WHERE name = 'product_id'"),
+  ]);
+  const clock = fixedClock("2026-09-01T09:00:00.000Z");
+  const repo = createImportRepository(
+    env.DB,
+    sequentialIdGenerator("row"),
+    clock,
+  );
+  const sequences = createSequenceRepository(env.DB);
+  await sequences.bootstrap("product_id", 501);
+  const sourceAlbumId = `album-${crypto.randomUUID()}`;
+  const importRunId = `run-${crypto.randomUUID()}`;
+  await repo.createImportRun({
+    id: importRunId,
+    sourceAlbumId,
+    trigger: "cron",
+  });
+  const row = await repo.upsertPendingGroup({
+    id: crypto.randomUUID(),
+    importRunId,
+    ordinal: 0,
+    groupHash,
+    firstPhotoId: "m1",
+    lastPhotoId: "p2",
+  });
+  return {
+    deps: {
+      imageSource: {} as ImageSource,
+      marker: {} as MarkerDetector,
+      repo,
+      assets: createAssetStore(
+        env.IMAGES_BUCKET,
+        {
+          signingSecret: "test-secret",
+          publicBaseUrl: "https://example.workers.dev",
+        },
+        clock,
+      ),
+      clock,
+      ids: sequentialIdGenerator("id"),
+      sourceAlbumId,
+      firstImportCutoffDate: null,
+      sequences,
+      audit: createAuditLog(
+        env.DB,
+        sequentialIdGenerator(`audit-${crypto.randomUUID()}`),
+        clock,
+      ),
+      airtable: fakeAirtable(airtableOverrides),
+      productIdPrefix: "A",
+      assetUrlTtlSeconds: 300,
+    },
+    group: {
+      groupId: groupHash,
+      groupRowId: row.id,
+      ordinal: 0,
+      markerPhotoId: "m1",
+      attachablePhotos: [
+        { applePhotoId: "p1", r2Key: "assets/p1.jpg" },
+        { applePhotoId: "p2", r2Key: "assets/p2.jpg" },
+      ],
+    },
+  };
+}
+
+async function auditRows(correlationId: string): Promise<
+  Array<{
+    actor: string;
+    action: string;
+    before_value: string | null;
+    after_value: string | null;
+  }>
+> {
+  const result = await testEnv()
+    .DB.prepare(
+      `SELECT actor, action, before_value, after_value
+       FROM audit_events
+       WHERE correlation_id = ?
+       ORDER BY rowid`,
+    )
+    .bind(correlationId)
+    .all<{
+      actor: string;
+      action: string;
+      before_value: string | null;
+      after_value: string | null;
+    }>();
+  return result.results;
 }
 
 describe("downloadAndGroupSnapshot", () => {
@@ -518,4 +639,575 @@ describe("downloadAndGroupSnapshot", () => {
       .first<{ count: number }>();
     expect(groupCount).toEqual({ count: 0 });
   });
+});
+
+describe("processProductGroupAttempt", () => {
+  it("rejects a missing persisted group as non-retryable", async () => {
+    const { deps, group } = await buildProcessDeps();
+    group.groupId = `missing-${crypto.randomUUID()}`;
+    group.groupRowId = `missing-${crypto.randomUUID()}`;
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-correlation"),
+    ).rejects.toMatchObject({
+      code: "product_group_missing",
+      retryable: false,
+    });
+  });
+
+  it("persists one Product ID and attempt before surfacing a retryable create failure", async () => {
+    const { deps, group } = await buildProcessDeps({
+      createProduct: async () => {
+        throw new OperationalError(
+          "airtable_rate_limited",
+          "rate limited",
+          true,
+        );
+      },
+    });
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-correlation"),
+    ).rejects.toMatchObject({
+      code: "airtable_rate_limited",
+      retryable: true,
+    });
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "importing",
+      productId: "A-501",
+      attemptCount: 1,
+      failureReason: null,
+    });
+    expect(await auditRows("run-correlation")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_id_allocated",
+        before_value: null,
+        after_value: "A-501",
+      },
+      {
+        actor: "system:import",
+        action: "product_group_attempt_failed",
+        before_value: "A-501",
+        after_value: "airtable_rate_limited",
+      },
+    ]);
+  });
+
+  it("reuses the Product ID on a Workflow retry and records success", async () => {
+    let createCalls = 0;
+    const { deps, group } = await buildProcessDeps({
+      createProduct: async () => {
+        createCalls += 1;
+        if (createCalls === 1) {
+          throw new OperationalError(
+            "airtable_rate_limited",
+            "rate limited",
+            true,
+          );
+        }
+        return { recordId: "rec-ok" };
+      },
+    });
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-retry"),
+    ).rejects.toMatchObject({ code: "airtable_rate_limited" });
+    await expect(
+      processProductGroupAttempt(deps, group, "run-retry"),
+    ).resolves.toEqual({ outcome: "succeeded", productId: "A-501" });
+
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "succeeded",
+      productId: "A-501",
+      airtableRecordId: "rec-ok",
+      attemptCount: 2,
+    });
+    expect(await auditRows("run-retry")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_id_allocated",
+        before_value: null,
+        after_value: "A-501",
+      },
+      {
+        actor: "system:import",
+        action: "product_group_attempt_failed",
+        before_value: "A-501",
+        after_value: "airtable_rate_limited",
+      },
+      {
+        actor: "system:import",
+        action: "product_group_succeeded",
+        before_value: "importing",
+        after_value: "A-501",
+      },
+    ]);
+  });
+
+  it("submits the complete Airtable payload with signed photo URLs", async () => {
+    let submittedPayload:
+      | Parameters<AirtableProductsClient["createProduct"]>[0]
+      | null = null;
+    const signingCalls: Array<{ r2Key: string; ttlSeconds: number }> = [];
+    const { deps, group } = await buildProcessDeps(
+      {
+        createProduct: async (payload) => {
+          submittedPayload = payload;
+          return { recordId: "rec-payload" };
+        },
+      },
+      "task13-group-payload-contract",
+    );
+    deps.assets = {
+      putIfAbsent: async () => {
+        throw new Error("putIfAbsent is outside the Product creation boundary");
+      },
+      signUrl: async (r2Key, ttlSeconds) => {
+        signingCalls.push({ r2Key, ttlSeconds });
+        if (r2Key === "assets/p1.jpg") {
+          return "https://assets.example/signed-p1.jpg?ttl=300";
+        }
+        if (r2Key === "assets/p2.jpg") {
+          return "https://assets.example/signed-p2.jpg?ttl=300";
+        }
+        throw new Error(`unexpected asset key: ${r2Key}`);
+      },
+    };
+
+    await processProductGroupAttempt(deps, group, "run-payload");
+
+    expect(signingCalls).toEqual([
+      { r2Key: "assets/p1.jpg", ttlSeconds: 300 },
+      { r2Key: "assets/p2.jpg", ttlSeconds: 300 },
+    ]);
+    expect(submittedPayload).toEqual({
+      productId: "A-501",
+      systemGroupId: "task13-group-payload-contract",
+      uploadDate: "2026-09-01",
+      productImages: [
+        {
+          url: "https://assets.example/signed-p1.jpg?ttl=300",
+          filename: "p1.jpg",
+        },
+        {
+          url: "https://assets.example/signed-p2.jpg?ttl=300",
+          filename: "p2.jpg",
+        },
+      ],
+    });
+  });
+
+  it("rejects a malformed asset key before exposing it to Airtable", async () => {
+    const { deps, group } = await buildProcessDeps();
+    group.attachablePhotos[0] = {
+      applePhotoId: "p1",
+      r2Key: "assets/../secret.jpg",
+    };
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-invalid-key"),
+    ).rejects.toMatchObject({
+      code: "invalid_asset_key",
+      retryable: false,
+    });
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "importing",
+      productId: "A-501",
+      attemptCount: 1,
+    });
+    expect(await auditRows("run-invalid-key")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_id_allocated",
+        before_value: null,
+        after_value: "A-501",
+      },
+      {
+        actor: "system:import",
+        action: "product_group_attempt_failed",
+        before_value: "A-501",
+        after_value: "invalid_asset_key",
+      },
+    ]);
+  });
+
+  it("deletes a newly created invalid Airtable row and remains retryable", async () => {
+    let deletedRecordId: string | null = null;
+    const { deps, group } = await buildProcessDeps({
+      verifyProduct: async () => false,
+      deleteProduct: async (recordId) => {
+        deletedRecordId = recordId;
+      },
+    });
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-compensation"),
+    ).rejects.toMatchObject({
+      code: "airtable_verification_failed",
+      retryable: true,
+    });
+    expect(deletedRecordId).toBe("rec-created");
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "importing",
+      productId: "A-501",
+      airtableRecordId: "rec-created",
+      attemptCount: 1,
+    });
+    expect(await auditRows("run-compensation")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_id_allocated",
+        before_value: null,
+        after_value: "A-501",
+      },
+      {
+        actor: "system:import",
+        action: "product_group_attempt_failed",
+        before_value: "A-501",
+        after_value: "airtable_verification_failed",
+      },
+    ]);
+  });
+
+  it("surfaces newly created row cleanup failure as retryable", async () => {
+    const { deps, group } = await buildProcessDeps({
+      verifyProduct: async () => false,
+      deleteProduct: async () => {
+        throw new Error("delete unavailable");
+      },
+    });
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-cleanup-failure"),
+    ).rejects.toMatchObject({
+      code: "airtable_cleanup_failed",
+      message: "delete unavailable",
+      retryable: true,
+    });
+    expect(await auditRows("run-cleanup-failure")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_id_allocated",
+        before_value: null,
+        after_value: "A-501",
+      },
+      {
+        actor: "system:import",
+        action: "product_group_attempt_failed",
+        before_value: "A-501",
+        after_value: "airtable_cleanup_failed",
+      },
+    ]);
+  });
+
+  it("verifies and adopts a response-lost Airtable row before recording success", async () => {
+    const verificationCalls: Array<{
+      recordId: string;
+      expectedImageCount: number;
+    }> = [];
+    const { deps, group } = await buildProcessDeps({
+      findBySystemGroupId: async () => ({
+        recordId: "rec-existing",
+        productId: "A-777",
+      }),
+      createProduct: async () => {
+        throw new Error("recovery must not create another Airtable row");
+      },
+      verifyProduct: async (recordId, expectedImageCount) => {
+        verificationCalls.push({ recordId, expectedImageCount });
+        return true;
+      },
+    });
+    await deps.repo.setGroupState(group.groupRowId, "importing", {
+      productId: "A-501",
+    });
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-recovery"),
+    ).resolves.toEqual({ outcome: "succeeded", productId: "A-777" });
+
+    expect(verificationCalls).toEqual([
+      { recordId: "rec-existing", expectedImageCount: 2 },
+    ]);
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "succeeded",
+      productId: "A-777",
+      airtableRecordId: "rec-existing",
+      attemptCount: 1,
+    });
+    expect(await auditRows("run-recovery")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_group_succeeded",
+        before_value: "importing",
+        after_value: "A-777",
+      },
+    ]);
+  });
+
+  it("deletes an invalid response-lost recovery candidate and retries", async () => {
+    let deletedRecordId: string | null = null;
+    const { deps, group } = await buildProcessDeps({
+      findBySystemGroupId: async () => ({
+        recordId: "rec-existing",
+        productId: "A-501",
+      }),
+      verifyProduct: async () => false,
+      deleteProduct: async (recordId) => {
+        deletedRecordId = recordId;
+      },
+    });
+    await deps.repo.setGroupState(group.groupRowId, "importing", {
+      productId: "A-501",
+    });
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-invalid-recovery"),
+    ).rejects.toMatchObject({
+      code: "airtable_verification_failed",
+      retryable: true,
+    });
+
+    expect(deletedRecordId).toBe("rec-existing");
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "importing",
+      productId: "A-501",
+      airtableRecordId: null,
+      attemptCount: 1,
+    });
+    expect(await auditRows("run-invalid-recovery")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_group_attempt_failed",
+        before_value: "A-501",
+        after_value: "airtable_verification_failed",
+      },
+    ]);
+  });
+
+  it("classifies invalid recovery candidate cleanup failure as retryable", async () => {
+    const { deps, group } = await buildProcessDeps({
+      findBySystemGroupId: async () => ({
+        recordId: "rec-existing",
+        productId: "A-501",
+      }),
+      verifyProduct: async () => false,
+      deleteProduct: async () => {
+        throw new Error("recovery delete unavailable");
+      },
+    });
+    await deps.repo.setGroupState(group.groupRowId, "importing", {
+      productId: "A-501",
+    });
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-recovery-cleanup"),
+    ).rejects.toMatchObject({
+      code: "airtable_cleanup_failed",
+      message: "recovery delete unavailable",
+      retryable: true,
+    });
+    expect(await auditRows("run-recovery-cleanup")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_group_attempt_failed",
+        before_value: "A-501",
+        after_value: "airtable_cleanup_failed",
+      },
+    ]);
+  });
+
+  it("preserves a recovery verification error without deleting an unknown-validity row", async () => {
+    const deletedRecordIds: string[] = [];
+    const { deps, group } = await buildProcessDeps({
+      findBySystemGroupId: async () => ({
+        recordId: "rec-unknown-validity",
+        productId: "A-501",
+      }),
+      verifyProduct: async () => {
+        throw new OperationalError(
+          "airtable_verify_failed",
+          "verification unavailable",
+          true,
+        );
+      },
+      deleteProduct: async (recordId) => {
+        deletedRecordIds.push(recordId);
+      },
+    });
+    await deps.repo.setGroupState(group.groupRowId, "importing", {
+      productId: "A-501",
+    });
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-verify-error"),
+    ).rejects.toMatchObject({
+      code: "airtable_verify_failed",
+      message: "verification unavailable",
+      retryable: true,
+    });
+    expect(deletedRecordIds).toEqual([]);
+    expect(await auditRows("run-verify-error")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_group_attempt_failed",
+        before_value: "A-501",
+        after_value: "airtable_verify_failed",
+      },
+    ]);
+  });
+
+  it("operationalizes an unknown recovery verification error for Workflow retry", async () => {
+    const deletedRecordIds: string[] = [];
+    const { deps, group } = await buildProcessDeps({
+      findBySystemGroupId: async () => ({
+        recordId: "rec-unknown-error",
+        productId: "A-501",
+      }),
+      verifyProduct: async () => {
+        throw new Error("verification transport offline");
+      },
+      deleteProduct: async (recordId) => {
+        deletedRecordIds.push(recordId);
+      },
+    });
+    await deps.repo.setGroupState(group.groupRowId, "importing", {
+      productId: "A-501",
+    });
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-unknown-verify-error"),
+    ).rejects.toMatchObject({
+      code: "product_group_attempt_failed",
+      message: "verification transport offline",
+      retryable: true,
+    });
+    expect(deletedRecordIds).toEqual([]);
+    expect(await auditRows("run-unknown-verify-error")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_group_attempt_failed",
+        before_value: "A-501",
+        after_value: "product_group_attempt_failed",
+      },
+    ]);
+  });
+});
+
+describe("recordExhaustedGroupFailure", () => {
+  it("marks failed only after Workflow gives up and preserves the burned Product ID", async () => {
+    const { deps, group } = await buildProcessDeps();
+    await deps.repo.setGroupState(group.groupRowId, "importing", {
+      productId: "A-501",
+      attemptCount: 6,
+    });
+
+    const result = await recordExhaustedGroupFailure(
+      deps,
+      group,
+      "run-exhausted",
+      new OperationalError("airtable_rate_limited", "rate limited", true),
+    );
+
+    expect(result).toEqual({
+      productId: "A-501",
+      errorCode: "airtable_rate_limited",
+    });
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "failed",
+      productId: "A-501",
+      attemptCount: 6,
+      failureReason: "airtable_rate_limited",
+    });
+    expect(await auditRows("run-exhausted")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_group_failed",
+        before_value: "importing",
+        after_value: "airtable_rate_limited",
+      },
+    ]);
+  });
+
+  it("recovers the operational code from NonRetryableError.name", async () => {
+    const { deps, group } = await buildProcessDeps();
+    const wrapped = new NonRetryableError(
+      "Product group row is missing",
+      "product_group_missing",
+    );
+
+    const result = await recordExhaustedGroupFailure(
+      deps,
+      group,
+      "run-non-retryable",
+      wrapped,
+    );
+
+    expect(result).toEqual({
+      productId: null,
+      errorCode: "product_group_missing",
+    });
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "failed",
+      productId: null,
+      failureReason: "product_group_missing",
+    });
+    expect(await auditRows("run-non-retryable")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_group_failed",
+        before_value: "importing",
+        after_value: "product_group_missing",
+      },
+    ]);
+  });
+});
+
+describe("finalizeImportRun", () => {
+  it.each([
+    { hadFailures: false, expectedStatus: "completed" },
+    { hadFailures: true, expectedStatus: "completed_with_failures" },
+  ])(
+    "stores $expectedStatus and advances the checkpoint atomically",
+    async ({ hadFailures, expectedStatus }) => {
+      const env = testEnv();
+      const clock = fixedClock("2026-09-01T09:00:00.000Z");
+      const repo = createImportRepository(
+        env.DB,
+        sequentialIdGenerator("row"),
+        clock,
+      );
+      const sourceAlbumId = `album-${crypto.randomUUID()}`;
+      const importRunId = `run-${crypto.randomUUID()}`;
+      await repo.createImportRun({
+        id: importRunId,
+        sourceAlbumId,
+        trigger: "cron",
+      });
+
+      await finalizeImportRun(
+        repo,
+        importRunId,
+        sourceAlbumId,
+        hadFailures,
+        3,
+        42,
+      );
+
+      expect(
+        await env.DB.prepare(
+          `SELECT status, orphan_photo_count
+           FROM import_runs
+           WHERE id = ?`,
+        )
+          .bind(importRunId)
+          .first(),
+      ).toEqual({
+        status: expectedStatus,
+        orphan_photo_count: 3,
+      });
+      expect(await repo.getCheckpoint(sourceAlbumId)).toBe(42);
+    },
+  );
 });

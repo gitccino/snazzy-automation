@@ -207,6 +207,29 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
            VALUES (?, ?, ?, ?, 'pending', ?, ?, 0, ?, ?)
            ON CONFLICT(group_hash) DO UPDATE SET
              import_run_id = excluded.import_run_id,
+             ordinal = excluded.ordinal,
+             first_photo_id = excluded.first_photo_id,
+             last_photo_id = excluded.last_photo_id,
+             state = CASE
+               WHEN product_groups.state = 'failed'
+                 AND product_groups.import_run_id <> excluded.import_run_id
+               THEN 'pending' ELSE product_groups.state END,
+             product_id = CASE
+               WHEN product_groups.state = 'failed'
+                 AND product_groups.import_run_id <> excluded.import_run_id
+               THEN NULL ELSE product_groups.product_id END,
+             airtable_record_id = CASE
+               WHEN product_groups.state = 'failed'
+                 AND product_groups.import_run_id <> excluded.import_run_id
+               THEN NULL ELSE product_groups.airtable_record_id END,
+             attempt_count = CASE
+               WHEN product_groups.state = 'failed'
+                 AND product_groups.import_run_id <> excluded.import_run_id
+               THEN 0 ELSE product_groups.attempt_count END,
+             failure_reason = CASE
+               WHEN product_groups.state = 'failed'
+                 AND product_groups.import_run_id <> excluded.import_run_id
+               THEN NULL ELSE product_groups.failure_reason END,
              updated_at = excluded.updated_at`,
         )
         .bind(input.id, input.importRunId, input.ordinal, input.groupHash, input.firstPhotoId, input.lastPhotoId, now, now)

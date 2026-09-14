@@ -1,9 +1,13 @@
 import type { Clock, IdGenerator } from "../env";
 import type { ImportRepository } from "../db/import-repository";
+import type { SequenceRepository } from "../db/sequence-repository";
+import type { AuditLog } from "../db/audit";
 import type { AlbumSnapshot, ImageSource, SourcePhoto } from "../icloud/types";
 import { OperationalError } from "../shared/errors";
 import { sha256Hex } from "../shared/ids";
+import { todayBangkokDate } from "../shared/time";
 import type { AssetStore } from "./asset-store";
+import type { AirtableProductsClient } from "./airtable-products";
 import {
   computeGroupHash,
   groupByMarkers,
@@ -35,6 +39,46 @@ export interface DownloadAndGroupOutcome {
   pendingGroups: PersistedGroup[];
   orphanRange: OrphanRange | null;
   checkpointPosition: number;
+}
+
+export interface ProcessGroupDeps extends ImportServiceDeps {
+  sequences: SequenceRepository;
+  audit: AuditLog;
+  airtable: AirtableProductsClient;
+  productIdPrefix: string;
+  assetUrlTtlSeconds: number;
+}
+
+export interface ProcessGroupOutcome {
+  outcome: "succeeded";
+  productId: string;
+}
+
+function operationalizeGroupError(error: unknown): OperationalError {
+  return error instanceof OperationalError
+    ? error
+    : new OperationalError(
+        "product_group_attempt_failed",
+        error instanceof Error ? error.message : "Product group attempt failed",
+        true,
+      );
+}
+
+async function deleteInvalidAirtableProduct(
+  airtable: AirtableProductsClient,
+  recordId: string,
+): Promise<void> {
+  try {
+    await airtable.deleteProduct(recordId);
+  } catch (cleanupError) {
+    throw new OperationalError(
+      "airtable_cleanup_failed",
+      cleanupError instanceof Error
+        ? cleanupError.message
+        : "Airtable partial-row cleanup failed",
+      true,
+    );
+  }
 }
 
 function extensionFor(mediaType: SourcePhoto["mediaType"]): string {
@@ -166,4 +210,175 @@ export async function downloadAndGroupSnapshot(
   );
 
   return { pendingGroups, orphanRange, checkpointPosition };
+}
+
+export async function processProductGroupAttempt(
+  deps: ProcessGroupDeps,
+  group: PersistedGroup,
+  importRunId: string,
+): Promise<ProcessGroupOutcome> {
+  const current = await deps.repo.findGroupByHash(group.groupId);
+  if (current === null) {
+    throw new OperationalError(
+      "product_group_missing",
+      "Product group row is missing",
+      false,
+    );
+  }
+
+  let productId = current.productId;
+  if (productId === null) {
+    const nextNumber = await deps.sequences.allocateNext("product_id");
+    productId = `${deps.productIdPrefix}-${nextNumber}`;
+    await deps.repo.setGroupState(group.groupRowId, "importing", { productId });
+    await deps.audit.record({
+      correlationId: importRunId,
+      actor: "system:import",
+      action: "product_id_allocated",
+      beforeValue: null,
+      afterValue: productId,
+    });
+  }
+
+  await deps.repo.setGroupState(group.groupRowId, "importing", {
+    attemptCount: current.attemptCount + 1,
+    failureReason: null,
+  });
+
+  try {
+    const existing = await deps.airtable.findBySystemGroupId(group.groupId);
+    if (existing !== null) {
+      const existingVerified = await deps.airtable.verifyProduct(
+        existing.recordId,
+        group.attachablePhotos.length,
+      );
+      if (!existingVerified) {
+        await deleteInvalidAirtableProduct(deps.airtable, existing.recordId);
+        throw new OperationalError(
+          "airtable_verification_failed",
+          "Airtable Product verification failed",
+          true,
+        );
+      }
+      await deps.repo.setGroupState(group.groupRowId, "succeeded", {
+        productId: existing.productId,
+        airtableRecordId: existing.recordId,
+        failureReason: null,
+      });
+      await deps.audit.record({
+        correlationId: importRunId,
+        actor: "system:import",
+        action: "product_group_succeeded",
+        beforeValue: "importing",
+        afterValue: existing.productId,
+      });
+      return { outcome: "succeeded", productId: existing.productId };
+    }
+    const productImages = await Promise.all(
+      group.attachablePhotos.map(async (photo) => {
+        if (!/^assets\/[A-Za-z0-9._-]+$/.test(photo.r2Key)) {
+          throw new OperationalError(
+            "invalid_asset_key",
+            `Cannot expose malformed asset key for ${photo.applePhotoId}`,
+            false,
+          );
+        }
+        return {
+          url: await deps.assets.signUrl(
+            photo.r2Key,
+            deps.assetUrlTtlSeconds,
+          ),
+          filename: photo.r2Key.slice("assets/".length),
+        };
+      }),
+    );
+    const created = await deps.airtable.createProduct({
+      productId,
+      systemGroupId: group.groupId,
+      uploadDate: todayBangkokDate(deps.clock),
+      productImages,
+    });
+    await deps.repo.setGroupState(group.groupRowId, "importing", {
+      airtableRecordId: created.recordId,
+    });
+    if (
+      !(await deps.airtable.verifyProduct(
+        created.recordId,
+        group.attachablePhotos.length,
+      ))
+    ) {
+      await deleteInvalidAirtableProduct(deps.airtable, created.recordId);
+      throw new OperationalError(
+        "airtable_verification_failed",
+        "Airtable Product verification failed",
+        true,
+      );
+    }
+    await deps.repo.setGroupState(group.groupRowId, "succeeded", {
+      productId,
+      airtableRecordId: created.recordId,
+      failureReason: null,
+    });
+    await deps.audit.record({
+      correlationId: importRunId,
+      actor: "system:import",
+      action: "product_group_succeeded",
+      beforeValue: "importing",
+      afterValue: productId,
+    });
+    return { outcome: "succeeded", productId };
+  } catch (error) {
+    const operational = operationalizeGroupError(error);
+    await deps.audit.record({
+      correlationId: importRunId,
+      actor: "system:import",
+      action: "product_group_attempt_failed",
+      beforeValue: productId,
+      afterValue: operational.code,
+    });
+    throw operational;
+  }
+}
+
+export async function recordExhaustedGroupFailure(
+  deps: Pick<ProcessGroupDeps, "repo" | "audit">,
+  group: PersistedGroup,
+  importRunId: string,
+  error: unknown,
+): Promise<{ productId: string | null; errorCode: string }> {
+  const current = await deps.repo.findGroupByHash(group.groupId);
+  const errorCode =
+    error instanceof OperationalError
+      ? error.code
+      : error instanceof Error && /^[a-z][a-z0-9_]*$/.test(error.name)
+        ? error.name
+        : "unknown_error";
+  await deps.repo.setGroupState(group.groupRowId, "failed", {
+    failureReason: errorCode,
+  });
+  await deps.audit.record({
+    correlationId: importRunId,
+    actor: "system:import",
+    action: "product_group_failed",
+    beforeValue: "importing",
+    afterValue: errorCode,
+  });
+  return { productId: current?.productId ?? null, errorCode };
+}
+
+export async function finalizeImportRun(
+  repo: ImportRepository,
+  importRunId: string,
+  sourceAlbumId: string,
+  hadFailures: boolean,
+  orphanPhotoCount: number,
+  checkpointPosition: number,
+): Promise<void> {
+  await repo.finalizeImportRun({
+    id: importRunId,
+    sourceAlbumId,
+    status: hadFailures ? "completed_with_failures" : "completed",
+    orphanPhotoCount,
+    checkpointPosition,
+  });
 }

@@ -181,4 +181,83 @@ describe("import-repository", () => {
 
     expect(await r.findGroupByHash(group.groupHash)).toMatchObject({ failureReason: null });
   });
+
+  it("resets an exhausted group only when a later import run sees the same group hash", async () => {
+    const r = repo();
+    const albumId = `album-${crypto.randomUUID()}`;
+    const firstRunId = crypto.randomUUID();
+    const secondRunId = crypto.randomUUID();
+    const groupHash = `hash-${crypto.randomUUID()}`;
+    await r.createImportRun({
+      id: firstRunId,
+      sourceAlbumId: albumId,
+      trigger: "cron",
+    });
+
+    const first = await r.upsertPendingGroup({
+      id: crypto.randomUUID(),
+      importRunId: firstRunId,
+      ordinal: 0,
+      groupHash,
+      firstPhotoId: "m1",
+      lastPhotoId: "p9",
+    });
+    await r.setGroupState(first.id, "failed", {
+      productId: "TASK13-A-501",
+      airtableRecordId: "rec-partial",
+      failureReason: "airtable_rate_limited",
+      attemptCount: 6,
+    });
+
+    const sameRun = await r.upsertPendingGroup({
+      id: crypto.randomUUID(),
+      importRunId: firstRunId,
+      ordinal: 0,
+      groupHash,
+      firstPhotoId: "m1",
+      lastPhotoId: "p9",
+    });
+    expect(sameRun).toMatchObject({
+      id: first.id,
+      state: "failed",
+      productId: "TASK13-A-501",
+      airtableRecordId: "rec-partial",
+      attemptCount: 6,
+    });
+
+    await r.finalizeImportRun({
+      id: firstRunId,
+      sourceAlbumId: albumId,
+      status: "completed_with_failures",
+      orphanPhotoCount: 0,
+      checkpointPosition: 9,
+    });
+    await r.createImportRun({
+      id: secondRunId,
+      sourceAlbumId: albumId,
+      trigger: "line",
+    });
+
+    const retried = await r.upsertPendingGroup({
+      id: crypto.randomUUID(),
+      importRunId: secondRunId,
+      ordinal: 1,
+      groupHash,
+      firstPhotoId: "m1-new",
+      lastPhotoId: "p9-new",
+    });
+
+    expect(retried).toMatchObject({
+      id: first.id,
+      importRunId: secondRunId,
+      ordinal: 1,
+      firstPhotoId: "m1-new",
+      lastPhotoId: "p9-new",
+      state: "pending",
+      productId: null,
+      airtableRecordId: null,
+      attemptCount: 0,
+      failureReason: null,
+    });
+  });
 });
