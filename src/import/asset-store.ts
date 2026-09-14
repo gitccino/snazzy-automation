@@ -16,6 +16,10 @@ async function hmacHex(secret: string, payload: string): Promise<string> {
   return [...new Uint8Array(signature)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+function isFiniteInteger(value: number): boolean {
+  return Number.isFinite(value) && Number.isInteger(value);
+}
+
 export function createAssetStore(bucket: R2Bucket, config: { signingSecret: string; publicBaseUrl: string }, clock: Clock): AssetStore {
   return {
     async putIfAbsent(contentHash, extension, body, contentType) {
@@ -28,10 +32,13 @@ export function createAssetStore(bucket: R2Bucket, config: { signingSecret: stri
     },
 
     async signUrl(r2Key, ttlSeconds) {
+      if (!isFiniteInteger(ttlSeconds) || ttlSeconds <= 0) {
+        throw new RangeError("ttlSeconds must be a positive finite integer");
+      }
       const expiresAt = Math.floor(clock.now().getTime() / 1000) + ttlSeconds;
       const payload = `${r2Key}:${expiresAt}`;
       const signature = await hmacHex(config.signingSecret, payload);
-      const url = new URL(`${config.publicBaseUrl}/assets/${encodeURIComponent(r2Key)}`);
+      const url = new URL(`/assets/${encodeURIComponent(r2Key)}`, config.publicBaseUrl);
       url.searchParams.set("exp", String(expiresAt));
       url.searchParams.set("sig", signature);
       return url.toString();
@@ -46,6 +53,9 @@ export async function verifyAssetToken(
   signingSecret: string,
   nowEpochSeconds: number
 ): Promise<boolean> {
+  if (!isFiniteInteger(expiresAtEpochSeconds) || !isFiniteInteger(nowEpochSeconds)) {
+    return false;
+  }
   if (nowEpochSeconds > expiresAtEpochSeconds) {
     return false;
   }
