@@ -642,6 +642,38 @@ describe("downloadAndGroupSnapshot", () => {
 });
 
 describe("processProductGroupAttempt", () => {
+  it("short-circuits a group that is already succeeded", async () => {
+    const { deps, group } = await buildProcessDeps({
+      findBySystemGroupId: async () => {
+        throw new Error("a terminal group must not call Airtable");
+      },
+      createProduct: async () => {
+        throw new Error("a terminal group must not create an Airtable row");
+      },
+      verifyProduct: async () => {
+        throw new Error("a terminal group must not be verified again");
+      },
+      deleteProduct: async () => {
+        throw new Error("a terminal group must not delete an Airtable row");
+      },
+    });
+    await deps.repo.setGroupState(group.groupRowId, "succeeded", {
+      productId: "A-501",
+      airtableRecordId: "rec-terminal",
+    });
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-terminal"),
+    ).resolves.toEqual({ outcome: "succeeded", productId: "A-501" });
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "succeeded",
+      productId: "A-501",
+      airtableRecordId: "rec-terminal",
+      attemptCount: 0,
+    });
+    expect(await auditRows("run-terminal")).toEqual([]);
+  });
+
   it("rejects a missing persisted group as non-retryable", async () => {
     const { deps, group } = await buildProcessDeps();
     group.groupId = `missing-${crypto.randomUUID()}`;
@@ -690,6 +722,108 @@ describe("processProductGroupAttempt", () => {
         action: "product_group_attempt_failed",
         before_value: "A-501",
         after_value: "airtable_rate_limited",
+      },
+    ]);
+  });
+
+  it("burns but does not assign a Product ID when its allocation audit fails", async () => {
+    const { deps, group } = await buildProcessDeps();
+    const realAudit = deps.audit;
+    let allocationAuditAttempts = 0;
+    deps.audit = {
+      record: async (entry) => {
+        if (
+          entry.action === "product_id_allocated" &&
+          allocationAuditAttempts++ === 0
+        ) {
+          throw new Error("allocation audit unavailable");
+        }
+        await realAudit.record(entry);
+      },
+    };
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-allocation-audit"),
+    ).rejects.toMatchObject({
+      code: "product_group_attempt_failed",
+      message: "allocation audit unavailable",
+      retryable: true,
+    });
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "pending",
+      productId: null,
+      attemptCount: 0,
+      failureReason: null,
+    });
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-allocation-audit"),
+    ).resolves.toEqual({ outcome: "succeeded", productId: "A-502" });
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "succeeded",
+      productId: "A-502",
+      attemptCount: 1,
+    });
+    expect(await auditRows("run-allocation-audit")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_group_attempt_failed",
+        before_value: "A-501",
+        after_value: "product_group_attempt_failed",
+      },
+      {
+        actor: "system:import",
+        action: "product_id_allocated",
+        before_value: null,
+        after_value: "A-502",
+      },
+      {
+        actor: "system:import",
+        action: "product_group_succeeded",
+        before_value: "importing",
+        after_value: "A-502",
+      },
+    ]);
+  });
+
+  it("operationalizes an attempt-failure audit outage for Workflow retry", async () => {
+    const { deps, group } = await buildProcessDeps({
+      createProduct: async () => {
+        throw new OperationalError(
+          "airtable_rate_limited",
+          "rate limited",
+          true,
+        );
+      },
+    });
+    const realAudit = deps.audit;
+    deps.audit = {
+      record: async (entry) => {
+        if (entry.action === "product_group_attempt_failed") {
+          throw new Error("attempt failure audit unavailable");
+        }
+        await realAudit.record(entry);
+      },
+    };
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-attempt-audit"),
+    ).rejects.toMatchObject({
+      code: "product_group_attempt_failed",
+      message: "attempt failure audit unavailable",
+      retryable: true,
+    });
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "importing",
+      productId: "A-501",
+      attemptCount: 1,
+    });
+    expect(await auditRows("run-attempt-audit")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_id_allocated",
+        before_value: null,
+        after_value: "A-501",
       },
     ]);
   });
@@ -745,16 +879,99 @@ describe("processProductGroupAttempt", () => {
     ]);
   });
 
+  it("keeps verified success importing until its audit succeeds, then recovers on retry", async () => {
+    let findCalls = 0;
+    let createCalls = 0;
+    const { deps, group } = await buildProcessDeps({
+      findBySystemGroupId: async () => {
+        findCalls += 1;
+        return findCalls === 1
+          ? null
+          : { recordId: "rec-audit-recovery", productId: "A-501" };
+      },
+      createProduct: async () => {
+        createCalls += 1;
+        return { recordId: "rec-audit-recovery" };
+      },
+    });
+    const realAudit = deps.audit;
+    let successAuditAttempts = 0;
+    deps.audit = {
+      record: async (entry) => {
+        if (
+          entry.action === "product_group_succeeded" &&
+          successAuditAttempts++ === 0
+        ) {
+          throw new Error("success audit unavailable");
+        }
+        await realAudit.record(entry);
+      },
+    };
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-success-audit"),
+    ).rejects.toMatchObject({
+      code: "product_group_attempt_failed",
+      message: "success audit unavailable",
+      retryable: true,
+    });
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "importing",
+      productId: "A-501",
+      airtableRecordId: "rec-audit-recovery",
+      attemptCount: 1,
+    });
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-success-audit"),
+    ).resolves.toEqual({ outcome: "succeeded", productId: "A-501" });
+    expect(createCalls).toBe(1);
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "succeeded",
+      productId: "A-501",
+      airtableRecordId: "rec-audit-recovery",
+      attemptCount: 2,
+    });
+    expect(await auditRows("run-success-audit")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_id_allocated",
+        before_value: null,
+        after_value: "A-501",
+      },
+      {
+        actor: "system:import",
+        action: "product_group_attempt_failed",
+        before_value: "A-501",
+        after_value: "product_group_attempt_failed",
+      },
+      {
+        actor: "system:import",
+        action: "product_group_succeeded",
+        before_value: "importing",
+        after_value: "A-501",
+      },
+    ]);
+  });
+
   it("submits the complete Airtable payload with signed photo URLs", async () => {
     let submittedPayload:
       | Parameters<AirtableProductsClient["createProduct"]>[0]
       | null = null;
+    const verificationCalls: Array<{
+      recordId: string;
+      expected: Parameters<AirtableProductsClient["verifyProduct"]>[1];
+    }> = [];
     const signingCalls: Array<{ r2Key: string; ttlSeconds: number }> = [];
     const { deps, group } = await buildProcessDeps(
       {
         createProduct: async (payload) => {
           submittedPayload = payload;
           return { recordId: "rec-payload" };
+        },
+        verifyProduct: async (recordId, expected) => {
+          verificationCalls.push({ recordId, expected });
+          return true;
         },
       },
       "task13-group-payload-contract",
@@ -796,6 +1013,17 @@ describe("processProductGroupAttempt", () => {
         },
       ],
     });
+    expect(verificationCalls).toEqual([
+      {
+        recordId: "rec-payload",
+        expected: {
+          productId: "A-501",
+          systemGroupId: "task13-group-payload-contract",
+          uploadDate: "2026-09-01",
+          imageCount: 2,
+        },
+      },
+    ]);
   });
 
   it("rejects a malformed asset key before exposing it to Airtable", async () => {
@@ -904,21 +1132,29 @@ describe("processProductGroupAttempt", () => {
   it("verifies and adopts a response-lost Airtable row before recording success", async () => {
     const verificationCalls: Array<{
       recordId: string;
-      expectedImageCount: number;
+      expected: {
+        productId: string;
+        systemGroupId: string;
+        uploadDate: string;
+        imageCount: number;
+      };
     }> = [];
-    const { deps, group } = await buildProcessDeps({
-      findBySystemGroupId: async () => ({
-        recordId: "rec-existing",
-        productId: "A-777",
-      }),
-      createProduct: async () => {
-        throw new Error("recovery must not create another Airtable row");
+    const { deps, group } = await buildProcessDeps(
+      {
+        findBySystemGroupId: async () => ({
+          recordId: "rec-existing",
+          productId: "A-777",
+        }),
+        createProduct: async () => {
+          throw new Error("recovery must not create another Airtable row");
+        },
+        verifyProduct: async (recordId, expected) => {
+          verificationCalls.push({ recordId, expected });
+          return true;
+        },
       },
-      verifyProduct: async (recordId, expectedImageCount) => {
-        verificationCalls.push({ recordId, expectedImageCount });
-        return true;
-      },
-    });
+      "task13-group-recovery",
+    );
     await deps.repo.setGroupState(group.groupRowId, "importing", {
       productId: "A-501",
     });
@@ -928,7 +1164,15 @@ describe("processProductGroupAttempt", () => {
     ).resolves.toEqual({ outcome: "succeeded", productId: "A-777" });
 
     expect(verificationCalls).toEqual([
-      { recordId: "rec-existing", expectedImageCount: 2 },
+      {
+        recordId: "rec-existing",
+        expected: {
+          productId: "A-777",
+          systemGroupId: "task13-group-recovery",
+          uploadDate: "2026-09-01",
+          imageCount: 2,
+        },
+      },
     ]);
     expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
       state: "succeeded",
@@ -1096,6 +1340,35 @@ describe("processProductGroupAttempt", () => {
 });
 
 describe("recordExhaustedGroupFailure", () => {
+  it("does not downgrade a group that already reached succeeded", async () => {
+    const { deps, group } = await buildProcessDeps();
+    await deps.repo.setGroupState(group.groupRowId, "succeeded", {
+      productId: "A-501",
+      airtableRecordId: "rec-terminal",
+      attemptCount: 2,
+    });
+
+    const result = await recordExhaustedGroupFailure(
+      deps,
+      group,
+      "run-late-exhaustion",
+      new OperationalError("airtable_rate_limited", "rate limited", true),
+    );
+
+    expect(result).toEqual({
+      productId: "A-501",
+      errorCode: "airtable_rate_limited",
+    });
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "succeeded",
+      productId: "A-501",
+      airtableRecordId: "rec-terminal",
+      attemptCount: 2,
+      failureReason: null,
+    });
+    expect(await auditRows("run-late-exhaustion")).toEqual([]);
+  });
+
   it("marks failed only after Workflow gives up and preserves the burned Product ID", async () => {
     const { deps, group } = await buildProcessDeps();
     await deps.repo.setGroupState(group.groupRowId, "importing", {

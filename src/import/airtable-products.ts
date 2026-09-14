@@ -17,6 +17,9 @@ const CreateResponseSchema = z.object({
 
 const VerifyResponseSchema = z.object({
   fields: z.object({
+    "Product ID": z.string().min(1),
+    "System Group ID": z.string().min(1),
+    "Upload Date": z.string().min(1),
     "Product Images": z.array(z.object({ url: z.string().min(1) })).optional(),
   }),
 });
@@ -33,7 +36,15 @@ export interface AirtableProductsClient {
     systemGroupId: string,
   ): Promise<{ recordId: string; productId: string } | null>;
   createProduct(payload: AirtableProductPayload): Promise<{ recordId: string }>;
-  verifyProduct(recordId: string, expectedImageCount: number): Promise<boolean>;
+  verifyProduct(
+    recordId: string,
+    expected: {
+      productId: string;
+      systemGroupId: string;
+      uploadDate: string;
+      imageCount: number;
+    },
+  ): Promise<boolean>;
   deleteProduct(recordId: string): Promise<void>;
 }
 
@@ -117,14 +128,23 @@ export function createAirtableProductsClient(config: {
       return { recordId: body.id };
     },
 
-    async verifyProduct(recordId, expectedImageCount) {
+    async verifyProduct(recordId, expected) {
       const response = await config.fetch(
         `${baseUrl(config.baseId, config.tableId)}/${recordId}`,
         { headers },
       );
       if (!response.ok) await throwOnError(response, "verify");
-      const body = await parseAirtableJson(response, VerifyResponseSchema, "verify");
-      return (body.fields["Product Images"]?.length ?? 0) === expectedImageCount;
+      const body = await parseAirtableJson(
+        response,
+        VerifyResponseSchema,
+        "verify",
+      );
+      return (
+        body.fields["Product ID"] === expected.productId &&
+        body.fields["System Group ID"] === expected.systemGroupId &&
+        body.fields["Upload Date"] === expected.uploadDate &&
+        (body.fields["Product Images"]?.length ?? 0) === expected.imageCount
+      );
     },
 
     async deleteProduct(recordId) {

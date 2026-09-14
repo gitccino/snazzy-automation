@@ -119,7 +119,7 @@ describe("airtable-products client", () => {
     });
   });
 
-  it("verifyProduct checks the record has exactly the expected attachment count", async () => {
+  it("verifyProduct accepts a record matching every expected system field", async () => {
     const fetchFake = fakeFetch([
       {
         match: (req) => req.method === "GET" && req.url.includes("recNEW"),
@@ -127,15 +127,150 @@ describe("airtable-products client", () => {
           new Response(
             JSON.stringify({
               id: "recNEW",
-              fields: { "Product Images": [{ url: "a" }, { url: "b" }] },
+              fields: {
+                "Product ID": "A-501",
+                "System Group ID": "grouphash-1",
+                "Upload Date": "2026-09-01",
+                "Product Images": [{ url: "a" }, { url: "b" }],
+              },
             }),
             { status: 200 },
           ),
       },
     ]);
     const client = createAirtableProductsClient({ ...config, fetch: fetchFake });
-    expect(await client.verifyProduct("recNEW", 2)).toBe(true);
-    expect(await client.verifyProduct("recNEW", 3)).toBe(false);
+    expect(
+      await client.verifyProduct("recNEW", {
+        productId: "A-501",
+        systemGroupId: "grouphash-1",
+        uploadDate: "2026-09-01",
+        imageCount: 2,
+      }),
+    ).toBe(true);
+  });
+
+  it("verifyProduct rejects a mismatched Product ID", async () => {
+    const fetchFake = fakeFetch([
+      {
+        match: (req) => req.method === "GET" && req.url.includes("recNEW"),
+        respond: () =>
+          new Response(
+            JSON.stringify({
+              id: "recNEW",
+              fields: {
+                "Product ID": "A-999",
+                "System Group ID": "grouphash-1",
+                "Upload Date": "2026-09-01",
+                "Product Images": [{ url: "a" }, { url: "b" }],
+              },
+            }),
+            { status: 200 },
+          ),
+      },
+    ]);
+    const client = createAirtableProductsClient({ ...config, fetch: fetchFake });
+
+    expect(
+      await client.verifyProduct("recNEW", {
+        productId: "A-501",
+        systemGroupId: "grouphash-1",
+        uploadDate: "2026-09-01",
+        imageCount: 2,
+      }),
+    ).toBe(false);
+  });
+
+  it("verifyProduct rejects a mismatched System Group ID", async () => {
+    const fetchFake = fakeFetch([
+      {
+        match: (req) => req.method === "GET" && req.url.includes("recNEW"),
+        respond: () =>
+          new Response(
+            JSON.stringify({
+              id: "recNEW",
+              fields: {
+                "Product ID": "A-501",
+                "System Group ID": "different-group",
+                "Upload Date": "2026-09-01",
+                "Product Images": [{ url: "a" }, { url: "b" }],
+              },
+            }),
+            { status: 200 },
+          ),
+      },
+    ]);
+    const client = createAirtableProductsClient({ ...config, fetch: fetchFake });
+
+    expect(
+      await client.verifyProduct("recNEW", {
+        productId: "A-501",
+        systemGroupId: "grouphash-1",
+        uploadDate: "2026-09-01",
+        imageCount: 2,
+      }),
+    ).toBe(false);
+  });
+
+  it("verifyProduct rejects a mismatched Upload Date", async () => {
+    const fetchFake = fakeFetch([
+      {
+        match: (req) => req.method === "GET" && req.url.includes("recNEW"),
+        respond: () =>
+          new Response(
+            JSON.stringify({
+              id: "recNEW",
+              fields: {
+                "Product ID": "A-501",
+                "System Group ID": "grouphash-1",
+                "Upload Date": "2026-09-02",
+                "Product Images": [{ url: "a" }, { url: "b" }],
+              },
+            }),
+            { status: 200 },
+          ),
+      },
+    ]);
+    const client = createAirtableProductsClient({ ...config, fetch: fetchFake });
+
+    expect(
+      await client.verifyProduct("recNEW", {
+        productId: "A-501",
+        systemGroupId: "grouphash-1",
+        uploadDate: "2026-09-01",
+        imageCount: 2,
+      }),
+    ).toBe(false);
+  });
+
+  it("verifyProduct rejects a mismatched image count", async () => {
+    const fetchFake = fakeFetch([
+      {
+        match: (req) => req.method === "GET" && req.url.includes("recNEW"),
+        respond: () =>
+          new Response(
+            JSON.stringify({
+              id: "recNEW",
+              fields: {
+                "Product ID": "A-501",
+                "System Group ID": "grouphash-1",
+                "Upload Date": "2026-09-01",
+                "Product Images": [{ url: "a" }],
+              },
+            }),
+            { status: 200 },
+          ),
+      },
+    ]);
+    const client = createAirtableProductsClient({ ...config, fetch: fetchFake });
+
+    expect(
+      await client.verifyProduct("recNEW", {
+        productId: "A-501",
+        systemGroupId: "grouphash-1",
+        uploadDate: "2026-09-01",
+        imageCount: 2,
+      }),
+    ).toBe(false);
   });
 
   it("deleteProduct issues a DELETE against the record", async () => {
