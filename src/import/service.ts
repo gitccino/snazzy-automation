@@ -235,6 +235,9 @@ export async function processProductGroupAttempt(
     }
     return { outcome: "succeeded", productId: current.productId };
   }
+  const intendedUploadDate = todayBangkokDate({
+    now: () => new Date(current.createdAt),
+  });
 
   let productId = current.productId;
   try {
@@ -265,7 +268,7 @@ export async function processProductGroupAttempt(
         {
           productId: existing.productId,
           systemGroupId: group.groupId,
-          uploadDate: todayBangkokDate(deps.clock),
+          uploadDate: intendedUploadDate,
           imageCount: group.attachablePhotos.length,
         },
       );
@@ -312,7 +315,7 @@ export async function processProductGroupAttempt(
     const created = await deps.airtable.createProduct({
       productId,
       systemGroupId: group.groupId,
-      uploadDate: todayBangkokDate(deps.clock),
+      uploadDate: intendedUploadDate,
       productImages,
     });
     await deps.repo.setGroupState(group.groupRowId, "importing", {
@@ -324,7 +327,7 @@ export async function processProductGroupAttempt(
         {
           productId,
           systemGroupId: group.groupId,
-          uploadDate: todayBangkokDate(deps.clock),
+          uploadDate: intendedUploadDate,
           imageCount: group.attachablePhotos.length,
         },
       ))

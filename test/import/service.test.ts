@@ -1026,6 +1026,34 @@ describe("processProductGroupAttempt", () => {
     ]);
   });
 
+  it("keeps the persisted Upload Date when Bangkok midnight passes between creation and verification", async () => {
+    let submittedUploadDate: string | null = null;
+    const verifiedUploadDates: string[] = [];
+    const { deps, group } = await buildProcessDeps({
+      createProduct: async (payload) => {
+        submittedUploadDate = payload.uploadDate;
+        return { recordId: "rec-midnight" };
+      },
+      verifyProduct: async (_recordId, expected) => {
+        verifiedUploadDates.push(expected.uploadDate);
+        return true;
+      },
+    });
+    const times = [
+      "2026-09-01T16:59:59.000Z",
+      "2026-09-01T17:00:01.000Z",
+    ];
+    let clockRead = 0;
+    deps.clock = {
+      now: () => new Date(times[Math.min(clockRead++, times.length - 1)]!),
+    };
+
+    await processProductGroupAttempt(deps, group, "run-midnight");
+
+    expect(submittedUploadDate).toBe("2026-09-01");
+    expect(verifiedUploadDates).toEqual(["2026-09-01"]);
+  });
+
   it("rejects a malformed asset key before exposing it to Airtable", async () => {
     const { deps, group } = await buildProcessDeps();
     group.attachablePhotos[0] = {
@@ -1188,6 +1216,47 @@ describe("processProductGroupAttempt", () => {
         after_value: "A-777",
       },
     ]);
+  });
+
+  it("recovers a response-lost row after Bangkok midnight using its original persisted Upload Date", async () => {
+    let existing: { recordId: string; productId: string } | null = null;
+    const createdUploadDates: string[] = [];
+    const verifiedUploadDates: string[] = [];
+    const { deps, group } = await buildProcessDeps({
+      findBySystemGroupId: async () => existing,
+      createProduct: async (payload) => {
+        createdUploadDates.push(payload.uploadDate);
+        existing = {
+          recordId: "rec-response-lost-midnight",
+          productId: payload.productId,
+        };
+        throw new OperationalError(
+          "airtable_response_lost",
+          "Airtable response was lost after creation",
+          true,
+        );
+      },
+      verifyProduct: async (_recordId, expected) => {
+        verifiedUploadDates.push(expected.uploadDate);
+        return true;
+      },
+    });
+    let now = "2026-09-01T16:59:59.000Z";
+    deps.clock = { now: () => new Date(now) };
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-midnight-recovery"),
+    ).rejects.toMatchObject({
+      code: "airtable_response_lost",
+      retryable: true,
+    });
+    now = "2026-09-01T17:00:01.000Z";
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-midnight-recovery"),
+    ).resolves.toEqual({ outcome: "succeeded", productId: "A-501" });
+    expect(createdUploadDates).toEqual(["2026-09-01"]);
+    expect(verifiedUploadDates).toEqual(["2026-09-01"]);
   });
 
   it("deletes an invalid response-lost recovery candidate and retries", async () => {
