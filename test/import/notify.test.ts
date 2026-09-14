@@ -105,7 +105,7 @@ describe("sendImportSummary", () => {
 
     expect(pushMessage).toHaveBeenCalledExactlyOnceWith(
       "group-1",
-      buildImportSummaryMessage(input),
+      "นำเข้ารูปภาพ — 1 กันยายน 2569 09:00\nสำเร็จ 1 รายการ\nA-501",
     );
   });
 
@@ -125,5 +125,10 @@ describe("sendImportSummary", () => {
         { result, orphanRange: null, nowThaiText },
       ),
     ).rejects.toBe(pushError);
+
+    expect(pushMessage).toHaveBeenCalledExactlyOnceWith(
+      "group-1",
+      "นำเข้ารูปภาพ — 1 กันยายน 2569 09:00\nสำเร็จ 0 รายการ",
+    );
   });
 });
