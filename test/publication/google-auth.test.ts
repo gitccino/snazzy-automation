@@ -51,6 +51,24 @@ describe("parseServiceAccountJson", () => {
       private_key: "not-a-key",
     }))).toThrow();
   });
+
+  it("redacts malformed configuration text from the configuration error", () => {
+    const credentialText = "configuration-private-key-material-must-not-leak";
+    let error: unknown;
+
+    try {
+      parseServiceAccountJson(credentialText);
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toMatchObject({
+      code: "google_service_account_configuration_invalid",
+      retryable: false,
+      message: "Google service account configuration is invalid",
+    });
+    expect((error as Error).message).not.toContain(credentialText);
+  });
 });
 
 describe("signServiceAccountJwt", () => {
@@ -97,6 +115,54 @@ describe("signServiceAccountJwt", () => {
 });
 
 describe("createGoogleAuthClient", () => {
+  it("classifies token-exchange transport failures as retryable without retaining their message", async () => {
+    const transportMessage = "fetch failed while sending assertion";
+    const fetcher = vi.fn<Fetcher>().mockRejectedValue(new TypeError(transportMessage));
+    const client = createGoogleAuthClient(
+      JSON.stringify({ client_email: "svc@example.iam.gserviceaccount.com", private_key: privateKeyPem }),
+      { now: () => new Date("2026-09-01T05:00:00.000Z") },
+      fetcher,
+    );
+    let error: unknown;
+
+    try {
+      await client.getAccessToken();
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toMatchObject({
+      code: "google_token_exchange_transport_failed",
+      retryable: true,
+      message: "Google token exchange transport failed",
+    });
+    expect((error as Error).message).not.toContain(transportMessage);
+  });
+
+  it("redacts malformed token-response text from the token exchange error", async () => {
+    const responseText = "malformed-token-response-must-not-leak";
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(new Response(responseText, { status: 200 }));
+    const client = createGoogleAuthClient(
+      JSON.stringify({ client_email: "svc@example.iam.gserviceaccount.com", private_key: privateKeyPem }),
+      { now: () => new Date("2026-09-01T05:00:00.000Z") },
+      fetcher,
+    );
+    let error: unknown;
+
+    try {
+      await client.getAccessToken();
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toMatchObject({
+      code: "google_token_response_invalid",
+      retryable: false,
+      message: "Google token response is invalid",
+    });
+    expect((error as Error).message).not.toContain(responseText);
+  });
+
   it("exchanges the signed JWT for an access token and caches it until near expiry", async () => {
     const clock = { now: () => new Date("2026-09-01T05:00:00.000Z") };
     const fetcher = vi.fn<Fetcher>().mockResolvedValue(

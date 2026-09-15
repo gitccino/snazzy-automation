@@ -26,7 +26,15 @@ const TokenResponseSchema = z.object({
 });
 
 export function parseServiceAccountJson(json: string): GoogleServiceAccountJson {
-  return ServiceAccountSchema.parse(JSON.parse(json));
+  try {
+    return ServiceAccountSchema.parse(JSON.parse(json));
+  } catch {
+    throw new OperationalError(
+      "google_service_account_configuration_invalid",
+      "Google service account configuration is invalid",
+      false,
+    );
+  }
 }
 
 function base64UrlEncode(bytes: Uint8Array): string {
@@ -102,14 +110,23 @@ export function createGoogleAuthClient(
       }
 
       const jwt = await signServiceAccountJwt(account, clock, GOOGLE_SCOPES);
-      const response = await fetcher("https://oauth2.googleapis.com/token", {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-          assertion: jwt,
-        }).toString(),
-      });
+      let response: Response;
+      try {
+        response = await fetcher("https://oauth2.googleapis.com/token", {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            assertion: jwt,
+          }).toString(),
+        });
+      } catch {
+        throw new OperationalError(
+          "google_token_exchange_transport_failed",
+          "Google token exchange transport failed",
+          true,
+        );
+      }
 
       if (!response.ok) {
         throw new OperationalError(
@@ -119,7 +136,16 @@ export function createGoogleAuthClient(
         );
       }
 
-      const body = TokenResponseSchema.parse(await response.json());
+      let body: z.infer<typeof TokenResponseSchema>;
+      try {
+        body = TokenResponseSchema.parse(await response.json());
+      } catch {
+        throw new OperationalError(
+          "google_token_response_invalid",
+          "Google token response is invalid",
+          false,
+        );
+      }
       cachedToken = body.access_token;
       cachedExpiryMs = nowMs + (body.expires_in - TOKEN_REFRESH_SKEW_SECONDS) * 1_000;
       return cachedToken;
