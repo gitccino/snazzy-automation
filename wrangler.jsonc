@@ -3,6 +3,27 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
+  "workflows": [
+    {
+      "name": "snazzy-import-workflow-local",
+      "binding": "IMPORT_WORKFLOW",
+      "class_name": "ImportWorkflow"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "snazzy-automation-local",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "IMAGES_BUCKET",
+      "bucket_name": "snazzy-automation-local-images"
+    }
+  ],
   "env": {
     "staging": { "name": "snazzy-automation-staging" },
     "production": { "name": "snazzy-automation-production" }

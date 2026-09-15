@@ -1,0 +1,424 @@
+import { NonRetryableError } from "cloudflare:workflows";
+import { describe, expect, it, vi } from "vitest";
+import { OperationalError } from "../../src/shared/errors";
+import { runImportWorkflow } from "../../src/import/workflow";
+import type {
+  ProcessGroupDeps,
+  PersistedGroup,
+} from "../../src/import/service";
+
+type StepCall = {
+  name: string;
+  options: unknown;
+  attempts: number;
+};
+
+function retryingStep() {
+  const calls: StepCall[] = [];
+  return {
+    calls,
+    async do<T>(
+      name: string,
+      optionsOrCallback: unknown,
+      maybeCallback?: () => Promise<T>,
+    ): Promise<T> {
+      const hasOptions = typeof optionsOrCallback !== "function";
+      const callback = (
+        hasOptions ? maybeCallback : optionsOrCallback
+      ) as () => Promise<T>;
+      const retryLimit = hasOptions
+        ? ((optionsOrCallback as { retries?: { limit: number } }).retries
+            ?.limit ?? 0)
+        : 5;
+      let attempt = 0;
+      for (;;) {
+        attempt += 1;
+        try {
+          const value = await callback();
+          calls.push({
+            name,
+            options: hasOptions ? optionsOrCallback : null,
+            attempts: attempt,
+          });
+          return value;
+        } catch (error) {
+          if (attempt > retryLimit || error instanceof NonRetryableError) {
+            calls.push({
+              name,
+              options: hasOptions ? optionsOrCallback : null,
+              attempts: attempt,
+            });
+            throw error;
+          }
+        }
+      }
+    },
+  };
+}
+
+function group(id: string, ordinal: number): PersistedGroup {
+  return {
+    groupId: id,
+    groupRowId: `row-${id}`,
+    ordinal,
+    markerPhotoId: `marker-${id}`,
+    attachablePhotos: [
+      { applePhotoId: `photo-${id}`, r2Key: `assets/${id}.jpg` },
+    ],
+  };
+}
+
+function processDeps(): ProcessGroupDeps {
+  return {
+    repo: {},
+    clock: { now: () => new Date("2026-09-01T09:00:00.000Z") },
+  } as ProcessGroupDeps;
+}
+
+describe("runImportWorkflow", () => {
+  it("records a terminal download failure durably before stopping the workflow", async () => {
+    const step = retryingStep();
+    const recordRunFailure = vi.fn().mockResolvedValue(undefined);
+    const finalize = vi.fn().mockResolvedValue(undefined);
+    const notify = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      runImportWorkflow(
+        processDeps(),
+        { importRunId: "run-1", sourceAlbumId: "album-1", trigger: "cron" },
+        step,
+        {
+          retryLimit: 5,
+          downloadAndGroup: async () => {
+            throw new OperationalError(
+              "icloud_invalid_webstream_response",
+              "iCloud returned a malformed response",
+              false,
+            );
+          },
+          recordRunFailure,
+          processGroupAttempt: vi.fn(),
+          recordExhaustedFailure: vi.fn(),
+          finalize,
+          notify,
+        },
+      ),
+    ).rejects.toMatchObject({
+      name: "icloud_invalid_webstream_response",
+      message: "iCloud returned a malformed response",
+    });
+
+    expect(recordRunFailure).toHaveBeenCalledWith(
+      "icloud_invalid_webstream_response",
+    );
+    expect(step.calls).toEqual([
+      { name: "download-and-group", options: null, attempts: 1 },
+      {
+        name: "record-download-and-group-failure",
+        options: null,
+        attempts: 1,
+      },
+    ]);
+    expect(finalize).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("records a retryable download failure after the durable step exhausts its default retries", async () => {
+    const step = retryingStep();
+    const recordRunFailure = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      runImportWorkflow(
+        processDeps(),
+        { importRunId: "run-retry", sourceAlbumId: "album-1", trigger: "cron" },
+        step,
+        {
+          retryLimit: 5,
+          downloadAndGroup: async () => {
+            throw new OperationalError(
+              "icloud_webstream_unavailable",
+              "iCloud unavailable",
+              true,
+            );
+          },
+          recordRunFailure,
+          processGroupAttempt: vi.fn(),
+          recordExhaustedFailure: vi.fn(),
+          finalize: vi.fn(),
+          notify: vi.fn(),
+        },
+      ),
+    ).rejects.toThrow("iCloud unavailable");
+
+    expect(recordRunFailure).toHaveBeenCalledWith(
+      "icloud_webstream_unavailable",
+    );
+    expect(step.calls).toEqual([
+      { name: "download-and-group", options: null, attempts: 6 },
+      {
+        name: "record-download-and-group-failure",
+        options: null,
+        attempts: 1,
+      },
+    ]);
+  });
+
+  it("records a terminal download failure reconstructed across the durable boundary", async () => {
+    const calls: string[] = [];
+    const step = {
+      async do<T>(
+        name: string,
+        optionsOrCallback: unknown,
+      ): Promise<T> {
+        calls.push(name);
+        if (name === "download-and-group") {
+          const reconstructed = new Error("serialized terminal failure");
+          reconstructed.name = "icloud_invalid_webstream_response";
+          throw reconstructed;
+        }
+        return await (optionsOrCallback as () => Promise<T>)();
+      },
+    };
+    const recordRunFailure = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      runImportWorkflow(
+        processDeps(),
+        { importRunId: "run-serialized", sourceAlbumId: "album-1", trigger: "cron" },
+        step,
+        {
+          retryLimit: 5,
+          downloadAndGroup: vi.fn(),
+          recordRunFailure,
+          processGroupAttempt: vi.fn(),
+          recordExhaustedFailure: vi.fn(),
+          finalize: vi.fn(),
+          notify: vi.fn(),
+        },
+      ),
+    ).rejects.toMatchObject({
+      name: "icloud_invalid_webstream_response",
+      message: "serialized terminal failure",
+    });
+
+    expect(recordRunFailure).toHaveBeenCalledWith(
+      "icloud_invalid_webstream_response",
+    );
+    expect(calls).toEqual([
+      "download-and-group",
+      "record-download-and-group-failure",
+    ]);
+  });
+
+  it("retries a transient group through its durable step then finalizes and notifies the successful result", async () => {
+    // Catches a production mutation that catches a transient attempt error
+    // inside the durable callback, so Workflow retries never run.
+    const step = retryingStep();
+    const events: string[] = [];
+    const process = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new OperationalError("airtable_rate_limited", "rate limited", true),
+      )
+      .mockResolvedValue({ outcome: "succeeded", productId: "A-501" });
+    const finalize = vi.fn(async () => {
+      events.push("finalize");
+    });
+    const notify = vi.fn(async () => {
+      events.push("notify");
+    });
+
+    const result = await runImportWorkflow(
+      processDeps(),
+      { importRunId: "run-1", sourceAlbumId: "album-1", trigger: "cron" },
+      step,
+      {
+        retryLimit: 5,
+        downloadAndGroup: async () => ({
+          pendingGroups: [group("g1", 0)],
+          orphanRange: {
+            firstApplePhotoId: "orphan-1",
+            lastApplePhotoId: "orphan-2",
+            count: 2,
+          },
+          checkpointPosition: 10,
+        }),
+        recordRunFailure: vi.fn(),
+        processGroupAttempt: process,
+        recordExhaustedFailure: vi.fn(),
+        finalize,
+        notify,
+      },
+    );
+
+    expect(process).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({
+      importRunId: "run-1",
+      succeededProductIds: ["A-501"],
+      failedGroups: [],
+    });
+    expect(
+      step.calls.find((call) => call.name === "process-group-row-g1"),
+    ).toEqual({
+      name: "process-group-row-g1",
+      options: {
+        retries: { limit: 5, delay: "10 seconds", backoff: "exponential" },
+      },
+      attempts: 2,
+    });
+    expect(finalize).toHaveBeenCalledWith(false, 2, 10);
+    expect(notify).toHaveBeenCalledWith(result, {
+      firstApplePhotoId: "orphan-1",
+      lastApplePhotoId: "orphan-2",
+      count: 2,
+    });
+    expect(events).toEqual(["finalize", "notify"]);
+  });
+
+  it("records a group only after all six attempts and continues the next sibling", async () => {
+    // Catches a production mutation that records the first failed attempt
+    // instead of letting the durable step exhaust its configured retries.
+    const step = retryingStep();
+    const events: string[] = [];
+    const process = vi.fn(async (_deps, current: PersistedGroup) => {
+      events.push(`process-${current.groupId}`);
+      if (current.groupId === "g1") {
+        throw new OperationalError(
+          "airtable_rate_limited",
+          "rate limited",
+          true,
+        );
+      }
+      return { outcome: "succeeded" as const, productId: "A-502" };
+    });
+    const record = vi.fn(async () => {
+      events.push("record-g1");
+      return { productId: "A-501", errorCode: "airtable_rate_limited" };
+    });
+    const finalize = vi.fn(async () => {
+      events.push("finalize");
+    });
+    const notify = vi.fn(async () => {
+      events.push("notify");
+    });
+    const expectedResult = {
+      importRunId: "run-1",
+      succeededProductIds: ["A-502"],
+      failedGroups: [
+        {
+          groupId: "row-g1",
+          productId: "A-501",
+          errorCode: "airtable_rate_limited",
+        },
+      ],
+    };
+
+    const result = await runImportWorkflow(
+      processDeps(),
+      { importRunId: "run-1", sourceAlbumId: "album-1", trigger: "line" },
+      step,
+      {
+        retryLimit: 5,
+        downloadAndGroup: async () => ({
+          pendingGroups: [group("g1", 0), group("g2", 1)],
+          orphanRange: null,
+          checkpointPosition: 10,
+        }),
+        recordRunFailure: vi.fn(),
+        processGroupAttempt: process,
+        recordExhaustedFailure: record,
+        finalize,
+        notify,
+      },
+    );
+
+    expect(step.calls).toEqual([
+      { name: "download-and-group", options: null, attempts: 1 },
+      {
+        name: "process-group-row-g1",
+        options: {
+          retries: {
+            limit: 5,
+            delay: "10 seconds",
+            backoff: "exponential",
+          },
+        },
+        attempts: 6,
+      },
+      { name: "record-failed-group-row-g1", options: null, attempts: 1 },
+      {
+        name: "process-group-row-g2",
+        options: {
+          retries: {
+            limit: 5,
+            delay: "10 seconds",
+            backoff: "exponential",
+          },
+        },
+        attempts: 1,
+      },
+      { name: "finalize-checkpoint", options: null, attempts: 1 },
+      { name: "send-import-summary", options: null, attempts: 1 },
+    ]);
+    expect(events).toEqual([
+      "process-g1",
+      "process-g1",
+      "process-g1",
+      "process-g1",
+      "process-g1",
+      "process-g1",
+      "record-g1",
+      "process-g2",
+      "finalize",
+      "notify",
+    ]);
+    expect(result).toEqual(expectedResult);
+    expect(finalize).toHaveBeenCalledWith(true, 0, 10);
+    expect(notify).toHaveBeenCalledWith(expectedResult, null);
+  });
+
+  it("converts a non-retryable operational error once while preserving its code for failure recording", async () => {
+    // Catches a production mutation that retries a permanent error or drops
+    // its operational code when turning it into a durable non-retryable error.
+    const step = retryingStep();
+    const process = vi.fn().mockRejectedValue(
+      new OperationalError(
+        "product_group_missing",
+        "Product group row is missing",
+        false,
+      ),
+    );
+    const record = vi.fn().mockResolvedValue({
+      productId: null,
+      errorCode: "product_group_missing",
+    });
+
+    await runImportWorkflow(
+      processDeps(),
+      { importRunId: "run-1", sourceAlbumId: "album-1", trigger: "cron" },
+      step,
+      {
+        retryLimit: 5,
+        downloadAndGroup: async () => ({
+          pendingGroups: [group("g1", 0)],
+          orphanRange: null,
+          checkpointPosition: 10,
+        }),
+        recordRunFailure: vi.fn(),
+        processGroupAttempt: process,
+        recordExhaustedFailure: record,
+        finalize: vi.fn().mockResolvedValue(undefined),
+        notify: vi.fn().mockResolvedValue(undefined),
+      },
+    );
+
+    expect(process).toHaveBeenCalledTimes(1);
+    expect(
+      step.calls.find((call) => call.name === "process-group-row-g1"),
+    ).toMatchObject({ attempts: 1 });
+    expect(record.mock.calls[0]?.[3]).toMatchObject({
+      name: "product_group_missing",
+      message: "Product group row is missing",
+    });
+  });
+});

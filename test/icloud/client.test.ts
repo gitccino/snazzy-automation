@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createICloudClient, deriveSourceAlbumId } from "../../src/icloud/client";
+import { groupByMarkers } from "../../src/import/grouping";
 import { WEBASSETURLS_FIXTURE, WEBSTREAM_FIXTURE } from "../helpers/fixtures";
 
 function scriptedFetcher(responses: Array<{ status: number; body?: unknown; headers?: Record<string, string> }>) {
@@ -23,6 +24,68 @@ describe("deriveSourceAlbumId", () => {
 });
 
 describe("createICloudClient.getSnapshot", () => {
+  it("assigns chronological positions to a newest-first marker and product", async () => {
+    const webstream = {
+      photos: [
+        {
+          photoGuid: "PRODUCT-NEWER",
+          dateCreated: "2026-09-01T09:01:00Z",
+          derivatives: { "2048": { checksum: "chk-product" } },
+        },
+        {
+          photoGuid: "MARKER-OLDER",
+          dateCreated: "2026-09-01T09:00:00Z",
+          derivatives: { "2048": { checksum: "chk-marker" } },
+        },
+      ],
+    };
+    const assetUrls = {
+      items: {
+        "chk-product": {
+          url_location: "cvws.icloud-content.com",
+          url_path: "/product",
+        },
+        "chk-marker": {
+          url_location: "cvws.icloud-content.com",
+          url_path: "/marker",
+        },
+      },
+    };
+    const client = createICloudClient(
+      "TOKEN-XYZ",
+      scriptedFetcher([
+        { status: 200, body: webstream },
+        { status: 200, body: webstream },
+        { status: 200, body: assetUrls },
+      ]),
+    );
+
+    const snapshot = await client.getSnapshot();
+
+    expect(
+      snapshot.photos.map(({ applePhotoId, position }) => ({
+        applePhotoId,
+        position,
+      })),
+    ).toEqual([
+      { applePhotoId: "PRODUCT-NEWER", position: 1 },
+      { applePhotoId: "MARKER-OLDER", position: 0 },
+    ]);
+    const grouped = groupByMarkers(
+      snapshot.photos.map((photo) => ({
+        applePhotoId: photo.applePhotoId,
+        position: photo.position,
+        isMarker: photo.applePhotoId === "MARKER-OLDER",
+        r2Key: `assets/${photo.applePhotoId}.jpg`,
+      })),
+    );
+    expect(grouped.orphanPhotos).toEqual([]);
+    expect(grouped.groups[0]?.photos.map((photo) => photo.applePhotoId)).toEqual([
+      "MARKER-OLDER",
+      "PRODUCT-NEWER",
+    ]);
+  });
+
   it("returns ordered SourcePhotos with resolved derivative URLs", async () => {
     const fetcher = scriptedFetcher([
       { status: 200, body: WEBSTREAM_FIXTURE },
@@ -37,7 +100,7 @@ describe("createICloudClient.getSnapshot", () => {
     expect(snapshot.photos).toHaveLength(2);
     expect(snapshot.photos[0]).toMatchObject({
       applePhotoId: "AAAA-1111",
-      position: 0,
+      position: 1,
       mediaType: "image/jpeg",
     });
     expect(snapshot.photos[0]!.derivativeUrl).toBe(
@@ -71,17 +134,65 @@ describe("createICloudClient.getSnapshot", () => {
     });
   });
 
-  it("returns photos in stable position order across two identical calls", async () => {
-    const makeFetcher = () =>
+  it("keeps existing positions stable when a newer webstream photo is prepended", async () => {
+    const prependedPhoto = {
+      photoGuid: "CCCC-3333",
+      dateCreated: "2026-08-31T09:02:00Z",
+      derivatives: { "2048": { checksum: "chk-cccc-2048" } },
+    };
+    const expandedWebstream = {
+      photos: [prependedPhoto, ...WEBSTREAM_FIXTURE.photos],
+    };
+    const expandedAssetUrls = {
+      items: {
+        "chk-cccc-2048": {
+          url_location: "cvws.icloud-content.com",
+          url_path: "/C/cccc",
+        },
+        ...WEBASSETURLS_FIXTURE.items,
+      },
+    };
+    const clientBefore = createICloudClient(
+      "TOKEN-XYZ",
       scriptedFetcher([
         { status: 200, body: WEBSTREAM_FIXTURE },
         { status: 200, body: WEBSTREAM_FIXTURE },
         { status: 200, body: WEBASSETURLS_FIXTURE },
-      ]);
-    const clientA = createICloudClient("TOKEN-XYZ", makeFetcher());
-    const clientB = createICloudClient("TOKEN-XYZ", makeFetcher());
-    const [snapshotA, snapshotB] = await Promise.all([clientA.getSnapshot(), clientB.getSnapshot()]);
-    expect(snapshotA.photos.map((p) => p.applePhotoId)).toEqual(snapshotB.photos.map((p) => p.applePhotoId));
+      ]),
+    );
+    const clientAfter = createICloudClient(
+      "TOKEN-XYZ",
+      scriptedFetcher([
+        { status: 200, body: expandedWebstream },
+        { status: 200, body: expandedWebstream },
+        { status: 200, body: expandedAssetUrls },
+      ]),
+    );
+
+    const [before, after] = await Promise.all([
+      clientBefore.getSnapshot(),
+      clientAfter.getSnapshot(),
+    ]);
+
+    expect(
+      before.photos.map(({ applePhotoId, position }) => ({
+        applePhotoId,
+        position,
+      })),
+    ).toEqual([
+      { applePhotoId: "AAAA-1111", position: 1 },
+      { applePhotoId: "BBBB-2222", position: 0 },
+    ]);
+    expect(
+      after.photos.map(({ applePhotoId, position }) => ({
+        applePhotoId,
+        position,
+      })),
+    ).toEqual([
+      { applePhotoId: "CCCC-3333", position: 2 },
+      { applePhotoId: "AAAA-1111", position: 1 },
+      { applePhotoId: "BBBB-2222", position: 0 },
+    ]);
   });
 });
 

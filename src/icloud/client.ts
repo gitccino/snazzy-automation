@@ -106,7 +106,7 @@ export function createICloudClient(token: string, fetcher: Fetcher): ImageSource
       return {
         sourceAlbumId,
         applePhotoId: photo.photoGuid,
-        position: index,
+        position: webstream.photos.length - 1 - index,
         captureAt: photo.dateCreated ?? null,
         derivativeUrl: `https://${asset.url_location}${asset.url_path}`,
         mediaType: "image/jpeg",
