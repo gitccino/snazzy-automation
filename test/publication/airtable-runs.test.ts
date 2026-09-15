@@ -19,6 +19,23 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
+function productRecord(id: string, productId: string) {
+  return {
+    id,
+    fields: {
+      "Product ID": productId,
+      "Product Images": [],
+      "Brand Name": "Nike",
+      "Model Name": "Air Max",
+      "Condition Type": "Used",
+      Size: "42",
+      Description: "Good condition",
+      "LINE Square Price": 1290,
+      "IG Price": 1390,
+    },
+  };
+}
+
 describe("findRunnableRunForDate", () => {
   it("returns null when no Ready or Failed run matches the date", async () => {
     const fetcher = vi.fn<Fetcher>().mockResolvedValue(jsonResponse({ records: [] }));
@@ -109,6 +126,79 @@ describe("findRunnableRunForDate", () => {
     await expect(
       findRunnableRunForDate(fetcher, config, "token", "2026-09-01"),
     ).rejects.toThrow(/invalid attachment filename/i);
+  });
+
+  it("rejects a products response that omits a linked product", async () => {
+    const fetcher = vi.fn<Fetcher>()
+      .mockResolvedValueOnce(jsonResponse({
+        records: [{
+          id: "recRun1",
+          fields: {
+            "Publication Date": "2026-09-01",
+            Status: "Ready",
+            Products: ["recProd1", "recProd2"],
+          },
+        }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        records: [productRecord("recProd1", "A-1001")],
+      }));
+
+    await expect(
+      findRunnableRunForDate(fetcher, config, "token", "2026-09-01"),
+    ).rejects.toMatchObject({
+      code: "airtable_linked_products_mismatch",
+      retryable: false,
+    });
+  });
+
+  it.each([
+    ["returns an unexpected product", [productRecord("recProd1", "A-1001"), productRecord("recOther", "A-9999")]],
+    ["returns the same product twice", [productRecord("recProd1", "A-1001"), productRecord("recProd1", "A-1001")]],
+  ])("rejects a products response that %s", async (_description, records) => {
+    const fetcher = vi.fn<Fetcher>()
+      .mockResolvedValueOnce(jsonResponse({
+        records: [{
+          id: "recRun1",
+          fields: {
+            "Publication Date": "2026-09-01",
+            Status: "Ready",
+            Products: ["recProd1", "recProd2"],
+          },
+        }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({ records }));
+
+    await expect(
+      findRunnableRunForDate(fetcher, config, "token", "2026-09-01"),
+    ).rejects.toMatchObject({
+      code: "airtable_linked_products_mismatch",
+      retryable: false,
+    });
+  });
+
+  it("preserves linked-field order when Airtable returns products in another order", async () => {
+    const fetcher = vi.fn<Fetcher>()
+      .mockResolvedValueOnce(jsonResponse({
+        records: [{
+          id: "recRun1",
+          fields: {
+            "Publication Date": "2026-09-01",
+            Status: "Ready",
+            Products: ["recProd2", "recProd1"],
+          },
+        }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        records: [productRecord("recProd1", "A-1001"), productRecord("recProd2", "A-1002")],
+      }));
+
+    const result = await findRunnableRunForDate(fetcher, config, "token", "2026-09-01");
+
+    expect(result?.products.map((product) => product.airtableRecordId)).toEqual([
+      "recProd2",
+      "recProd1",
+    ]);
   });
 
   it.each([

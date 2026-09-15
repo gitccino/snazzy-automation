@@ -90,20 +90,35 @@ async function fetchLinkedProducts(
   const body = z.object({
     records: z.array(AirtableProductRecordSchema),
   }).parse(await response.json());
-  return body.records.map((record) => ({
-    airtableRecordId: record.id,
-    productId: record.fields["Product ID"],
-    orderedImageKeys: (record.fields["Product Images"] ?? []).map((image) =>
-      attachmentR2Key(image.filename),
-    ),
-    brandName: record.fields["Brand Name"] ?? "",
-    modelName: record.fields["Model Name"] ?? "",
-    conditionType: record.fields["Condition Type"] ?? "",
-    size: record.fields.Size ?? "",
-    description: record.fields.Description ?? "",
-    lineSquarePrice: record.fields["LINE Square Price"] ?? 0,
-    igPrice: record.fields["IG Price"] ?? 0,
-  }));
+  const productsByRecordId = new Map(body.records.map((record) => [record.id, record]));
+  if (
+    productsByRecordId.size !== recordIds.length
+    || body.records.length !== recordIds.length
+    || recordIds.some((recordId) => !productsByRecordId.has(recordId))
+  ) {
+    throw new OperationalError(
+      "airtable_linked_products_mismatch",
+      "Airtable linked products response did not match requested records",
+      false,
+    );
+  }
+  return recordIds.map((recordId) => {
+    const record = productsByRecordId.get(recordId)!;
+    return {
+      airtableRecordId: record.id,
+      productId: record.fields["Product ID"],
+      orderedImageKeys: (record.fields["Product Images"] ?? []).map((image) =>
+        attachmentR2Key(image.filename),
+      ),
+      brandName: record.fields["Brand Name"] ?? "",
+      modelName: record.fields["Model Name"] ?? "",
+      conditionType: record.fields["Condition Type"] ?? "",
+      size: record.fields.Size ?? "",
+      description: record.fields.Description ?? "",
+      lineSquarePrice: record.fields["LINE Square Price"] ?? 0,
+      igPrice: record.fields["IG Price"] ?? 0,
+    };
+  });
 }
 
 export async function findRunnableRunForDate(
