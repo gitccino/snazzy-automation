@@ -26,6 +26,43 @@ function documentWithRuns(runs: { content: string; startIndex?: number }[]) {
 }
 
 describe("template population", () => {
+  it("fills, verifies, and safely retries when template text precedes the marker on its line", async () => {
+    let documentText = "{{PUBLICATION_DATE}}\nListings: {{PRODUCTS}}suffix{{END_PRODUCTS}}\nFooter\n";
+    let batchCount = 0;
+    const fetcher = vi.fn<Fetcher>().mockImplementation(async (url, init) => {
+      if (!String(url).endsWith(":batchUpdate")) {
+        // Inline images occupy an index but contribute no Google Docs text-run content.
+        return jsonResponse(documentWithRuns([{ content: documentText.replaceAll("\ufffc", ""), startIndex: 1 }]));
+      }
+      batchCount++;
+      const { requests } = JSON.parse(String(init?.body)) as { requests: GoogleDocsRequest[] };
+      for (const request of requests) {
+        if ("deleteContentRange" in request) {
+          const { startIndex, endIndex } = request.deleteContentRange.range;
+          documentText = documentText.slice(0, startIndex - 1) + documentText.slice(endIndex - 1);
+        } else if ("insertText" in request || "insertInlineImage" in request) {
+          const insertion = "insertText" in request ? request.insertText : request.insertInlineImage;
+          const text = "text" in insertion ? insertion.text : "\ufffc";
+          const offset = insertion.location.index - 1;
+          documentText = documentText.slice(0, offset) + text + documentText.slice(offset);
+        } else {
+          documentText = documentText.replaceAll(request.replaceAllText.containsText.text, request.replaceAllText.replaceText);
+        }
+      }
+      return jsonResponse({ documentId: "doc-1" });
+    });
+
+    await fillTemplate(fetcher, tokenProvider(), "doc-1", "Today", [product]);
+    expect(await verifyDocumentContainsProducts(fetcher, tokenProvider(), "doc-1", [product.productId])).toEqual({ ok: true });
+    expect(documentText).toContain("Listings: \ufffc\nProduct ID: A-1001\n");
+    expect(documentText).not.toContain("{{PRODUCTS}}");
+
+    const filledDocument = documentText;
+    await expect(fillTemplate(fetcher, tokenProvider(), "doc-1", "Today", [product])).resolves.toBeUndefined();
+    expect(documentText).toBe(filledDocument);
+    expect(batchCount).toBe(1);
+  });
+
   it("builds one deletion and reverse inserts that render products and suffixes in input order", () => {
     const requests = buildBatchUpdateRequests("1 กันยายน 2569", [product, { ...product, productId: "A-1002" }], "suffix", 32, 63);
     expect(requests[0]).toEqual({ deleteContentRange: { range: { startIndex: 32, endIndex: 63 } } });
@@ -41,7 +78,7 @@ describe("template population", () => {
         rendered = "[image]" + rendered;
       }
     }
-    expect(rendered).toBe("[image]Product ID: A-1001\nCondition: Used\nDescription: Good condition\nLINE Square Price: 1290\nIG Price: 1390\nCaption 1: draft1\nCaption 2: draft2\nCaption 3: draft3\nsuffix\n\n[image]Product ID: A-1002\nCondition: Used\nDescription: Good condition\nLINE Square Price: 1290\nIG Price: 1390\nCaption 1: draft1\nCaption 2: draft2\nCaption 3: draft3\nsuffix\n\n");
+    expect(rendered).toBe("[image]\nProduct ID: A-1001\nCondition: Used\nDescription: Good condition\nLINE Square Price: 1290\nIG Price: 1390\nCaption 1: draft1\nCaption 2: draft2\nCaption 3: draft3\nsuffix\n\n[image]\nProduct ID: A-1002\nCondition: Used\nDescription: Good condition\nLINE Square Price: 1290\nIG Price: 1390\nCaption 1: draft1\nCaption 2: draft2\nCaption 3: draft3\nsuffix\n\n");
     expect(requests.at(-1)).toEqual({ replaceAllText: { containsText: { text: "{{PUBLICATION_DATE}}", matchCase: true }, replaceText: "1 กันยายน 2569" } });
   });
 

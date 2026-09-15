@@ -148,6 +148,7 @@ export function buildBatchUpdateRequests(
     requests.push(
       { insertText: { location, text: `${suffixText}\n\n` } },
       { insertText: { location, text: [
+        "", // Keep Product ID on its own line even when template text precedes the image.
         `Product ID: ${product.productId}`,
         `Condition: ${product.conditionType}`,
         `Description: ${product.description}`,
