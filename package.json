@@ -17,6 +17,7 @@
     "generate-marker": "tsx scripts/generate-marker.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.125.0",
     "jpeg-js": "^0.4.4",
     "jsqr": "^1.4.0",
     "zod": "^4.5.4"
