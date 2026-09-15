@@ -212,6 +212,15 @@ describe("requestCaptionBatch", () => {
     expect(outcome.missingProductIds).toEqual(["A-1001", "A-1002"]);
   });
 
+  it("marks every requested Product ID for retry when response blocks are malformed", async () => {
+    const client = sdkClient({
+      create: vi.fn().mockResolvedValue({ content: [null] }),
+    });
+    const requested = [toCaptionRequestProducts([product("A-1001")])[0]!];
+    const outcome = await requestCaptionBatch(client, "claude-opus-5", requested);
+    expect(outcome).toEqual({ captions: [], missingProductIds: ["A-1001"] });
+  });
+
   it("marks every requested Product ID for retry when the tool call throws", async () => {
     const client = sdkClient({
       create: vi.fn().mockRejectedValue(new Error("rate limited")),
@@ -256,25 +265,32 @@ describe("requestCaptionBatch", () => {
 });
 
 describe("generateCaptionsForRun", () => {
-  it("batches, requests, and merges captions keyed by Product ID across batches", async () => {
+  it("preserves earlier captions when a later split batch has a malformed envelope", async () => {
     const client = sdkClient({
-      countTokens: vi.fn().mockResolvedValue({ input_tokens: 100 }),
-      create: vi.fn().mockResolvedValueOnce(
-        toolResponse([
-          {
-            productId: "A-1001",
-            drafts: ["หนึ่ง", "สอง", "สาม"],
-          },
-          {
-            productId: "A-1002",
-            drafts: ["สี่", "ห้า", "หก"],
-          },
-        ]),
+      countTokens: vi.fn().mockImplementation(
+        async ({ messages }: CountTokensParams) => ({
+          input_tokens: (messages[0]!.content as string)
+            .match(/"productId"/g)?.length === 1
+            ? 100
+            : 2_000,
+        }),
       ),
+      create: vi.fn()
+        .mockResolvedValueOnce(
+          toolResponse([
+            {
+              productId: "A-1001",
+              drafts: ["หนึ่ง", "สอง", "สาม"],
+            },
+          ]),
+        )
+        .mockResolvedValueOnce({ content: null }),
     });
     const products = ["A-1001", "A-1002"].map((id) => toCaptionRequestProducts([product(id)])[0]!);
     const outcome = await generateCaptionsForRun(client, "claude-opus-5", 1000, products);
-    expect(outcome.captions.map((c) => c.productId).sort()).toEqual(["A-1001", "A-1002"]);
-    expect(outcome.missingProductIds).toEqual([]);
+    expect(outcome.captions).toEqual([
+      { productId: "A-1001", drafts: ["หนึ่ง", "สอง", "สาม"] },
+    ]);
+    expect(outcome.missingProductIds).toEqual(["A-1002"]);
   });
 });

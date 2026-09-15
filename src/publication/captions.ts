@@ -126,6 +126,19 @@ function rethrowPermanentAnthropicError(
   }
 }
 
+function isSubmitCaptionsToolUse(
+  block: unknown,
+): block is Anthropic.Messages.ToolUseBlock {
+  return (
+    typeof block === "object" &&
+    block !== null &&
+    "type" in block &&
+    block.type === "tool_use" &&
+    "name" in block &&
+    block.name === "submit_captions"
+  );
+}
+
 async function countInputTokens(
   client: Pick<Anthropic, "messages">,
   model: string,
@@ -196,7 +209,7 @@ export async function requestCaptionBatch(
 ): Promise<CaptionGenerationOutcome> {
   const requestedIds = products.map((product) => product.productId);
   const requestedIdSet = new Set(requestedIds);
-  let response: Anthropic.Messages.Message;
+  let response: unknown;
   try {
     response = await client.messages.create(buildRequestParams(model, products));
   } catch (error) {
@@ -204,10 +217,16 @@ export async function requestCaptionBatch(
     return { captions: [], missingProductIds: requestedIds };
   }
 
-  const toolUse = response.content.find(
-    (block): block is Anthropic.Messages.ToolUseBlock =>
-      block.type === "tool_use" && block.name === "submit_captions",
-  );
+  if (
+    typeof response !== "object" ||
+    response === null ||
+    !("content" in response) ||
+    !Array.isArray(response.content)
+  ) {
+    return { captions: [], missingProductIds: requestedIds };
+  }
+
+  const toolUse = response.content.find(isSubmitCaptionsToolUse);
   if (!toolUse) return { captions: [], missingProductIds: requestedIds };
 
   const parsed = ResponseSchema.safeParse(toolUse.input);
