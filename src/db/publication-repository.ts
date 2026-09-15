@@ -59,9 +59,9 @@ export async function acquireOrResumeJob(
   clock: Clock,
   publicationRunId: string,
   correlationId: string,
-): Promise<{ job: PublicationJobRow; alreadySucceeded: boolean }> {
+): Promise<{ job: PublicationJobRow; alreadySucceeded: boolean; ownsLock: boolean }> {
   const nowIso = clock.now().toISOString();
-  await db
+  const insertResult = await db
     .prepare(
       `INSERT INTO publication_jobs (publication_run_id, state, correlation_id, attempt_count, created_at, updated_at)
        VALUES (?, 'locked', ?, 0, ?, ?)
@@ -80,7 +80,7 @@ export async function acquireOrResumeJob(
   }
 
   const job = toRow(raw);
-  return { job, alreadySucceeded: job.state === "succeeded" };
+  return { job, alreadySucceeded: job.state === "succeeded", ownsLock: insertResult.meta.changes === 1 };
 }
 
 export async function setJobState(
@@ -91,36 +91,34 @@ export async function setJobState(
   patch?: Partial<Pick<PublicationJobRow, "googleDocId" | "googleDocUrl" | "tempDocId" | "validationResultJson">>,
 ): Promise<void> {
   const nowIso = clock.now().toISOString();
+  const columns: string[] = ["state = ?"];
+  const values: (string | null)[] = [state];
+  const patchColumns: Array<["googleDocId" | "googleDocUrl" | "tempDocId" | "validationResultJson", string]> = [
+    ["googleDocId", "google_doc_id"],
+    ["googleDocUrl", "google_doc_url"],
+    ["tempDocId", "temp_doc_id"],
+    ["validationResultJson", "validation_result_json"],
+  ];
+  for (const [key, column] of patchColumns) {
+    if (patch && Object.prototype.hasOwnProperty.call(patch, key)) {
+      columns.push(`${column} = ?`);
+      values.push(patch[key] ?? null);
+    }
+  }
+  columns.push("updated_at = ?");
+  values.push(nowIso, publicationRunId);
   await db
     .prepare(
-      `UPDATE publication_jobs
-       SET state = ?,
-           google_doc_id = COALESCE(?, google_doc_id),
-           google_doc_url = COALESCE(?, google_doc_url),
-           temp_doc_id = COALESCE(?, temp_doc_id),
-           validation_result_json = COALESCE(?, validation_result_json),
-           updated_at = ?
-       WHERE publication_run_id = ?`,
+      `UPDATE publication_jobs SET ${columns.join(", ")}
+       WHERE publication_run_id = ? AND state NOT IN ('succeeded', 'failed')`,
     )
-    .bind(
-      state,
-      patch?.googleDocId ?? null,
-      patch?.googleDocUrl ?? null,
-      patch?.tempDocId ?? null,
-      patch?.validationResultJson ?? null,
-      nowIso,
-      publicationRunId,
-    )
+    .bind(...values)
     .run();
 }
 
 export async function incrementAttempt(db: D1Database, publicationRunId: string): Promise<number> {
-  await db
-    .prepare("UPDATE publication_jobs SET attempt_count = attempt_count + 1 WHERE publication_run_id = ?")
-    .bind(publicationRunId)
-    .run();
   const raw = await db
-    .prepare("SELECT attempt_count FROM publication_jobs WHERE publication_run_id = ?")
+    .prepare("UPDATE publication_jobs SET attempt_count = attempt_count + 1 WHERE publication_run_id = ? RETURNING attempt_count")
     .bind(publicationRunId)
     .first<{ attempt_count: number }>();
   return raw?.attempt_count ?? 0;

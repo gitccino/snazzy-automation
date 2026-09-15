@@ -36,6 +36,15 @@ describe("publication-repository", () => {
     expect(job.publicationRunId).toBe("run-1");
   });
 
+  it("gives ownership to only one concurrent acquirer", async () => {
+    const acquisitions = await Promise.all([
+      acquireOrResumeJob(env.DB, clock, "run-concurrent", "corr-a"),
+      acquireOrResumeJob(env.DB, clock, "run-concurrent", "corr-b"),
+    ]);
+    expect(acquisitions.filter((result) => result.ownsLock)).toHaveLength(1);
+    expect(acquisitions.filter((result) => !result.ownsLock)).toHaveLength(1);
+  });
+
   it("reports alreadySucceeded true and refuses to reset a succeeded job", async () => {
     await acquireOrResumeJob(env.DB, clock, "run-1", "corr-1");
     await setJobState(env.DB, clock, "run-1", "succeeded", { googleDocId: "doc-1", googleDocUrl: "https://docs.google.com/doc-1" });
@@ -44,12 +53,44 @@ describe("publication-repository", () => {
     expect(job.googleDocId).toBe("doc-1");
   });
 
+  it("refuses terminal-state rewrites and preserves final document fields", async () => {
+    await acquireOrResumeJob(env.DB, clock, "run-terminal", "corr-1");
+    await setJobState(env.DB, clock, "run-terminal", "succeeded", {
+      googleDocId: "doc-final",
+      googleDocUrl: "https://docs.google.com/doc-final",
+    });
+    await setJobState(env.DB, clock, "run-terminal", "failed", {
+      googleDocId: "doc-stale",
+      googleDocUrl: "https://docs.google.com/doc-stale",
+    });
+    const { job } = await acquireOrResumeJob(env.DB, clock, "run-terminal", "corr-2");
+    expect(job.state).toBe("succeeded");
+    expect(job.googleDocId).toBe("doc-final");
+    expect(job.googleDocUrl).toBe("https://docs.google.com/doc-final");
+  });
+
+  it("supports explicit null clearing in state patches", async () => {
+    await acquireOrResumeJob(env.DB, clock, "run-clear", "corr-1");
+    await setJobState(env.DB, clock, "run-clear", "validation_failed", { validationResultJson: '{"error":"bad"}' });
+    await setJobState(env.DB, clock, "run-clear", "validating", { validationResultJson: null });
+    const { job } = await acquireOrResumeJob(env.DB, clock, "run-clear", "corr-1");
+    expect(job.validationResultJson).toBeNull();
+  });
+
   it("increments attempt count monotonically", async () => {
     await acquireOrResumeJob(env.DB, clock, "run-2", "corr-1");
     const a = await incrementAttempt(env.DB, "run-2");
     const b = await incrementAttempt(env.DB, "run-2");
     expect(a).toBe(1);
     expect(b).toBe(2);
+  });
+
+  it("returns each concurrent attempt increment exactly once", async () => {
+    await acquireOrResumeJob(env.DB, clock, "run-attempts", "corr-1");
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => incrementAttempt(env.DB, "run-attempts")),
+    );
+    expect(results.sort((a, b) => a - b)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
   });
 
   it("persists and explicitly clears the one temporary document ID", async () => {
