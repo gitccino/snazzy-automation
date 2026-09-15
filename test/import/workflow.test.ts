@@ -29,7 +29,7 @@ function retryingStep() {
       const retryLimit = hasOptions
         ? ((optionsOrCallback as { retries?: { limit: number } }).retries
             ?.limit ?? 0)
-        : 0;
+        : 5;
       let attempt = 0;
       for (;;) {
         attempt += 1;
@@ -121,6 +121,93 @@ describe("runImportWorkflow", () => {
     ]);
     expect(finalize).not.toHaveBeenCalled();
     expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("records a retryable download failure after the durable step exhausts its default retries", async () => {
+    const step = retryingStep();
+    const recordRunFailure = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      runImportWorkflow(
+        processDeps(),
+        { importRunId: "run-retry", sourceAlbumId: "album-1", trigger: "cron" },
+        step,
+        {
+          retryLimit: 5,
+          downloadAndGroup: async () => {
+            throw new OperationalError(
+              "icloud_webstream_unavailable",
+              "iCloud unavailable",
+              true,
+            );
+          },
+          recordRunFailure,
+          processGroupAttempt: vi.fn(),
+          recordExhaustedFailure: vi.fn(),
+          finalize: vi.fn(),
+          notify: vi.fn(),
+        },
+      ),
+    ).rejects.toThrow("iCloud unavailable");
+
+    expect(recordRunFailure).toHaveBeenCalledWith(
+      "icloud_webstream_unavailable",
+    );
+    expect(step.calls).toEqual([
+      { name: "download-and-group", options: null, attempts: 6 },
+      {
+        name: "record-download-and-group-failure",
+        options: null,
+        attempts: 1,
+      },
+    ]);
+  });
+
+  it("records a terminal download failure reconstructed across the durable boundary", async () => {
+    const calls: string[] = [];
+    const step = {
+      async do<T>(
+        name: string,
+        optionsOrCallback: unknown,
+      ): Promise<T> {
+        calls.push(name);
+        if (name === "download-and-group") {
+          const reconstructed = new Error("serialized terminal failure");
+          reconstructed.name = "icloud_invalid_webstream_response";
+          throw reconstructed;
+        }
+        return await (optionsOrCallback as () => Promise<T>)();
+      },
+    };
+    const recordRunFailure = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      runImportWorkflow(
+        processDeps(),
+        { importRunId: "run-serialized", sourceAlbumId: "album-1", trigger: "cron" },
+        step,
+        {
+          retryLimit: 5,
+          downloadAndGroup: vi.fn(),
+          recordRunFailure,
+          processGroupAttempt: vi.fn(),
+          recordExhaustedFailure: vi.fn(),
+          finalize: vi.fn(),
+          notify: vi.fn(),
+        },
+      ),
+    ).rejects.toMatchObject({
+      name: "icloud_invalid_webstream_response",
+      message: "serialized terminal failure",
+    });
+
+    expect(recordRunFailure).toHaveBeenCalledWith(
+      "icloud_invalid_webstream_response",
+    );
+    expect(calls).toEqual([
+      "download-and-group",
+      "record-download-and-group-failure",
+    ]);
   });
 
   it("retries a transient group through its durable step then finalizes and notifies the successful result", async () => {

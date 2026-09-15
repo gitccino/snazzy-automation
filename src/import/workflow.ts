@@ -66,6 +66,13 @@ interface ImportWorkflowOperations {
   ): Promise<void>;
 }
 
+function durableErrorCode(error: unknown, fallback: string): string {
+  if (error instanceof OperationalError) return error.code;
+  return error instanceof Error && /^[a-z][a-z0-9_]*$/.test(error.name)
+    ? error.name
+    : fallback;
+}
+
 export async function runImportWorkflow(
   deps: ProcessGroupDeps,
   payload: ImportWorkflowParams,
@@ -78,29 +85,26 @@ export async function runImportWorkflow(
       try {
         return await operations.downloadAndGroup();
       } catch (error) {
+        const code = durableErrorCode(
+          error,
+          "non_retryable_download_error",
+        );
         if (!isRetryable(error)) {
-          const code =
-            error instanceof OperationalError
-              ? error.code
-              : "non_retryable_download_error";
           const message =
             error instanceof Error
               ? error.message
               : "Non-retryable download error";
           throw new NonRetryableError(message, code);
         }
+        if (error instanceof Error) error.name = code;
         throw error;
       }
     });
   } catch (error) {
-    if (error instanceof NonRetryableError) {
-      const errorCode = /^[a-z][a-z0-9_]*$/.test(error.name)
-        ? error.name
-        : "non_retryable_download_error";
-      await step.do("record-download-and-group-failure", () =>
-        operations.recordRunFailure(errorCode),
-      );
-    }
+    const errorCode = durableErrorCode(error, "download_and_group_failed");
+    await step.do("record-download-and-group-failure", () =>
+      operations.recordRunFailure(errorCode),
+    );
     throw error;
   }
   const { pendingGroups, orphanRange, checkpointPosition } = downloadOutcome;
