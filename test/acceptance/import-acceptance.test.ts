@@ -328,7 +328,18 @@ describe("import acceptance", () => {
     expect(result.succeededProductIds).toEqual(["A-501"]);
     expect(harness.created.size).toBe(1);
     expect(await harness.deps.repo.getCheckpoint(harness.source.sourceAlbumId)).toBe(20);
-    expect(harness.source.downloads).toHaveLength(10);
+    expect(harness.source.downloads).toEqual([
+      "g2-marker",
+      "g2-photo-0",
+      "g2-photo-1",
+      "g2-photo-2",
+      "g2-photo-3",
+      "g2-photo-4",
+      "g2-photo-5",
+      "g2-photo-6",
+      "g2-photo-7",
+      "g2-photo-8",
+    ]);
   });
 
   it("4. unchanged repeated /upload downloads nothing and creates no duplicate", async () => {
