@@ -90,11 +90,13 @@ async function fetchLinkedProducts(
   const body = z.object({
     records: z.array(AirtableProductRecordSchema),
   }).parse(await response.json());
+  const requestedRecordIds = new Set(recordIds);
   const productsByRecordId = new Map(body.records.map((record) => [record.id, record]));
   if (
-    productsByRecordId.size !== recordIds.length
-    || body.records.length !== recordIds.length
-    || recordIds.some((recordId) => !productsByRecordId.has(recordId))
+    requestedRecordIds.size !== recordIds.length
+    || productsByRecordId.size !== requestedRecordIds.size
+    || body.records.length !== requestedRecordIds.size
+    || [...requestedRecordIds].some((recordId) => !productsByRecordId.has(recordId))
   ) {
     throw new OperationalError(
       "airtable_linked_products_mismatch",

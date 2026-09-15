@@ -152,6 +152,30 @@ describe("findRunnableRunForDate", () => {
     });
   });
 
+  it("rejects duplicate linked product IDs before accepting substituted records", async () => {
+    const fetcher = vi.fn<Fetcher>()
+      .mockResolvedValueOnce(jsonResponse({
+        records: [{
+          id: "recRun1",
+          fields: {
+            "Publication Date": "2026-09-01",
+            Status: "Ready",
+            Products: ["recProd1", "recProd1"],
+          },
+        }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        records: [productRecord("recProd1", "A-1001"), productRecord("recProd2", "A-1002")],
+      }));
+
+    await expect(
+      findRunnableRunForDate(fetcher, config, "token", "2026-09-01"),
+    ).rejects.toMatchObject({
+      code: "airtable_linked_products_mismatch",
+      retryable: false,
+    });
+  });
+
   it.each([
     ["returns an unexpected product", [productRecord("recProd1", "A-1001"), productRecord("recOther", "A-9999")]],
     ["returns the same product twice", [productRecord("recProd1", "A-1001"), productRecord("recProd1", "A-1001")]],
