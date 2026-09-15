@@ -1,7 +1,14 @@
-// ponytail: placeholder Worker entry-point so the Vitest pool can boot.
-// Task 15 replaces this with the real cron + /upload router.
+import type { Env } from "./env";
+import { routeRequest } from "./router";
+import { handleScheduled } from "./scheduled";
+
+export { ImportWorkflow } from "./import/workflow";
+
 export default {
-  async fetch(): Promise<Response> {
-    return new Response("not implemented", { status: 501 });
+  fetch(request, env) {
+    return routeRequest(request, env);
   },
-};
+  scheduled(controller, env, ctx) {
+    ctx.waitUntil(handleScheduled(env, controller.cron));
+  },
+} satisfies ExportedHandler<Env>;
