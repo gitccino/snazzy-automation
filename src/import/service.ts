@@ -81,6 +81,37 @@ async function deleteInvalidAirtableProduct(
   }
 }
 
+async function verifyKnownAirtableProduct(
+  airtable: AirtableProductsClient,
+  recordId: string,
+  expected: Parameters<AirtableProductsClient["verifyProduct"]>[1],
+): Promise<void> {
+  let verified: boolean;
+  try {
+    verified = await airtable.verifyProduct(recordId, expected);
+  } catch (error) {
+    if (
+      !(error instanceof OperationalError) ||
+      error.code !== "airtable_verify_invalid_response"
+    ) {
+      throw error;
+    }
+    await deleteInvalidAirtableProduct(airtable, recordId);
+    throw new OperationalError(
+      "airtable_verification_failed",
+      "Airtable Product verification returned a malformed row",
+      true,
+    );
+  }
+  if (verified) return;
+  await deleteInvalidAirtableProduct(airtable, recordId);
+  throw new OperationalError(
+    "airtable_verification_failed",
+    "Airtable Product verification failed",
+    true,
+  );
+}
+
 function extensionFor(mediaType: SourcePhoto["mediaType"]): string {
   return mediaType === "image/jpeg" ? "jpg" : "bin";
 }
@@ -263,7 +294,8 @@ export async function processProductGroupAttempt(
 
     const existing = await deps.airtable.findBySystemGroupId(group.groupId);
     if (existing !== null) {
-      const existingVerified = await deps.airtable.verifyProduct(
+      await verifyKnownAirtableProduct(
+        deps.airtable,
         existing.recordId,
         {
           productId: existing.productId,
@@ -272,14 +304,6 @@ export async function processProductGroupAttempt(
           imageCount: group.attachablePhotos.length,
         },
       );
-      if (!existingVerified) {
-        await deleteInvalidAirtableProduct(deps.airtable, existing.recordId);
-        throw new OperationalError(
-          "airtable_verification_failed",
-          "Airtable Product verification failed",
-          true,
-        );
-      }
       await deps.audit.record({
         correlationId: importRunId,
         actor: "system:import",
@@ -321,24 +345,12 @@ export async function processProductGroupAttempt(
     await deps.repo.setGroupState(group.groupRowId, "importing", {
       airtableRecordId: created.recordId,
     });
-    if (
-      !(await deps.airtable.verifyProduct(
-        created.recordId,
-        {
-          productId,
-          systemGroupId: group.groupId,
-          uploadDate: intendedUploadDate,
-          imageCount: group.attachablePhotos.length,
-        },
-      ))
-    ) {
-      await deleteInvalidAirtableProduct(deps.airtable, created.recordId);
-      throw new OperationalError(
-        "airtable_verification_failed",
-        "Airtable Product verification failed",
-        true,
-      );
-    }
+    await verifyKnownAirtableProduct(deps.airtable, created.recordId, {
+      productId,
+      systemGroupId: group.groupId,
+      uploadDate: intendedUploadDate,
+      imageCount: group.attachablePhotos.length,
+    });
     await deps.audit.record({
       correlationId: importRunId,
       actor: "system:import",

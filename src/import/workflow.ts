@@ -43,6 +43,7 @@ interface WorkflowStepLike {
 interface ImportWorkflowOperations {
   retryLimit: number;
   downloadAndGroup(): Promise<DownloadAndGroupOutcome>;
+  recordRunFailure(errorCode: string): Promise<void>;
   processGroupAttempt(
     deps: ProcessGroupDeps,
     group: PersistedGroup,
@@ -71,10 +72,38 @@ export async function runImportWorkflow(
   step: WorkflowStepLike,
   operations: ImportWorkflowOperations,
 ): Promise<ImportRunResult> {
-  const { pendingGroups, orphanRange, checkpointPosition } = await step.do(
-    "download-and-group",
-    () => operations.downloadAndGroup(),
-  );
+  let downloadOutcome: DownloadAndGroupOutcome;
+  try {
+    downloadOutcome = await step.do("download-and-group", async () => {
+      try {
+        return await operations.downloadAndGroup();
+      } catch (error) {
+        if (!isRetryable(error)) {
+          const code =
+            error instanceof OperationalError
+              ? error.code
+              : "non_retryable_download_error";
+          const message =
+            error instanceof Error
+              ? error.message
+              : "Non-retryable download error";
+          throw new NonRetryableError(message, code);
+        }
+        throw error;
+      }
+    });
+  } catch (error) {
+    if (error instanceof NonRetryableError) {
+      const errorCode = /^[a-z][a-z0-9_]*$/.test(error.name)
+        ? error.name
+        : "non_retryable_download_error";
+      await step.do("record-download-and-group-failure", () =>
+        operations.recordRunFailure(errorCode),
+      );
+    }
+    throw error;
+  }
+  const { pendingGroups, orphanRange, checkpointPosition } = downloadOutcome;
   const succeededProductIds: string[] = [];
   const failedGroups: ImportRunResult["failedGroups"] = [];
 
@@ -201,6 +230,12 @@ export class ImportWorkflow extends WorkflowEntrypoint<
       retryLimit: config.importRetryLimit,
       downloadAndGroup: () =>
         downloadAndGroupSnapshot(deps, event.payload.importRunId),
+      recordRunFailure: (failureReason) =>
+        repo.failImportRun({
+          id: event.payload.importRunId,
+          sourceAlbumId: event.payload.sourceAlbumId,
+          failureReason,
+        }),
       processGroupAttempt: processProductGroupAttempt,
       recordExhaustedFailure: recordExhaustedGroupFailure,
       finalize: (hadFailures, orphanPhotoCount, checkpointPosition) =>

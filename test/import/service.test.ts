@@ -1126,6 +1126,45 @@ describe("processProductGroupAttempt", () => {
     ]);
   });
 
+  it("deletes a newly created row whose verification response is definitely malformed", async () => {
+    const deletedRecordIds: string[] = [];
+    const { deps, group } = await buildProcessDeps({
+      verifyProduct: async () => {
+        throw new OperationalError(
+          "airtable_verify_invalid_response",
+          "Airtable returned a malformed verify response",
+          false,
+        );
+      },
+      deleteProduct: async (recordId) => {
+        deletedRecordIds.push(recordId);
+      },
+    });
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-malformed-created"),
+    ).rejects.toMatchObject({
+      code: "airtable_verification_failed",
+      retryable: true,
+    });
+
+    expect(deletedRecordIds).toEqual(["rec-created"]);
+    expect(await auditRows("run-malformed-created")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_id_allocated",
+        before_value: null,
+        after_value: "A-501",
+      },
+      {
+        actor: "system:import",
+        action: "product_group_attempt_failed",
+        before_value: "A-501",
+        after_value: "airtable_verification_failed",
+      },
+    ]);
+  });
+
   it("surfaces newly created row cleanup failure as retryable", async () => {
     const { deps, group } = await buildProcessDeps({
       verifyProduct: async () => false,
@@ -1290,6 +1329,46 @@ describe("processProductGroupAttempt", () => {
       attemptCount: 1,
     });
     expect(await auditRows("run-invalid-recovery")).toEqual([
+      {
+        actor: "system:import",
+        action: "product_group_attempt_failed",
+        before_value: "A-501",
+        after_value: "airtable_verification_failed",
+      },
+    ]);
+  });
+
+  it("deletes a recovered row whose verification response is definitely malformed", async () => {
+    const deletedRecordIds: string[] = [];
+    const { deps, group } = await buildProcessDeps({
+      findBySystemGroupId: async () => ({
+        recordId: "rec-malformed-recovery",
+        productId: "A-501",
+      }),
+      verifyProduct: async () => {
+        throw new OperationalError(
+          "airtable_verify_invalid_response",
+          "Airtable returned a malformed verify response",
+          false,
+        );
+      },
+      deleteProduct: async (recordId) => {
+        deletedRecordIds.push(recordId);
+      },
+    });
+    await deps.repo.setGroupState(group.groupRowId, "importing", {
+      productId: "A-501",
+    });
+
+    await expect(
+      processProductGroupAttempt(deps, group, "run-malformed-recovery"),
+    ).rejects.toMatchObject({
+      code: "airtable_verification_failed",
+      retryable: true,
+    });
+
+    expect(deletedRecordIds).toEqual(["rec-malformed-recovery"]);
+    expect(await auditRows("run-malformed-recovery")).toEqual([
       {
         actor: "system:import",
         action: "product_group_attempt_failed",

@@ -76,6 +76,53 @@ function processDeps(): ProcessGroupDeps {
 }
 
 describe("runImportWorkflow", () => {
+  it("records a terminal download failure durably before stopping the workflow", async () => {
+    const step = retryingStep();
+    const recordRunFailure = vi.fn().mockResolvedValue(undefined);
+    const finalize = vi.fn().mockResolvedValue(undefined);
+    const notify = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      runImportWorkflow(
+        processDeps(),
+        { importRunId: "run-1", sourceAlbumId: "album-1", trigger: "cron" },
+        step,
+        {
+          retryLimit: 5,
+          downloadAndGroup: async () => {
+            throw new OperationalError(
+              "icloud_invalid_webstream_response",
+              "iCloud returned a malformed response",
+              false,
+            );
+          },
+          recordRunFailure,
+          processGroupAttempt: vi.fn(),
+          recordExhaustedFailure: vi.fn(),
+          finalize,
+          notify,
+        },
+      ),
+    ).rejects.toMatchObject({
+      name: "icloud_invalid_webstream_response",
+      message: "iCloud returned a malformed response",
+    });
+
+    expect(recordRunFailure).toHaveBeenCalledWith(
+      "icloud_invalid_webstream_response",
+    );
+    expect(step.calls).toEqual([
+      { name: "download-and-group", options: null, attempts: 1 },
+      {
+        name: "record-download-and-group-failure",
+        options: null,
+        attempts: 1,
+      },
+    ]);
+    expect(finalize).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
   it("retries a transient group through its durable step then finalizes and notifies the successful result", async () => {
     // Catches a production mutation that catches a transient attempt error
     // inside the durable callback, so Workflow retries never run.
@@ -109,6 +156,7 @@ describe("runImportWorkflow", () => {
           },
           checkpointPosition: 10,
         }),
+        recordRunFailure: vi.fn(),
         processGroupAttempt: process,
         recordExhaustedFailure: vi.fn(),
         finalize,
@@ -189,6 +237,7 @@ describe("runImportWorkflow", () => {
           orphanRange: null,
           checkpointPosition: 10,
         }),
+        recordRunFailure: vi.fn(),
         processGroupAttempt: process,
         recordExhaustedFailure: record,
         finalize,
@@ -268,6 +317,7 @@ describe("runImportWorkflow", () => {
           orphanRange: null,
           checkpointPosition: 10,
         }),
+        recordRunFailure: vi.fn(),
         processGroupAttempt: process,
         recordExhaustedFailure: record,
         finalize: vi.fn().mockResolvedValue(undefined),

@@ -36,6 +36,80 @@ describe("import-repository", () => {
     expect(await r.hasRunningImportRun(albumId)).toBe(false);
   });
 
+  it("terminalizes a failed workflow run without advancing its checkpoint", async () => {
+    const r = repo();
+    const albumId = `album-${crypto.randomUUID()}`;
+    const runId = crypto.randomUUID();
+    await r.createImportRun({
+      id: runId,
+      sourceAlbumId: albumId,
+      trigger: "cron",
+    });
+
+    await r.failImportRun({
+      id: runId,
+      sourceAlbumId: albumId,
+      failureReason: "icloud_invalid_webstream_response",
+    });
+
+    expect(await r.hasRunningImportRun(albumId)).toBe(false);
+    expect(await r.getCheckpoint(albumId)).toBeNull();
+    expect(
+      await testEnv()
+        .DB.prepare(
+          `SELECT status, failure_reason, checkpoint_position
+           FROM import_runs WHERE id = ?`,
+        )
+        .bind(runId)
+        .first(),
+    ).toEqual({
+      status: "completed_with_failures",
+      failure_reason: "icloud_invalid_webstream_response",
+      checkpoint_position: null,
+    });
+  });
+
+  it("does not let a stale workflow failure overwrite a completed run", async () => {
+    const r = repo();
+    const albumId = `album-${crypto.randomUUID()}`;
+    const runId = crypto.randomUUID();
+    await r.createImportRun({
+      id: runId,
+      sourceAlbumId: albumId,
+      trigger: "cron",
+    });
+    await r.finalizeImportRun({
+      id: runId,
+      sourceAlbumId: albumId,
+      status: "completed",
+      orphanPhotoCount: 0,
+      checkpointPosition: 42,
+    });
+
+    await expect(
+      r.failImportRun({
+        id: runId,
+        sourceAlbumId: albumId,
+        failureReason: "icloud_invalid_webstream_response",
+      }),
+    ).rejects.toThrow(/cannot fail import run/);
+
+    expect(await r.getCheckpoint(albumId)).toBe(42);
+    expect(
+      await testEnv()
+        .DB.prepare(
+          `SELECT status, failure_reason, checkpoint_position
+           FROM import_runs WHERE id = ?`,
+        )
+        .bind(runId)
+        .first(),
+    ).toEqual({
+      status: "completed",
+      failure_reason: null,
+      checkpoint_position: 42,
+    });
+  });
+
   it("refuses finalization and checkpoint advancement while a group is non-terminal", async () => {
     const r = repo();
     const albumId = `album-${crypto.randomUUID()}`;
@@ -74,6 +148,59 @@ describe("import-repository", () => {
     await expect(r.finalizeImportRun({
       id: runId, sourceAlbumId: albumId, status: "completed", orphanPhotoCount: 0, checkpointPosition: 99,
     })).rejects.toThrow(/cannot finalize import run/);
+    expect(await r.getCheckpoint(albumId)).toBe(42);
+  });
+
+  it("accepts an identical terminal finalization retry after the first batch committed", async () => {
+    const r = repo();
+    const albumId = `album-${crypto.randomUUID()}`;
+    const runId = crypto.randomUUID();
+    const finalization = {
+      id: runId,
+      sourceAlbumId: albumId,
+      status: "completed_with_failures" as const,
+      orphanPhotoCount: 2,
+      checkpointPosition: 42,
+    };
+    await r.createImportRun({
+      id: runId,
+      sourceAlbumId: albumId,
+      trigger: "cron",
+    });
+
+    await r.finalizeImportRun(finalization);
+    await expect(r.finalizeImportRun(finalization)).resolves.toBeUndefined();
+
+    expect(await r.getCheckpoint(albumId)).toBe(42);
+  });
+
+  it("rejects a conflicting terminal finalization retry without moving the checkpoint", async () => {
+    const r = repo();
+    const albumId = `album-${crypto.randomUUID()}`;
+    const runId = crypto.randomUUID();
+    await r.createImportRun({
+      id: runId,
+      sourceAlbumId: albumId,
+      trigger: "cron",
+    });
+    await r.finalizeImportRun({
+      id: runId,
+      sourceAlbumId: albumId,
+      status: "completed",
+      orphanPhotoCount: 0,
+      checkpointPosition: 42,
+    });
+
+    await expect(
+      r.finalizeImportRun({
+        id: runId,
+        sourceAlbumId: albumId,
+        status: "completed_with_failures",
+        orphanPhotoCount: 1,
+        checkpointPosition: 99,
+      }),
+    ).rejects.toThrow(/cannot finalize import run/);
+
     expect(await r.getCheckpoint(albumId)).toBe(42);
   });
 

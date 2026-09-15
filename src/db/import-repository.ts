@@ -18,6 +18,11 @@ export interface ImportRepository {
   createImportRun(input: { id: string; sourceAlbumId: string; trigger: "cron" | "line" | "admin" }): Promise<void>;
   hasRunningImportRun(sourceAlbumId: string): Promise<boolean>;
   markImportRunStartFailed(id: string): Promise<void>;
+  failImportRun(input: {
+    id: string;
+    sourceAlbumId: string;
+    failureReason: string;
+  }): Promise<void>;
   getCheckpoint(sourceAlbumId: string): Promise<number | null>;
   finalizeImportRun(input: {
     id: string;
@@ -125,6 +130,42 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
         .run();
     },
 
+    async failImportRun(input) {
+      const result = await db
+        .prepare(
+          `UPDATE import_runs
+           SET status = 'completed_with_failures', finished_at = ?,
+               failure_reason = ?
+           WHERE id = ?
+             AND source_album_id = ?
+             AND status = 'running'`,
+        )
+        .bind(
+          clock.now().toISOString(),
+          input.failureReason,
+          input.id,
+          input.sourceAlbumId,
+        )
+        .run();
+      if (result.meta.changes !== 1) {
+        const terminal = await db
+          .prepare(
+            `SELECT 1 AS identical
+             FROM import_runs
+             WHERE id = ?
+               AND source_album_id = ?
+               AND status = 'completed_with_failures'
+               AND failure_reason = ?
+               AND checkpoint_position IS NULL`,
+          )
+          .bind(input.id, input.sourceAlbumId, input.failureReason)
+          .first<{ identical: number }>();
+        if (terminal === null) {
+          throw new Error(`cannot fail import run "${input.id}"`);
+        }
+      }
+    },
+
     async getCheckpoint(sourceAlbumId) {
       const row = await db
         .prepare(`SELECT last_position FROM import_checkpoints WHERE source_album_id = ?`)
@@ -138,7 +179,8 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
       const results = await db.batch([
         db.prepare(
           `UPDATE import_runs
-           SET status = ?, finished_at = ?, orphan_photo_count = ?
+           SET status = ?, finished_at = ?, orphan_photo_count = ?,
+               checkpoint_position = ?, failure_reason = NULL
            WHERE id = ?
              AND source_album_id = ?
              AND status = 'running'
@@ -148,7 +190,14 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
                WHERE import_run_id = import_runs.id
                  AND state IN ('pending', 'importing')
              )`,
-        ).bind(input.status, now, input.orphanPhotoCount, input.id, input.sourceAlbumId),
+        ).bind(
+          input.status,
+          now,
+          input.orphanPhotoCount,
+          input.checkpointPosition,
+          input.id,
+          input.sourceAlbumId,
+        ),
         db.prepare(
           `INSERT INTO import_checkpoints (source_album_id, last_position, updated_at)
            SELECT ?, ?, ?
@@ -159,7 +208,28 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
         ).bind(input.sourceAlbumId, input.checkpointPosition, now),
       ]);
       if (results[0]?.meta.changes !== 1) {
-        throw new Error(`cannot finalize import run "${input.id}"`);
+        const terminal = await db
+          .prepare(
+            `SELECT 1 AS identical
+             FROM import_runs
+             WHERE id = ?
+               AND source_album_id = ?
+               AND status = ?
+               AND orphan_photo_count = ?
+               AND checkpoint_position = ?
+               AND failure_reason IS NULL`,
+          )
+          .bind(
+            input.id,
+            input.sourceAlbumId,
+            input.status,
+            input.orphanPhotoCount,
+            input.checkpointPosition,
+          )
+          .first<{ identical: number }>();
+        if (terminal === null) {
+          throw new Error(`cannot finalize import run "${input.id}"`);
+        }
       }
     },
 

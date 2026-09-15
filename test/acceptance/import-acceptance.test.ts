@@ -190,6 +190,8 @@ async function buildHarness(
     return runImportWorkflow(deps, payload, retryingStep(), {
       retryLimit: 5,
       downloadAndGroup: () => downloadAndGroupSnapshot(deps, runId),
+      recordRunFailure: (failureReason) =>
+        repo.failImportRun({ id: runId, sourceAlbumId, failureReason }),
       processGroupAttempt: processProductGroupAttempt,
       recordExhaustedFailure: recordExhaustedGroupFailure,
       finalize: (hadFailures, orphanPhotoCount, checkpointPosition) =>
