@@ -35,23 +35,25 @@ The import plan (`docs/superpowers/plans/2026-09-01-snazzy-import-pipeline.md`) 
 
 - `src/env.ts` exporting the import-stage `Env`; Task 2 extends it with publication-only Workflow and secret bindings after `PublicationWorkflowParams` exists.
 - `src/config.ts` exporting the import-stage `parseConfig(raw: unknown): AppConfig`; Task 2 adds publication-only Google, Claude, and cron fields while retaining import fields.
-- `src/shared/errors.ts` exporting `OperationalError` (has `code: string`, `message: string`, `retryable: boolean`) and a `RetryableError`/`NonRetryableError` pair built on it.
-- `src/shared/http.ts` exporting `Fetcher`, `SafeFetchOptions`, and `safeFetch(fetcher, input, options): Promise<Response>`.
+- `src/shared/errors.ts` exporting `OperationalError` (has `code: string`, `message: string`, `retryable: boolean`) and `isRetryable(error): boolean`; Task 10 converts permanent stage failures to `NonRetryableError` from `cloudflare:workflows` at the durable boundary.
+- `src/shared/http.ts` exporting `Fetcher`, `SafeFetchOptions`, and `safeFetch(input: string, init: RequestInit | undefined, options: SafeFetchOptions): Promise<Response>`; external publication clients remain single-call and may mirror Import's direct-fetch error mapping where URL redaction is unnecessary.
 - `src/shared/ids.ts` exporting `newCorrelationId(): string` and `sha256Hex(data: ArrayBuffer | Uint8Array): Promise<string>`.
 - `src/shared/time.ts` exporting `nowBangkokIso(clock: Clock): string`, `bangkokDateTimeThai(clock: Clock): string`, and `todayBangkokDate(clock: Clock): string`; date-only trigger lookup uses `todayBangkokDate` and never slices a UTC ISO timestamp.
 - `src/shared/logger.ts` exporting `createLogger(base: LogFields)` with `.info()`/`.warn()`/`.error()` methods and secret-key redaction.
-- `src/db/audit.ts` exporting `createAuditLog(db, ids, clock): AuditLog`; `AuditLog.record(entry)` accepts `beforeValue`/`afterValue`, actor, action, entity, and correlation fields.
+- `src/db/audit.ts` exporting `createAuditLog(db, ids, clock): AuditLog`; `AuditLog.record(entry)` accepts exactly `correlationId`, `actor`, `action`, `beforeValue`, and `afterValue`.
 - `src/line/client.ts` exporting `createLineClient({ channelAccessToken, fetch }): LineClient`; `LineClient.pushMessage(toGroupId, text)` sends Thai import/publication notifications.
-- `src/line/messages.ts` exporting Thai message builders used for import logs; this plan adds publication-specific builders to the same file.
+- Import notifications live in `src/import/notify.ts`; no `src/line/messages.ts` exists yet. Task 8 creates that file for publication-specific Thai message builders without moving or renaming Import behavior.
 - `src/import/airtable-products.ts` exporting an Airtable REST helper pattern (auth header, base/table path construction, retry-free single-call semantics) that `publication/airtable-runs.ts` mirrors for consistency.
-- Migration `migrations/0001_initial.sql` already applied, containing `sequences`, `import_runs`, `import_checkpoints`, `photo_assets`, `product_groups`, and `audit_events`; LINE command state arrives later in `migrations/0003_line_inventory.sql`.
+- Migrations `migrations/0001_initial.sql` and `migrations/0002_import_run_terminal_details.sql` are already applied. This plan owns `migrations/0003_publication.sql`; the later LINE and hardening plans must use `0004_line_inventory.sql` and `0005_usage_metrics.sql` respectively.
+
+Reconciled baseline: `main` at squash-merge commit `aa5edba` (`feat: add durable Snazzy import pipeline (#2)`), with TypeScript clean and 34 test files / 197 tests. Executors must preserve the existing `/assets` and `/upload` router branches, Import cron behavior, `IMPORT_WORKFLOW` binding/export, and both Import migrations while extending them with Publication behavior.
 
 ---
 
 ## Task 1: Publication D1 schema and repository
 
 **Files:**
-- Create: `migrations/0002_publication.sql`
+- Create: `migrations/0003_publication.sql`
 - Create: `src/db/publication-repository.ts`
 - Test: `test/db/publication-repository.test.ts`
 
@@ -221,7 +223,7 @@ Expected: FAIL — `Cannot find module '../../src/db/publication-repository'` an
 - [ ] **Step 3: Write the migration**
 
 ```sql
--- migrations/0002_publication.sql
+-- migrations/0003_publication.sql
 CREATE TABLE publication_jobs (
   publication_run_id TEXT PRIMARY KEY,
   state TEXT NOT NULL CHECK (state IN ('locked', 'validating', 'validation_failed', 'generating', 'succeeded', 'failed')),
@@ -251,7 +253,7 @@ CREATE INDEX idx_publication_product_cache_run ON publication_product_cache (pub
 - [ ] **Step 4: Apply the migration locally**
 
 Run: `npm run db:migrate:local`
-Expected: `0002_publication.sql` applied with no errors.
+Expected: `0003_publication.sql` applied after both Import migrations with no errors.
 
 - [ ] **Step 5: Write the repository implementation**
 
@@ -459,7 +461,7 @@ Run: `npm run check`
 Expected: PASS.
 
 ```bash
-git add migrations/0002_publication.sql src/db/publication-repository.ts test/db/publication-repository.test.ts
+git add migrations/0003_publication.sql src/db/publication-repository.ts test/db/publication-repository.test.ts
 git commit -m "feat(publication): add D1 job lock and per-product output cache"
 ```
 
@@ -470,6 +472,8 @@ git commit -m "feat(publication): add D1 job lock and per-product output cache"
 **Files:**
 - Modify: `src/config.ts`
 - Modify: `src/env.ts`
+- Modify: `test/config.test.ts`
+- Modify: `test/helpers/env.ts`
 - Create: `src/publication/types.ts`
 - Create: `src/publication/airtable-runs.ts`
 - Test: `test/publication/airtable-runs.test.ts`
@@ -815,6 +819,34 @@ CLAUDE_MODEL: "claude-opus-5",
 CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150_000,
 ```
 
+Extend the exact object expected by the existing `"parses the import uppercase JSON contract into camel-case runtime fields"` test with the same seven camel-case Publication properties. That test uses `toEqual`, so updating only its input would make the existing Import test fail on the newly returned keys:
+
+```ts
+publicationCron: "30 23 * * *",
+publicationRetryLimit: 5,
+airtablePublicationRunsTableId: "tblRuns",
+googleDriveFolderId: "folder-1",
+googleTemplateDocId: "template-1",
+claudeModel: "claude-opus-5",
+claudeRequestInputTokenLimit: 150_000,
+```
+
+Extend `TestEnvConfig` and the object returned by `createTestEnv()` in `test/helpers/env.ts` with the two new secret bindings:
+
+```ts
+GOOGLE_SERVICE_ACCOUNT_JSON: string;
+ANTHROPIC_API_KEY: string;
+
+// createTestEnv() defaults
+GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({
+  client_email: "publication-test@example.iam.gserviceaccount.com",
+  private_key: "test-private-key",
+}),
+ANTHROPIC_API_KEY: "test-anthropic-key",
+```
+
+Inside the existing `APP_CONFIG_JSON` fixture in `createTestEnv()`, add the same seven uppercase Publication config keys shown for `validRawConfig`. This keeps every pre-existing Import route, scheduler, and acceptance test valid after the shared config schema becomes stricter.
+
 Append these tests to `test/config.test.ts`:
 
 ```ts
@@ -1104,7 +1136,7 @@ export async function updateProductCollage(
 Add the type import and three publication-only members without renaming existing import bindings:
 
 ```ts
-// add beside the existing Workflow import
+// add at the top of src/env.ts
 import type { PublicationWorkflowParams } from "./publication/types";
 
 // insert inside the existing Env interface
@@ -1113,19 +1145,19 @@ GOOGLE_SERVICE_ACCOUNT_JSON: string;
 ANTHROPIC_API_KEY: string;
 ```
 
-`Workflow` remains the existing `cloudflare:workers` type import. `LINE_CHANNEL_SECRET` is added later by the LINE plan, where webhook verification first needs it.
+`Workflow` remains the ambient Workers type already used by the merged `Env`; do not add a redundant runtime import. `LINE_CHANNEL_SECRET` is added later by the LINE plan, where webhook verification first needs it.
 
-- [ ] **Step 7: Run test to verify it passes**
+- [ ] **Step 7: Run focused tests to verify the shared fixtures and client pass**
 
-Run: `npx vitest run test/publication/airtable-runs.test.ts`
-Expected: PASS — 9 tests green.
+Run: `npx vitest run test/config.test.ts test/publication/airtable-runs.test.ts test/routes/upload.test.ts test/scheduled.test.ts`
+Expected: PASS — Publication config/client tests and the existing Import consumers of `createTestEnv()` remain green.
 
 - [ ] **Step 8: Full check and commit**
 
 Run: `npm run check`
 
 ```bash
-git add src/config.ts src/env.ts src/publication/types.ts src/publication/airtable-runs.ts test/config.test.ts test/publication/airtable-runs.test.ts
+git add src/config.ts src/env.ts src/publication/types.ts src/publication/airtable-runs.ts test/config.test.ts test/helpers/env.ts test/publication/airtable-runs.test.ts
 git commit -m "feat(publication): add Airtable Publication Runs client"
 ```
 
@@ -3576,7 +3608,7 @@ git commit -m "feat(publication): add Google Drive/Docs client with template fil
 ## Task 8: LINE publication log messages
 
 **Files:**
-- Modify: `src/line/messages.ts` (append; do not rename existing exports)
+- Create: `src/line/messages.ts`
 - Test: `test/line/publication-messages.test.ts`
 
 **Interfaces:**
@@ -3675,10 +3707,10 @@ describe("buildPublicationWorkflowFailureMessage", () => {
 Run: `npx vitest run test/line/publication-messages.test.ts`
 Expected: FAIL — the three new exports do not exist yet.
 
-- [ ] **Step 3: Append the implementation to `src/line/messages.ts`**
+- [ ] **Step 3: Create `src/line/messages.ts`**
 
 ```ts
-// append to src/line/messages.ts
+// src/line/messages.ts
 import type { ValidationResult } from "../publication/validator";
 import { formatValidationErrorSummary } from "../publication/validator";
 
@@ -4722,6 +4754,8 @@ git commit -m "feat(publication): add retry-safe publication stages"
 - Test: `test/publication/workflow.test.ts`
 - Test: `test/publication/trigger.test.ts`
 - Test: `test/routes/docs.test.ts`
+- Test: `test/router.test.ts`
+- Test: `test/scheduled.test.ts`
 
 **Interfaces:**
 - Consumes: stage functions from Task 9; `findRunnableRunForDate` from Task 2; `verifyAdminBearer` from `src/shared/admin-auth.ts`; `createAssetStore` from Import Task 6; `WorkflowInstance.restart()`, `resume()`, and `status()` from Cloudflare Workflows.
@@ -5466,15 +5500,24 @@ export async function handleDocsRoute(
   clock: Clock = { now: () => new Date() },
 ): Promise<Response> {
   if (!await verifyAdminBearer(request, env.ADMIN_ROUTE_TOKEN)) {
-    return new Response("Unauthorized", { status: 401 });
+    return Response.json({ error: "unauthorized" }, { status: 401 });
   }
-  const result = await handleDocsTrigger(env, "admin", clock);
-  const status = ["started", "restarted", "resumed"].includes(result.status)
-    ? 202
-    : 200;
-  return Response.json(result, { status });
+  try {
+    const result = await handleDocsTrigger(env, "admin", clock);
+    const status = ["started", "restarted", "resumed"].includes(result.status)
+      ? 202
+      : 200;
+    return Response.json(result, { status });
+  } catch {
+    return Response.json(
+      { status: "publication_trigger_failed" },
+      { status: 500 },
+    );
+  }
 }
 ```
+
+Add a route test whose mocked trigger rejects with a message containing credential sentinels; assert the response is exactly status 500 with `{ status: "publication_trigger_failed" }` and contains none of the rejected message.
 
 Register exact native route:
 
@@ -5487,20 +5530,88 @@ if (request.method === "POST" && url.pathname === "/docs") {
 }
 ```
 
-Add exact cron branch; it calls the same internal trigger service and never calls the HTTP route or publication stages directly:
+Keep the existing `GET /assets/*` and `POST /upload` branches in their current order. Extend `test/router.test.ts` with a handler-boundary case proving authenticated `POST /docs` dispatches to `handleDocsRoute`; preserve the existing signed-asset and upload dispatch assertions.
+
+Replace `src/scheduled.ts` with the merged two-cron dispatcher below. It preserves the existing Import status checks and generic `scheduled_import_failed` boundary, adds an injected clock for Bangkok-date publication lookup, and calls the same internal trigger service rather than the HTTP route or publication stages directly:
 
 ```ts
 // src/scheduled.ts
+import type { Env } from "./env";
+import { parseConfig } from "./config";
+import { handleUploadTrigger } from "./routes/upload";
 import { handleDocsTrigger } from "./publication/trigger";
+import type { Clock } from "./shared/time";
 
-if (controller.cron === config.publicationCron) {
-  await handleDocsTrigger(
+export async function handleScheduled(
+  env: Env,
+  cron: string,
+  clock: Clock = { now: () => new Date() },
+): Promise<void> {
+  let failureCode = "scheduled_import_failed";
+  try {
+    const config = parseConfig(env.APP_CONFIG_JSON);
+    if (cron === config.importCron) {
+      const response = await handleUploadTrigger(env, "cron");
+      if (response.status !== 202 && response.status !== 409) {
+        throw new Error("scheduled_import_failed");
+      }
+      return;
+    }
+    if (cron === config.publicationCron) {
+      failureCode = "scheduled_publication_failed";
+      await handleDocsTrigger(env, "cron", clock);
+    }
+  } catch {
+    throw new Error(failureCode);
+  }
+}
+```
+
+Update the existing Worker entrypoint to pass the scheduled event time without changing its `waitUntil` ownership:
+
+```ts
+// src/index.ts scheduled handler
+ctx.waitUntil(handleScheduled(
+  env,
+  controller.cron,
+  { now: () => new Date(controller.scheduledTime) },
+));
+```
+
+Append scheduler tests that inject `2026-09-01T17:30:00.000Z`, prove only `PUBLICATION_CRON` calls `handleDocsTrigger(env, "cron", clock)`, prove unrelated crons remain no-ops, and prove a rejected Publication trigger is normalized to exactly `scheduled_publication_failed`. Keep every existing Import scheduler test unchanged.
+
+```ts
+const publicationTrigger = vi.hoisted(() => ({
+  handleDocsTrigger: vi.fn(),
+}));
+vi.mock("../src/publication/trigger", () => publicationTrigger);
+
+it("routes only the publication cron through the shared trigger with the scheduled clock", async () => {
+  const { env } = scheduledEnv();
+  const clock = { now: () => new Date("2026-09-01T17:30:00.000Z") };
+  publicationTrigger.handleDocsTrigger.mockResolvedValue({
+    status: "no_runnable_run",
+  });
+
+  await handleScheduled(env, "30 23 * * *", clock);
+
+  expect(publicationTrigger.handleDocsTrigger).toHaveBeenCalledWith(
     env,
     "cron",
-    { now: () => new Date(controller.scheduledTime) },
+    clock,
   );
-  return;
-}
+});
+
+it("normalizes publication scheduler failures", async () => {
+  const { env } = scheduledEnv();
+  publicationTrigger.handleDocsTrigger.mockRejectedValue(
+    new Error("private upstream response"),
+  );
+
+  await expect(handleScheduled(env, "30 23 * * *")).rejects.toThrow(
+    /^scheduled_publication_failed$/,
+  );
+});
 ```
 
 LINE `/docs` continues to call:
@@ -5534,7 +5645,7 @@ Keep the existing `IMPORT_WORKFLOW` entry; local tests and `wrangler dev` requir
 
 - [ ] **Step 9: Run focused tests**
 
-Run: `npx vitest run test/publication/workflow.test.ts test/publication/trigger.test.ts test/routes/docs.test.ts test/scheduled.test.ts`
+Run: `npx vitest run test/publication/workflow.test.ts test/publication/trigger.test.ts test/routes/docs.test.ts test/router.test.ts test/scheduled.test.ts`
 Expected: PASS.
 
 - [ ] **Step 10: Run full check and commit**
@@ -5543,7 +5654,7 @@ Run: `npm run check`
 Expected: PASS.
 
 ```bash
-git add src/publication/workflow.ts src/publication/trigger.ts src/routes/docs.ts src/router.ts src/scheduled.ts src/index.ts wrangler.jsonc test/publication/workflow.test.ts test/publication/trigger.test.ts test/routes/docs.test.ts test/scheduled.test.ts
+git add src/publication/workflow.ts src/publication/trigger.ts src/routes/docs.ts src/router.ts src/scheduled.ts src/index.ts wrangler.jsonc test/publication/workflow.test.ts test/publication/trigger.test.ts test/routes/docs.test.ts test/router.test.ts test/scheduled.test.ts
 git commit -m "feat(publication): add durable Workflow and retry-safe triggers"
 ```
 
@@ -6272,7 +6383,7 @@ git commit -m "test(publication): prove validation, retry, recovery, and one-doc
 This plan is complete only when:
 
 - `npm run check` passes with all publication tests.
-- `migrations/0002_publication.sql` applies to a fresh local D1 database.
+- `migrations/0003_publication.sql` applies after `0001_initial.sql` and `0002_import_run_terminal_details.sql` on a fresh local D1 database.
 - Missing Product data returns the Airtable run to Draft, writes the complete Error Summary, sends a Thai LINE report, and performs no Google/Claude/Images/R2 side effect.
 - Collages use the first four ordered images, deterministic 1080×1080 2×2 contain layout, white padding, private R2 storage, and shared `AssetStore.signUrl` delivery.
 - Caption generation uses official `@anthropic-ai/sdk`, model `claude-opus-5`, adaptive thinking, `maxRetries: 0`, deterministic token batching, exactly three Thai drafts, valid-output caching, and missing-only retry.
