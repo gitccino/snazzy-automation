@@ -3,11 +3,17 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
+  "images": { "binding": "IMAGES" },
   "workflows": [
     {
       "name": "snazzy-import-workflow-local",
       "binding": "IMPORT_WORKFLOW",
       "class_name": "ImportWorkflow"
+    },
+    {
+      "name": "snazzy-publication-workflow-local",
+      "binding": "PUBLICATION_WORKFLOW",
+      "class_name": "PublicationWorkflow"
     }
   ],
   "d1_databases": [

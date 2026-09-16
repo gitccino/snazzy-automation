@@ -33,6 +33,32 @@ describe("asset-store", () => {
     expect(await verifyAssetToken("assets/hash-1.jpg", exp, sig, "test-secret", expiredNow)).toBe(false);
   });
 
+  it("signs a generated collage through the same private asset route", async () => {
+    const clock = fixedClock("2026-09-01T05:00:00.000Z");
+    const store = createAssetStore(
+      testEnv().IMAGES_BUCKET,
+      {
+        signingSecret: "test-signing-secret",
+        publicBaseUrl: "https://worker.example",
+      },
+      clock,
+    );
+
+    const url = new URL(
+      await store.signUrl(
+        "products/A-1001/collage/1080x1080.jpg",
+        900,
+      ),
+    );
+
+    expect(url.origin).toBe("https://worker.example");
+    expect(decodeURIComponent(url.pathname)).toContain(
+      "products/A-1001/collage/1080x1080.jpg",
+    );
+    expect(url.searchParams.get("exp")).toBeTruthy();
+    expect(url.searchParams.get("sig")).toBeTruthy();
+  });
+
   it("rejects a signature for a different key", async () => {
     const clock = fixedClock("2026-09-01T09:00:00.000Z");
     const store = createAssetStore(testEnv().IMAGES_BUCKET, { signingSecret: "test-secret", publicBaseUrl: "https://example.workers.dev" }, clock);

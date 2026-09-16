@@ -1,5 +1,6 @@
 import type { Env } from "./env";
 import { handleGetAsset } from "./routes/assets";
+import { handleDocsRoute } from "./routes/docs";
 import { handleUploadTrigger } from "./routes/upload";
 import { verifyAdminBearer } from "./shared/admin-auth";
 
@@ -13,6 +14,9 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
       return Response.json({ error: "unauthorized" }, { status: 401 });
     }
     return handleUploadTrigger(env, "admin");
+  }
+  if (request.method === "POST" && url.pathname === "/docs") {
+    return handleDocsRoute(request, env);
   }
   return Response.json({ error: "not_found" }, { status: 404 });
 }

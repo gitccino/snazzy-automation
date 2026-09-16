@@ -7,10 +7,17 @@ const validRawConfig = {
   PRODUCT_ID_PREFIX: "A",
   IMPORT_CRON: "0 23 * * *",
   IMPORT_RETRY_LIMIT: 5,
+  PUBLICATION_CRON: "30 23 * * *",
+  PUBLICATION_RETRY_LIMIT: 5,
   PRODUCT_ID_INITIAL_NUMBER: 1,
   FIRST_IMPORT_CUTOFF_DATE: "2026-09-01T00:00:00.000Z",
   AIRTABLE_BASE_ID: "appBase",
   AIRTABLE_PRODUCTS_TABLE_ID: "tblProducts",
+  AIRTABLE_PUBLICATION_RUNS_TABLE_ID: "tblRuns",
+  GOOGLE_DRIVE_FOLDER_ID: "folder-1",
+  GOOGLE_TEMPLATE_DOC_ID: "template-1",
+  CLAUDE_MODEL: "claude-opus-5",
+  CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150_000,
   LINE_ALLOWED_GROUP_ID: "Cgroup",
   PUBLIC_BASE_URL: "https://snazzy-staging.example.workers.dev",
 } as const;
@@ -25,10 +32,17 @@ describe("parseConfig", () => {
       productIdPrefix: "A",
       importCron: "0 23 * * *",
       importRetryLimit: 5,
+      publicationCron: "30 23 * * *",
+      publicationRetryLimit: 5,
       productIdInitialNumber: 1,
       firstImportCutoffDate: "2026-09-01T00:00:00.000Z",
       airtableBaseId: "appBase",
       airtableProductsTableId: "tblProducts",
+      airtablePublicationRunsTableId: "tblRuns",
+      googleDriveFolderId: "folder-1",
+      googleTemplateDocId: "template-1",
+      claudeModel: "claude-opus-5",
+      claudeRequestInputTokenLimit: 150_000,
       lineAllowedGroupId: "Cgroup",
       publicBaseUrl: "https://snazzy-staging.example.workers.dev",
     });
@@ -56,6 +70,30 @@ describe("parseConfig", () => {
     expect(() => parseConfig({
       ...validRawConfig,
       IMPORT_RETRY_LIMIT: 4,
+    })).toThrow();
+  });
+
+  it("maps every publication config key", () => {
+    const config = parseConfig(validRawConfig);
+    expect(config).toMatchObject({
+      publicationCron: "30 23 * * *",
+      publicationRetryLimit: 5,
+      airtablePublicationRunsTableId: "tblRuns",
+      googleDriveFolderId: "folder-1",
+      googleTemplateDocId: "template-1",
+      claudeModel: "claude-opus-5",
+      claudeRequestInputTokenLimit: 150_000,
+    });
+  });
+
+  it.each([
+    ["retry limit", { PUBLICATION_RETRY_LIMIT: 4 }],
+    ["model", { CLAUDE_MODEL: "claude-sonnet-5" }],
+    ["token limit", { CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150_001 }],
+  ])("rejects invalid publication %s", (_name, patch) => {
+    expect(() => parseConfig({
+      ...validRawConfig,
+      ...patch,
     })).toThrow();
   });
 });
