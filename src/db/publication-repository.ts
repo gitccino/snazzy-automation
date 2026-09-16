@@ -83,6 +83,23 @@ export async function acquireOrResumeJob(
   return { job, alreadySucceeded: job.state === "succeeded", ownsLock: insertResult.meta.changes === 1 };
 }
 
+/** Only the trigger may reopen a failed job after confirming its Workflow can start again. */
+export async function reopenFailedJobForRestart(
+  db: D1Database,
+  clock: Clock,
+  publicationRunId: string,
+  correlationId: string,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE publication_jobs SET state = 'locked', correlation_id = ?, updated_at = ?
+       WHERE publication_run_id = ? AND state = 'failed'`,
+    )
+    .bind(correlationId, clock.now().toISOString(), publicationRunId)
+    .run();
+  return result.meta.changes === 1;
+}
+
 export async function setJobState(
   db: D1Database,
   clock: Clock,

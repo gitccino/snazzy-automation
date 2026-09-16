@@ -8,6 +8,11 @@
       "name": "snazzy-import-workflow-local",
       "binding": "IMPORT_WORKFLOW",
       "class_name": "ImportWorkflow"
+    },
+    {
+      "name": "snazzy-publication-workflow-local",
+      "binding": "PUBLICATION_WORKFLOW",
+      "class_name": "PublicationWorkflow"
     }
   ],
   "d1_databases": [

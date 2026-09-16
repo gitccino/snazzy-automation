@@ -1,7 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const docsRoute = vi.hoisted(() => {
+  // Workflow binding registration preloads the Worker modules before this test.
+  vi.resetModules();
+  return { handleDocsRoute: vi.fn() };
+});
+vi.mock("../src/routes/docs", () => docsRoute);
+
 import { createSequenceRepository } from "../src/db/sequence-repository";
 import { routeRequest } from "../src/router";
-import worker from "../src/index";
+import worker, { ImportWorkflow, PublicationWorkflow } from "../src/index";
 import { createTestEnv, testEnv } from "./helpers/env";
 
 function routerEnv() {
@@ -13,6 +21,7 @@ function routerEnv() {
 
 describe("routeRequest", () => {
   beforeEach(async () => {
+    docsRoute.handleDocsRoute.mockReset();
     await testEnv().DB.prepare("DELETE FROM import_runs WHERE source_album_id = ?")
       .bind("eaf00f6811d7e301eff601ca3dc1e8c72202e63e7ebc28df6270d639cb491058").run();
     await testEnv().DB.prepare("DELETE FROM sequences WHERE name = ?").bind("product_id").run();
@@ -67,5 +76,34 @@ describe("routeRequest", () => {
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: "unauthorized" });
     expect(create).not.toHaveBeenCalled();
+  });
+
+  it("dispatches exact authenticated POST /docs to the docs handler", async () => {
+    const { env, create } = routerEnv();
+    const request = new Request("https://worker.example/docs", {
+      method: "POST", headers: { authorization: "Bearer test-admin-route-token" },
+    });
+    const handled = Response.json({ status: "started", publicationRunId: "rec-run-1" }, { status: 202 });
+    docsRoute.handleDocsRoute.mockResolvedValue(handled);
+
+    expect(await routeRequest(request, env)).toBe(handled);
+    expect(docsRoute.handleDocsRoute).toHaveBeenCalledExactlyOnceWith(request, env);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("keeps other docs methods and paths outside the native route", async () => {
+    const { env } = routerEnv();
+    for (const [method, path] of [["GET", "/docs"], ["PUT", "/docs"], ["POST", "/docs/"], ["POST", "/documents"]]) {
+      const response = await routeRequest(new Request(`https://worker.example${path}`, { method }), env);
+      expect(response.status).toBe(404);
+    }
+    expect(docsRoute.handleDocsRoute).not.toHaveBeenCalled();
+  });
+
+  it("exports and locally binds both ImportWorkflow and PublicationWorkflow", () => {
+    expect(ImportWorkflow).toBeTypeOf("function");
+    expect(PublicationWorkflow).toBeTypeOf("function");
+    expect(testEnv().IMPORT_WORKFLOW.create).toBeTypeOf("function");
+    expect(testEnv().PUBLICATION_WORKFLOW.create).toBeTypeOf("function");
   });
 });

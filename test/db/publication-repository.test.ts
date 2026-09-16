@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { testEnv } from "../helpers/env";
 import {
   acquireOrResumeJob,
+  reopenFailedJobForRestart,
   setJobState,
   incrementAttempt,
   setTempDocId,
@@ -15,8 +16,8 @@ const env = testEnv();
 
 describe("publication-repository", () => {
   beforeEach(async () => {
-    await env.DB.exec("DELETE FROM publication_jobs");
     await env.DB.exec("DELETE FROM publication_product_cache");
+    await env.DB.exec("DELETE FROM publication_jobs");
   });
 
   it("acquires a new job on first call", async () => {
@@ -67,6 +68,57 @@ describe("publication-repository", () => {
     expect(job.state).toBe("succeeded");
     expect(job.googleDocId).toBe("doc-final");
     expect(job.googleDocUrl).toBe("https://docs.google.com/doc-final");
+  });
+
+  it("explicitly reopens a failed job for restart while retaining cached products", async () => {
+    await acquireOrResumeJob(env.DB, clock, "run-restart", "old-correlation");
+    await putProductCollage(env.DB, clock, "run-restart", "A-1001", "products/A-1001/collage/1080x1080.jpg");
+    await putProductCaptions(env.DB, clock, "run-restart", "A-1001", '["หนึ่ง","สอง","สาม"]');
+    await setJobState(env.DB, clock, "run-restart", "failed");
+    await setJobState(env.DB, clock, "run-restart", "validating");
+    expect((await acquireOrResumeJob(env.DB, clock, "run-restart", "other")).job.state).toBe("failed");
+
+    const restartedAt = { now: () => new Date("2026-09-02T05:00:00.000Z") };
+    expect(await reopenFailedJobForRestart(env.DB, restartedAt, "run-restart", "publication-run-restart")).toBe(true);
+
+    const { job } = await acquireOrResumeJob(env.DB, restartedAt, "run-restart", "other");
+    expect(job).toMatchObject({
+      state: "locked",
+      correlationId: "publication-run-restart",
+      createdAt: "2026-09-01T05:00:00.000Z",
+      updatedAt: "2026-09-02T05:00:00.000Z",
+    });
+    expect(await getProductCache(env.DB, "run-restart", "A-1001")).toEqual({
+      collageR2Key: "products/A-1001/collage/1080x1080.jpg",
+      captionsJson: '["หนึ่ง","สอง","สาม"]',
+    });
+  });
+
+  it.each(["locked", "validating", "validation_failed", "generating", "succeeded"] as const)(
+    "does not reopen or mutate a %s job through the failed-job restart helper",
+    async (state) => {
+      await acquireOrResumeJob(env.DB, clock, "run-guard", "original-owner");
+      await setJobState(env.DB, clock, "run-guard", state, {
+        googleDocId: "doc-preserved",
+        googleDocUrl: "https://docs.google.com/document/d/doc-preserved/edit",
+      });
+      const before = await acquireOrResumeJob(env.DB, clock, "run-guard", "other");
+
+      expect(await reopenFailedJobForRestart(env.DB, clock, "run-guard", "publication-run-guard")).toBe(false);
+      expect((await acquireOrResumeJob(env.DB, clock, "run-guard", "other")).job).toEqual(before.job);
+    },
+  );
+
+  it("reopens failed jobs atomically and does not create missing jobs", async () => {
+    expect(await reopenFailedJobForRestart(env.DB, clock, "run-missing", "publication-run-missing")).toBe(false);
+    await acquireOrResumeJob(env.DB, clock, "run-race", "original-owner");
+    await setJobState(env.DB, clock, "run-race", "failed");
+
+    const results = await Promise.all([
+      reopenFailedJobForRestart(env.DB, clock, "run-race", "publication-run-race"),
+      reopenFailedJobForRestart(env.DB, clock, "run-race", "publication-run-race"),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
   });
 
   it("supports explicit null clearing in state patches", async () => {

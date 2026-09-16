@@ -1,4 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const publicationTrigger = vi.hoisted(() => {
+  // Workflow binding registration preloads the Worker modules before this test.
+  vi.resetModules();
+  return { handleDocsTrigger: vi.fn() };
+});
+vi.mock("../src/publication/trigger", () => publicationTrigger);
+
 import { createSequenceRepository } from "../src/db/sequence-repository";
 import { handleScheduled } from "../src/scheduled";
 import worker from "../src/index";
@@ -13,6 +21,7 @@ function scheduledEnv() {
 
 describe("handleScheduled", () => {
   beforeEach(async () => {
+    publicationTrigger.handleDocsTrigger.mockReset();
     await testEnv().DB.prepare("DELETE FROM import_runs WHERE source_album_id = ?")
       .bind("eaf00f6811d7e301eff601ca3dc1e8c72202e63e7ebc28df6270d639cb491058").run();
     await testEnv().DB.prepare("DELETE FROM sequences WHERE name = ?").bind("product_id").run();
@@ -57,5 +66,53 @@ describe("handleScheduled", () => {
     await handler.scheduled!({ cron: "0 23 * * *" } as ScheduledController, env, { waitUntil } as unknown as ExecutionContext);
     expect(waitUntil).toHaveBeenCalledTimes(1);
     await expect(pending).rejects.toThrow(/^scheduled_import_failed$/);
+  });
+
+  it("routes the configured publication cron through the shared trigger with the scheduled clock", async () => {
+    const { env, create } = scheduledEnv();
+    const clock = { now: () => new Date("2026-09-01T17:30:00.000Z") };
+    publicationTrigger.handleDocsTrigger.mockResolvedValue({ status: "no_runnable_run" });
+
+    await handleScheduled(env, "30 23 * * *", clock);
+
+    expect(publicationTrigger.handleDocsTrigger).toHaveBeenCalledExactlyOnceWith(env, "cron", clock);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("does not trigger publication for import or unrelated crons", async () => {
+    const { env } = scheduledEnv();
+    await createSequenceRepository(env.DB).bootstrap("product_id", 1);
+
+    await handleScheduled(env, "0 23 * * *");
+    await handleScheduled(env, "15 4 * * *");
+
+    expect(publicationTrigger.handleDocsTrigger).not.toHaveBeenCalled();
+  });
+
+  it("normalizes publication scheduler failures without exposing upstream content", async () => {
+    const { env, create } = scheduledEnv();
+    publicationTrigger.handleDocsTrigger.mockRejectedValue(new Error("private upstream TEST-TOKEN-ABC123 sk-ant-SECRET"));
+
+    await expect(handleScheduled(env, "30 23 * * *")).rejects.toThrow(/^scheduled_publication_failed$/);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("passes the event's scheduled time through waitUntil for the publication date lookup", async () => {
+    const { env } = scheduledEnv();
+    const scheduledTime = Date.parse("2026-09-01T17:30:00.000Z");
+    publicationTrigger.handleDocsTrigger.mockResolvedValue({ status: "no_runnable_run" });
+    let pending: Promise<unknown> | undefined;
+    const waitUntil = vi.fn((promise: Promise<unknown>) => { pending = promise; });
+    const handler: ExportedHandler<typeof env> = worker;
+
+    await handler.scheduled!({ cron: "30 23 * * *", scheduledTime } as ScheduledController, env, { waitUntil } as unknown as ExecutionContext);
+    await pending;
+
+    expect(waitUntil).toHaveBeenCalledTimes(1);
+    expect(publicationTrigger.handleDocsTrigger).toHaveBeenCalledTimes(1);
+    const [actualEnv, actualTrigger, clock] = publicationTrigger.handleDocsTrigger.mock.calls[0]!;
+    expect(actualEnv).toBe(env);
+    expect(actualTrigger).toBe("cron");
+    expect(clock.now().toISOString()).toBe("2026-09-01T17:30:00.000Z");
   });
 });
