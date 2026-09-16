@@ -15,12 +15,15 @@ export const COLLAGE_CELL_POSITIONS: Array<{ top: number; left: number }> = [
 
 export interface ImageTransformer {
   transform(options: { width: number; height: number; fit: "contain"; background: string }): ImageTransformer;
-  draw(overlay: ImageTransformer, options: { top: number; left: number; width: number; height: number }): ImageTransformer;
+  draw(
+    overlay: ReadableStream<Uint8Array> | ImageTransformer,
+    options?: { top?: number; left?: number },
+  ): ImageTransformer;
   output(options: { format: "image/jpeg"; quality: number }): Promise<{ response(): Response }>;
 }
 
 export interface ImagesBinding {
-  input(stream: ReadableStream | ArrayBuffer): ImageTransformer;
+  input(stream: ReadableStream<Uint8Array>): ImageTransformer;
 }
 
 export function collageR2Key(productId: string): string {
@@ -58,8 +61,6 @@ export async function generateCollage(
     });
     pipeline = pipeline.draw(cell, {
       ...position,
-      width: COLLAGE_CELL_SIZE,
-      height: COLLAGE_CELL_SIZE,
     });
   }
 

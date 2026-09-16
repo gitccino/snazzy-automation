@@ -8,6 +8,12 @@ import {
 } from "../../src/publication/collage";
 import type { ImagesBinding, ImageTransformer } from "../../src/publication/collage";
 
+type OfficialImagesBindingSatisfiesCollagePort = globalThis.ImagesBinding extends ImagesBinding ? true : false;
+
+// This assignment is compile-time coverage: generateCollage must accept the
+// official Worker binding directly, without an adapter or a cast.
+const officialImagesBindingSatisfiesCollagePort: OfficialImagesBindingSatisfiesCollagePort = true;
+
 type ImageCall =
   | {
       op: "transform";
@@ -105,7 +111,7 @@ describe("generateCollage", () => {
       (call): call is Extract<ImageCall, { op: "draw" }> => call.op === "draw",
     );
     expect(drawCalls).toHaveLength(4);
-    expect(drawCalls.map(({ options }) => ({ top: options.top, left: options.left }))).toEqual(COLLAGE_CELL_POSITIONS);
+    expect(drawCalls.map(({ options }) => ({ top: options!.top, left: options!.left }))).toEqual(COLLAGE_CELL_POSITIONS);
 
     const outputCall = calls.find(
       (call): call is Extract<ImageCall, { op: "output" }> => call.op === "output",
