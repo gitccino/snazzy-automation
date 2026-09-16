@@ -28,7 +28,7 @@ type ImageCall =
       options: Parameters<ImageTransformer["output"]>[0];
     };
 
-function fakeTransformer(calls: ImageCall[]): ImageTransformer {
+function fakeTransformer(calls: ImageCall[], response = () => new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/jpeg" } })): ImageTransformer {
   const transformer: ImageTransformer = {
     transform(options) {
       calls.push({ op: "transform", options });
@@ -41,7 +41,7 @@ function fakeTransformer(calls: ImageCall[]): ImageTransformer {
     async output(options) {
       calls.push({ op: "output", options });
       return {
-        response: () => new Response(new Uint8Array([1, 2, 3])),
+        response,
       };
     },
   };
@@ -66,6 +66,30 @@ describe("collageR2Key", () => {
 });
 
 describe("generateCollage", () => {
+  it.each([[400, false], [403, false], [429, true], [500, true], [503, true]] as const)(
+    "rejects Images status %s without exposing its response and with retryable=%s",
+    async (status, retryable) => {
+      const keys: [string, string, string, string] = ["assets/a.jpg", "assets/b.jpg", "assets/c.jpg", "assets/d.jpg"];
+      const images: ImagesBinding = { input: () => fakeTransformer([], () => new Response("SECRET signed-url", {
+        status, headers: { "content-type": "image/jpeg" },
+      })) };
+      const error = await generateCollage(fakeBucket([COLLAGE_BASE_R2_KEY, ...keys]), images, keys).catch(error => error);
+      expect(error).toMatchObject({ code: "images_output_failed", message: "Cloudflare Images output failed", retryable });
+      expect(error).not.toHaveProperty("cause");
+      expect(String(error)).not.toMatch(/SECRET|signed-url/);
+    },
+  );
+
+  it.each([null, "application/json", "image/png", "text/html"])("rejects a successful response with content type %s", async contentType => {
+    const keys: [string, string, string, string] = ["assets/a.jpg", "assets/b.jpg", "assets/c.jpg", "assets/d.jpg"];
+    const images: ImagesBinding = { input: () => fakeTransformer([], () => new Response(new Uint8Array([1]), {
+      headers: contentType ? { "content-type": contentType } : {},
+    })) };
+    await expect(generateCollage(fakeBucket([COLLAGE_BASE_R2_KEY, ...keys]), images, keys)).rejects.toMatchObject({
+      code: "images_output_invalid", message: "Cloudflare Images returned an invalid image response", retryable: true,
+    });
+  });
+
   it("throws when the base canvas asset is missing from R2", async () => {
     const calls: ImageCall[] = [];
     const images: ImagesBinding = { input: () => fakeTransformer(calls) };

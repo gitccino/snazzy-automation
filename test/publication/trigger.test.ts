@@ -55,7 +55,7 @@ describe("handleDocsTrigger", () => {
       params: { publicationRunId: "rec-run-1", trigger },
     });
     const url = new URL(String(fetcher.mock.calls[0]?.[0]));
-    expect(url.searchParams.get("filterByFormula")).toBe("AND({Publication Date}='2026-09-02',OR({Status}='Ready',{Status}='Failed'))");
+    expect(url.searchParams.get("filterByFormula")).toBe("{Publication Date}='2026-09-02'");
     expect(fixture.restart).not.toHaveBeenCalled();
     expect(fixture.resume).not.toHaveBeenCalled();
   });
@@ -93,8 +93,8 @@ describe("handleDocsTrigger", () => {
     mockRun("Failed");
     const fixture = makeTriggerEnv(statusValue);
     await acquireOrResumeJob(fixture.env.DB, clock, "rec-run-1", "previous-owner");
-    await putProductCollage(fixture.env.DB, clock, "rec-run-1", "A-1001", "products/A-1001/collage/1080x1080.jpg");
-    await putProductCaptions(fixture.env.DB, clock, "rec-run-1", "A-1001", '["หนึ่ง","สอง","สาม"]');
+    await putProductCollage(fixture.env.DB, clock, "rec-run-1", "A-1001", "products/A-1001/collage/1080x1080.jpg", "collage-input");
+    await putProductCaptions(fixture.env.DB, clock, "rec-run-1", "A-1001", '["หนึ่ง","สอง","สาม"]', "caption-input");
     await setJobState(fixture.env.DB, clock, "rec-run-1", "failed");
     fixture.status.mockImplementation(async () => {
       expect((await acquireOrResumeJob(fixture.env.DB, clock, "rec-run-1", "other")).job.state).toBe("failed");
@@ -107,6 +107,7 @@ describe("handleDocsTrigger", () => {
       expect(await getProductCache(fixture.env.DB, "rec-run-1", "A-1001")).toEqual({
         collageR2Key: "products/A-1001/collage/1080x1080.jpg",
         captionsJson: '["หนึ่ง","สอง","สาม"]',
+        collageInputFingerprint: "collage-input", captionsInputFingerprint: "caption-input",
       });
     });
 
@@ -122,8 +123,8 @@ describe("handleDocsTrigger", () => {
     const fixture = makeTriggerEnv("unknown");
     fixture.get.mockRejectedValue(new Error("instance.not_found"));
     await acquireOrResumeJob(fixture.env.DB, clock, "rec-run-1", "previous-owner");
-    await putProductCollage(fixture.env.DB, clock, "rec-run-1", "A-1001", "products/A-1001/collage/1080x1080.jpg");
-    await putProductCaptions(fixture.env.DB, clock, "rec-run-1", "A-1001", '["หนึ่ง","สอง","สาม"]');
+    await putProductCollage(fixture.env.DB, clock, "rec-run-1", "A-1001", "products/A-1001/collage/1080x1080.jpg", "collage-input");
+    await putProductCaptions(fixture.env.DB, clock, "rec-run-1", "A-1001", '["หนึ่ง","สอง","สาม"]', "caption-input");
     await setJobState(fixture.env.DB, clock, "rec-run-1", "failed");
     fixture.create.mockRejectedValueOnce(new Error("Workflow creation unavailable"));
 
@@ -133,6 +134,7 @@ describe("handleDocsTrigger", () => {
     });
     expect(await getProductCache(fixture.env.DB, "rec-run-1", "A-1001")).toEqual({
       collageR2Key: "products/A-1001/collage/1080x1080.jpg", captionsJson: '["หนึ่ง","สอง","สาม"]',
+      collageInputFingerprint: "collage-input", captionsInputFingerprint: "caption-input",
     });
 
     await expect(handleDocsTrigger(fixture.env, "admin", clock)).resolves.toEqual({
@@ -142,6 +144,7 @@ describe("handleDocsTrigger", () => {
     expect(fixture.create.mock.calls.every(([options]) => options.id === "publication-rec-run-1")).toBe(true);
     expect(await getProductCache(fixture.env.DB, "rec-run-1", "A-1001")).toEqual({
       collageR2Key: "products/A-1001/collage/1080x1080.jpg", captionsJson: '["หนึ่ง","สอง","สาม"]',
+      collageInputFingerprint: "collage-input", captionsInputFingerprint: "caption-input",
     });
   });
 

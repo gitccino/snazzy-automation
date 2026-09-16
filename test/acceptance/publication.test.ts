@@ -8,7 +8,7 @@ import {
   acquireOrResumeJob, getProductCache, putProductCollage,
 } from "../../src/db/publication-repository";
 import { createAssetStore, verifyAssetToken } from "../../src/import/asset-store";
-import type { ImageTransformer } from "../../src/publication/collage";
+import { collageInputFingerprint, type ImageTransformer } from "../../src/publication/collage";
 import type { GoogleDocsRequest } from "../../src/publication/google-docs";
 import {
   preparePublicationOutputs, type PublicationServiceDeps, type ValidatedPublication,
@@ -73,7 +73,7 @@ async function seedCollages(products: PublicationProduct[]) {
   await acquireOrResumeJob(env.DB, clock, runId, `publication-${runId}`);
   for (const item of products) {
     await putProductCollage(env.DB, clock, runId, item.productId,
-      `products/${item.productId}/collage/1080x1080.jpg`);
+      `products/${item.productId}/collage/1080x1080.jpg`, await collageInputFingerprint(item.orderedImageKeys));
   }
 }
 
@@ -106,7 +106,7 @@ function imageBoundary() {
     return { body };
   });
   const put = vi.fn().mockResolvedValue(null);
-  const output = vi.fn(async () => ({ response: () => new Response(new Uint8Array([1, 2, 3])) }));
+  const output = vi.fn(async () => ({ response: () => new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/jpeg" } }) }));
   const input = vi.fn((stream: ReadableStream<Uint8Array>): ImageTransformer => {
     const key = sources.get(stream);
     if (!key) throw new Error("Images input was not an R2 body");
@@ -128,7 +128,7 @@ function imageBoundary() {
 
 // In-memory HTTP boundary: documents change only through the actual requests
 // emitted by production. Unexpected URLs fail instead of reaching the network.
-function publicationFixture(products = [product("A-1001")]) {
+function publicationFixture(products = [product("A-1001")], fixtureRunId = runId) {
   const state = {
     status: "Ready" as PublicationRunStatus,
     docs: new Map<string, { text: string; name: string }>(),
@@ -136,11 +136,12 @@ function publicationFixture(products = [product("A-1001")]) {
     loseCopyResponse: false,
     loseFillResponse: false,
     batchFailureStatus: 0,
+    errorSummary: null as string | null,
   };
   const calls: Array<{ method: string; url: string; body: Record<string, unknown> }> = [];
   const batches: GoogleDocsRequest[][] = [];
   const failureSnapshots: unknown[] = [];
-  const runRecord = () => ({ id: runId, fields: {
+  const runRecord = () => ({ id: fixtureRunId, fields: {
     "Publication Date": "2026-09-02", Status: state.status,
     Products: products.map(item => item.airtableRecordId),
   } });
@@ -152,8 +153,12 @@ function publicationFixture(products = [product("A-1001")]) {
         ? await request.json() as Record<string, unknown> : {};
       calls.push({ method: request.method, url: request.url, body });
       if (url.hostname === "api.airtable.com") {
-        if (url.pathname.endsWith(`/tblRuns/${runId}`)) {
-          if (request.method === "PATCH") state.status = (body.fields as { Status: PublicationRunStatus }).Status;
+        if (url.pathname.endsWith(`/tblRuns/${fixtureRunId}`)) {
+          if (request.method === "PATCH") {
+            const fields = body.fields as { Status: PublicationRunStatus; "Error Summary"?: string | null };
+            state.status = fields.Status;
+            if ("Error Summary" in fields) state.errorSummary = fields["Error Summary"] ?? null;
+          }
           return Response.json(runRecord());
         }
         if (url.pathname.endsWith("/tblRuns")) return Response.json({ records: [runRecord()] });
@@ -238,7 +243,7 @@ function publicationFixture(products = [product("A-1001")]) {
   const scheduler = retryingStep();
   return {
     products, state, calls, batches, failureSnapshots, image, countTokens, create, notify, deps, scheduler,
-    run: () => runPublicationWorkflow({ publicationRunId: runId, trigger: "admin" }, scheduler.step, deps),
+    run: () => runPublicationWorkflow({ publicationRunId: fixtureRunId, trigger: "admin" }, scheduler.step, deps),
   };
 }
 
@@ -284,6 +289,72 @@ describe("publication acceptance", () => {
     expect(fixture.image.get).not.toHaveBeenCalled();
     expect(fixture.image.put).not.toHaveBeenCalled();
     expect(fixture.image.images.input).not.toHaveBeenCalled();
+  });
+
+  it("clears previous validation errors when staff corrects data and publication succeeds", async () => {
+    const item = { ...product("A-1001"), description: "" };
+    const fixture = publicationFixture([item]);
+    expect(await fixture.run()).toBeNull();
+    expect(fixture.state.errorSummary).toBe("A-1001: Description");
+    item.description = "สภาพดี";
+    fixture.state.status = "Ready";
+    await fixture.run();
+    expect(fixture.state.status).toBe("Generated");
+    expect(fixture.state.errorSummary).toBeNull();
+    expect(await env.DB.prepare("SELECT validation_result_json FROM publication_jobs WHERE publication_run_id = ?").bind(runId).first())
+      .toEqual({ validation_result_json: null });
+  });
+
+  it("allows only one of two different runs to publish the same date, including concurrent Workflows", async () => {
+    const first = publicationFixture();
+    const second = publicationFixture([product("A-1002")], "rec-run-2");
+    const results = await Promise.allSettled([first.run(), second.run()]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
+    expect(first.state.docs.size + second.state.docs.size).toBe(1);
+    expect(first.create.mock.calls.length + second.create.mock.calls.length).toBe(1);
+    expect(first.image.put.mock.calls.length + second.image.put.mock.calls.length).toBe(1);
+    const rows = await env.DB.prepare("SELECT publication_run_id, publication_date, state FROM publication_jobs ORDER BY publication_run_id")
+      .all<{ publication_run_id: string; publication_date: string | null; state: string }>();
+    expect(rows.results.filter(row => row.state === "succeeded")).toHaveLength(1);
+    expect(rows.results.filter(row => row.publication_date === "2026-09-02")).toHaveLength(1);
+    const winner = first.state.docs.size ? first : second;
+    const loser = first.state.docs.size ? second : first;
+    expect(loser.calls.every(call => new URL(call.url).hostname === "api.airtable.com")).toBe(true);
+    expect(await winner.run()).toMatchObject({ googleDocId: "temp-doc-1" });
+    expect(winner.state.docs.size).toBe(1);
+  });
+
+  it("regenerates edited Airtable inputs after Failed restart while preserving matching product outputs", async () => {
+    const products = [product("A-1001"), product("A-1002")];
+    const fixture = publicationFixture(products);
+    fixture.state.batchFailureStatus = 503;
+    await expect(fixture.run()).rejects.toThrow("Unable to fill or verify the Google document.");
+    const changedBefore = await getProductCache(env.DB, runId, "A-1001");
+    const unchangedBefore = await getProductCache(env.DB, runId, "A-1002");
+    products[0]!.description = "คำอธิบายใหม่";
+    products[0]!.orderedImageKeys.reverse();
+    fixture.create.mockResolvedValueOnce(toolResponse([{ productId: "A-1001", drafts: ["ฉบับใหม่หนึ่ง", "ฉบับใหม่สอง", "ฉบับใหม่สาม"] }]));
+    vi.mocked(globalThis.fetch).mockImplementation(fixture.deps.fetcher as typeof fetch);
+    const binding = workflowBinding();
+    binding.setStatus("errored");
+    const response = await handleDocsRoute(docsRequest(), { ...env, ...configEnv, PUBLICATION_WORKFLOW: binding } as unknown as Env, clock);
+    expect(await response.json()).toEqual({ status: "restarted", publicationRunId: runId });
+    fixture.state.batchFailureStatus = 0;
+    await fixture.run();
+    expect(fixture.create).toHaveBeenCalledTimes(2);
+    expect(fixture.create.mock.calls[1]![0].messages[0].content).toContain("คำอธิบายใหม่");
+    expect(fixture.create.mock.calls[1]![0].messages[0].content).not.toContain("A-1002");
+    expect(fixture.image.put.mock.calls.map(call => call[0])).toEqual([
+      "products/A-1001/collage/1080x1080.jpg", "products/A-1002/collage/1080x1080.jpg", "products/A-1001/collage/1080x1080.jpg",
+    ]);
+    expect(fixture.image.transforms.slice(-4).map(item => item.key)).toEqual(products[0]!.orderedImageKeys.slice(0, 4));
+    const changedAfter = await getProductCache(env.DB, runId, "A-1001");
+    expect(changedAfter.collageInputFingerprint).not.toBe(changedBefore.collageInputFingerprint);
+    expect(changedAfter.captionsInputFingerprint).not.toBe(changedBefore.captionsInputFingerprint);
+    expect(await getProductCache(env.DB, runId, "A-1002")).toEqual(unchangedBefore);
+    expect(fixture.state.docs.get("temp-doc-2")!.text).toContain("Caption 1: ฉบับใหม่หนึ่ง");
+    expect(fixture.state.errorSummary).toBeNull();
   });
 
   it("places the first four Airtable-ordered images in the white 1080-square collage and reuses its private cache", async () => {
@@ -366,7 +437,7 @@ describe("publication acceptance", () => {
     fixture.state.loseFillResponse = true;
     const result = await fixture.run();
     expect(result).toEqual({ publicationRunId: runId, googleDocId: "temp-doc-1", googleDocUrl: "https://docs.google.com/document/d/temp-doc-1/edit", productIds: ["A-1002", "A-1001"] });
-    expect(fixture.calls.filter(c => c.url.endsWith("/copy"))).toEqual([expect.objectContaining({ body: {
+    expect(fixture.calls.filter(c => new URL(c.url).pathname.endsWith("/copy"))).toEqual([expect.objectContaining({ body: {
       name: "Publication 2026-09-02 (in progress)", parents: ["folder-1"], appProperties: { publicationRunId: runId },
     } })]);
     const lookups = fixture.calls.filter(c => new URL(c.url).pathname === "/drive/v3/files");
@@ -381,11 +452,11 @@ describe("publication acceptance", () => {
     expect(await job()).toMatchObject({ state: "succeeded", google_doc_id: "temp-doc-1", google_doc_url: result!.googleDocUrl });
     expect(fixture.state.status).toBe("Generated");
     expect(fixture.calls.filter(c => c.url.endsWith(`/tblRuns/${runId}`) && c.method === "PATCH").at(-1)!.body).toEqual({
-      fields: { Status: "Generated", "Google Doc URL": result!.googleDocUrl, "Generated At": "2026-09-01T17:30:00.000Z" },
+      fields: { Status: "Generated", "Google Doc URL": result!.googleDocUrl, "Generated At": "2026-09-01T17:30:00.000Z", "Error Summary": null },
     });
     expect(fixture.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(result!.googleDocUrl));
     expect(await fixture.run()).toEqual(result);
-    expect(fixture.calls.filter(c => c.url.endsWith("/copy"))).toHaveLength(1);
+    expect(fixture.calls.filter(c => new URL(c.url).pathname.endsWith("/copy"))).toHaveLength(1);
     expect(fixture.calls.filter(c => c.method === "PATCH" && c.url.includes("/drive/"))).toHaveLength(1);
     expect(fixture.batches).toHaveLength(1);
     expect(fixture.notify).toHaveBeenCalledTimes(1);
@@ -422,7 +493,7 @@ describe("publication acceptance", () => {
     expect(fixture.state.docs.size).toBe(1);
     const queries = fixture.calls.filter(c => new URL(c.url).pathname.endsWith("/tblRuns"));
     expect(queries).toHaveLength(3);
-    for (const call of queries) expect(new URL(call.url).searchParams.get("filterByFormula")).toBe("AND({Publication Date}='2026-09-02',OR({Status}='Ready',{Status}='Failed'))");
+    for (const call of queries) expect(new URL(call.url).searchParams.get("filterByFormula")).toBe("{Publication Date}='2026-09-02'");
   });
 
   it.each([[503, "errored", "restarted"], [429, "unknown", "started"]] as const)
@@ -436,7 +507,7 @@ describe("publication acceptance", () => {
         job: { state: "generating", temp_doc_id: "temp-doc-1", google_doc_id: null, google_doc_url: null, correlation_id: "publication-rec-run-1" },
         docs: 1, status: "Generating",
       })));
-      expect(fixture.calls.filter(c => c.method === "DELETE").map(c => c.url)).toEqual(["https://www.googleapis.com/drive/v3/files/temp-doc-1"]);
+      expect(fixture.calls.filter(c => c.method === "DELETE").map(c => c.url)).toEqual(["https://www.googleapis.com/drive/v3/files/temp-doc-1?supportsAllDrives=true"]);
       const batchIndices = fixture.calls.flatMap((call, index) => call.url.endsWith(":batchUpdate") ? [index] : []);
       expect(fixture.calls.findIndex(c => c.method === "DELETE")).toBeGreaterThan(batchIndices.at(-1)!);
       expect(await job()).toMatchObject({ state: "failed", temp_doc_id: null, google_doc_id: null, google_doc_url: null });
@@ -448,7 +519,10 @@ describe("publication acceptance", () => {
       expect(fixture.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Unable to fill or verify the Google document."));
       expect(fixture.notify.mock.calls[0]![0]).toMatch(/[ก-๙]/);
       const cached = await getProductCache(env.DB, runId, "A-1001");
-      expect(cached).toEqual({ collageR2Key: "products/A-1001/collage/1080x1080.jpg", captionsJson: JSON.stringify(drafts("A-1001")) });
+      expect(cached).toEqual({
+        collageR2Key: "products/A-1001/collage/1080x1080.jpg", captionsJson: JSON.stringify(drafts("A-1001")),
+        collageInputFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/), captionsInputFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
 
       vi.mocked(globalThis.fetch).mockImplementation(fixture.deps.fetcher as typeof fetch);
       const binding = workflowBinding();

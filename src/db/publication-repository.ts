@@ -10,6 +10,7 @@ export type PublicationJobState =
 
 export interface PublicationJobRow {
   publicationRunId: string;
+  publicationDate: string | null;
   state: PublicationJobState;
   correlationId: string;
   googleDocId: string | null;
@@ -23,11 +24,14 @@ export interface PublicationJobRow {
 
 export interface ProductOutputCache {
   collageR2Key: string | null;
+  collageInputFingerprint: string | null;
   captionsJson: string | null;
+  captionsInputFingerprint: string | null;
 }
 
 interface JobRowRaw {
   publication_run_id: string;
+  publication_date: string | null;
   state: PublicationJobState;
   correlation_id: string;
   google_doc_id: string | null;
@@ -42,6 +46,7 @@ interface JobRowRaw {
 function toRow(raw: JobRowRaw): PublicationJobRow {
   return {
     publicationRunId: raw.publication_run_id,
+    publicationDate: raw.publication_date,
     state: raw.state,
     correlationId: raw.correlation_id,
     googleDocId: raw.google_doc_id,
@@ -81,6 +86,21 @@ export async function acquireOrResumeJob(
 
   const job = toRow(raw);
   return { job, alreadySucceeded: job.state === "succeeded", ownsLock: insertResult.meta.changes === 1 };
+}
+
+/** A claimed date stays with its run through retries, failure, and finalization. */
+export async function claimPublicationDate(
+  db: D1Database,
+  clock: Clock,
+  publicationRunId: string,
+  publicationDate: string,
+): Promise<boolean> {
+  const result = await db.prepare(
+    `UPDATE OR IGNORE publication_jobs SET publication_date = ?, updated_at = ?
+     WHERE publication_run_id = ? AND (publication_date IS NULL OR publication_date = ?)
+       AND state NOT IN ('succeeded', 'failed')`,
+  ).bind(publicationDate, clock.now().toISOString(), publicationRunId, publicationDate).run();
+  return result.meta.changes === 1;
 }
 
 /** Only the trigger may reopen a failed job after confirming its Workflow can start again. */
@@ -159,10 +179,12 @@ export async function getProductCache(
   productId: string,
 ): Promise<ProductOutputCache> {
   const raw = await db
-    .prepare("SELECT collage_r2_key, captions_json FROM publication_product_cache WHERE publication_run_id = ? AND product_id = ?")
+    .prepare(`SELECT collage_r2_key AS collageR2Key, collage_input_fingerprint AS collageInputFingerprint,
+      captions_json AS captionsJson, captions_input_fingerprint AS captionsInputFingerprint
+      FROM publication_product_cache WHERE publication_run_id = ? AND product_id = ?`)
     .bind(publicationRunId, productId)
-    .first<{ collage_r2_key: string | null; captions_json: string | null }>();
-  return { collageR2Key: raw?.collage_r2_key ?? null, captionsJson: raw?.captions_json ?? null };
+    .first<ProductOutputCache>();
+  return raw ?? { collageR2Key: null, collageInputFingerprint: null, captionsJson: null, captionsInputFingerprint: null };
 }
 
 export async function putProductCollage(
@@ -171,16 +193,18 @@ export async function putProductCollage(
   publicationRunId: string,
   productId: string,
   collageR2Key: string,
+  inputFingerprint: string,
 ): Promise<void> {
   const nowIso = clock.now().toISOString();
   await db
     .prepare(
-      `INSERT INTO publication_product_cache (publication_run_id, product_id, collage_r2_key, updated_at)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO publication_product_cache (publication_run_id, product_id, collage_r2_key, collage_input_fingerprint, updated_at)
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (publication_run_id, product_id)
-       DO UPDATE SET collage_r2_key = excluded.collage_r2_key, updated_at = excluded.updated_at`,
+       DO UPDATE SET collage_r2_key = excluded.collage_r2_key,
+         collage_input_fingerprint = excluded.collage_input_fingerprint, updated_at = excluded.updated_at`,
     )
-    .bind(publicationRunId, productId, collageR2Key, nowIso)
+    .bind(publicationRunId, productId, collageR2Key, inputFingerprint, nowIso)
     .run();
 }
 
@@ -190,15 +214,17 @@ export async function putProductCaptions(
   publicationRunId: string,
   productId: string,
   captionsJson: string,
+  inputFingerprint: string,
 ): Promise<void> {
   const nowIso = clock.now().toISOString();
   await db
     .prepare(
-      `INSERT INTO publication_product_cache (publication_run_id, product_id, captions_json, updated_at)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO publication_product_cache (publication_run_id, product_id, captions_json, captions_input_fingerprint, updated_at)
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (publication_run_id, product_id)
-       DO UPDATE SET captions_json = excluded.captions_json, updated_at = excluded.updated_at`,
+       DO UPDATE SET captions_json = excluded.captions_json,
+         captions_input_fingerprint = excluded.captions_input_fingerprint, updated_at = excluded.updated_at`,
     )
-    .bind(publicationRunId, productId, captionsJson, nowIso)
+    .bind(publicationRunId, productId, captionsJson, inputFingerprint, nowIso)
     .run();
 }

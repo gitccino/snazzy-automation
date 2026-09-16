@@ -5,15 +5,15 @@ import type { Fetcher } from "../shared/http";
 import type { Clock } from "../shared/time";
 import { OperationalError } from "../shared/errors";
 import {
-  acquireOrResumeJob, getProductCache, putProductCaptions, putProductCollage,
+  acquireOrResumeJob, claimPublicationDate, getProductCache, putProductCaptions, putProductCollage,
   setJobState, setTempDocId, type PublicationJobRow,
 } from "../db/publication-repository";
 import {
   loadRunById, markRunFailed, markRunGenerated, markRunGenerating,
   markRunNeedsCorrection, updateProductCollage,
 } from "./airtable-runs";
-import { generateCollage, collageR2Key, type ImagesBinding } from "./collage";
-import { planCaptionBatches, requestCaptionBatch, toCaptionRequestProducts } from "./captions";
+import { generateCollage, collageR2Key, collageInputFingerprint, type ImagesBinding } from "./collage";
+import { captionInputFingerprint, planCaptionBatches, requestCaptionBatch, toCaptionRequestProducts } from "./captions";
 import { createGoogleAuthClient } from "./google-auth";
 import {
   copyTemplate, deleteDocument, fillTemplate, finalizeDocument,
@@ -134,6 +134,10 @@ export async function validatePublication(
     await markRunNeedsCorrection(deps.fetcher, deps.config, deps.airtableToken, publicationRunId, formatValidationErrorSummary(validation));
     return { kind: "validation_failed", thaiDate: displayDate, validation };
   }
+  if (!await claimPublicationDate(deps.db, deps.clock, publicationRunId, run.publicationDate)) {
+    throw new OperationalError("publication_date_conflict", "Publication date is already claimed or differs from this run's claim", false);
+  }
+  await setJobState(deps.db, deps.clock, publicationRunId, "validating", { validationResultJson: null });
   return { kind: "valid", value: { run, thaiDate: displayDate } };
 }
 
@@ -150,22 +154,26 @@ export async function notifyPublicationValidationFailure(
 
 async function ensureCollage(deps: PublicationServiceDeps, runId: string, product: PublicationProduct): Promise<string> {
   const cache = await getProductCache(deps.db, runId, product.productId);
-  if (cache.collageR2Key) return cache.collageR2Key;
+  const inputFingerprint = await collageInputFingerprint(product.orderedImageKeys);
+  if (cache.collageR2Key && cache.collageInputFingerprint === inputFingerprint) return cache.collageR2Key;
   const [first, second, third, fourth] = product.orderedImageKeys;
   if (!first || !second || !third || !fourth) throw new Error(`four ordered images required for ${product.productId}`);
   const bytes = await generateCollage(deps.bucket, deps.images, [first, second, third, fourth]);
   const key = collageR2Key(product.productId);
   await deps.bucket.put(key, bytes, { httpMetadata: { contentType: "image/jpeg" } });
-  await putProductCollage(deps.db, deps.clock, runId, product.productId, key);
+  await putProductCollage(deps.db, deps.clock, runId, product.productId, key, inputFingerprint);
   return key;
 }
 
 async function captionsForProducts(deps: PublicationServiceDeps, runId: string, products: PublicationProduct[]): Promise<Map<string, [string, string, string]>> {
   const result = new Map<string, [string, string, string]>();
   const missing: PublicationProduct[] = [];
+  const fingerprints = new Map<string, string>();
   for (const product of products) {
     const cache = await getProductCache(deps.db, runId, product.productId);
-    const drafts = cachedDrafts(cache.captionsJson);
+    const inputFingerprint = await captionInputFingerprint(product, deps.config.claudeModel);
+    fingerprints.set(product.productId, inputFingerprint);
+    const drafts = cache.captionsInputFingerprint === inputFingerprint ? cachedDrafts(cache.captionsJson) : null;
     if (drafts) result.set(product.productId, drafts);
     else missing.push(product);
   }
@@ -175,7 +183,7 @@ async function captionsForProducts(deps: PublicationServiceDeps, runId: string, 
     const generated = await requestCaptionBatch(deps.anthropic, deps.config.claudeModel, batch);
     // Commit valid work before another batch can throw or return incomplete data.
     for (const item of generated.captions) {
-      await putProductCaptions(deps.db, deps.clock, runId, item.productId, JSON.stringify(item.drafts));
+      await putProductCaptions(deps.db, deps.clock, runId, item.productId, JSON.stringify(item.drafts), fingerprints.get(item.productId)!);
       result.set(item.productId, item.drafts);
     }
     unresolved.push(...generated.missingProductIds);

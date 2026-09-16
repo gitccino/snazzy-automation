@@ -1343,6 +1343,8 @@ git commit -m "test: bind publication cleanup to Workflow retry budget"
 - Consumes: `Env` from `src/env.ts`; `parseConfig`; shared constant-time `verifyAdminBearer`; `createAssetStore` and `handleGetAsset`; `createSequenceRepository`; Airtable REST with paginated `Product ID` reads; existing LINE, Google-auth, Anthropic SDK, and iCloud clients for live credential/access probes.
 - Produces: `runSetupChecks(env, fetcher?, clock?, probes?): Promise<SetupReport>`, authenticated `handleSetup(request, env, fetcher?, clock?, probes?): Promise<Response>`, authenticated one-time `handleBootstrapSequence(request, env)`, and public `handleHealth(env, fetcher?): Promise<Response>`. `SetupReport = { ok: boolean; checks: Array<{ name: string; ok: boolean; detail: string }> }` is consumed by Task 15's smoke test and CLI script.
 
+Publication review requirement: implement the [publication deployment contract](../../runbooks/publication-setup.md) as part of the Google setup probe and its tests. Require a nonempty folder `driveId`, verify explicit service-account Shared Drive membership and effective copy/edit/rename/delete permissions, and use `supportsAllDrives=true` on Drive reads/permission calls. A readable My Drive folder or template-only share must fail setup. The baseline Google probe example below checks only document type/parent and must be extended with these checks before shipping. Keep direct service-account authentication; do not add impersonation.
+
 - [ ] **Step 1: Write the failing test**
 
 ```ts
@@ -2807,6 +2809,8 @@ git commit -m "feat: add staging and production wrangler environments with full 
 
 ### Task 11: Deployment runbook
 
+Carry forward the [publication deployment contract](../../runbooks/publication-setup.md): verify Shared Drive membership and a disposable copy/edit/rename/delete rehearsal, provide Images bindings in each named environment, and upload and remotely verify the private collage base asset before publication traffic.
+
 **Files:**
 - Create: `docs/runbooks/deployment.md`
 
@@ -2824,7 +2828,7 @@ git commit -m "feat: add staging and production wrangler environments with full 
 - Customer Cloudflare account with Workers Paid plan ($5/month minimum).
 - `npx wrangler login` completed against the customer's Cloudflare account.
 - Customer-owned Airtable base with Products and Publication Runs tables matching design §9.
-- Customer-owned Google Cloud service account with Docs + Drive API enabled, restricted to one Drive folder.
+- Customer-owned Google Cloud service account with Docs + Drive API enabled and explicit membership in a dedicated customer-owned Shared Drive. The configured folder must belong to that Shared Drive and grant effective copy/edit/rename/delete access. Verify the publication setup contract; no impersonation.
 - Customer-owned LINE Official Account and Messaging API channel with one admin group created.
 - Printed `SNAZZY_PRODUCT_START_V1` QR marker cards (`npm run generate-marker`).
 
@@ -2848,7 +2852,7 @@ git commit -m "feat: add staging and production wrangler environments with full 
    ```bash
    npm run db:migrate:staging
    ```
-   Expected: `0001_initial.sql`, `0002_publication.sql`, `0003_line_inventory.sql`, and `0004_usage_metrics.sql` applied successfully.
+   Expected: `0001_initial.sql`, `0002_import_run_terminal_details.sql`, `0003_publication.sql`, `0004_line_inventory.sql`, and `0005_usage_metrics.sql` applied successfully. Publication migration 0003 includes the unique date claim and per-output input fingerprints.
 
 3. Install every secret. Keep the admin token in the current shell because authenticated setup and smoke commands need the same value:
    ```bash

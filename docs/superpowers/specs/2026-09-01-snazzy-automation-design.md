@@ -620,7 +620,7 @@ A setup command must verify:
 - Airtable base/table/field mappings
 - one-time Product ID bootstrap or ongoing D1/Airtable sequence consistency
 - LINE webhook signature and group ID
-- Google template/folder permissions
+- Google template/folder permissions, including a Shared Drive folder and explicit service-account membership with copy/edit/rename/delete access; direct service-account auth only (no impersonation), as detailed in [publication setup](../../runbooks/publication-setup.md)
 - Claude API credential
 - iCloud connector Phase 0 status
 - cron timezone and cutoff

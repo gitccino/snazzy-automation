@@ -147,6 +147,10 @@ describe("temporary document discovery and copy", () => {
       .mockResolvedValueOnce(jsonResponse({ files: [{ id: "copy-2" }] }));
     await expect(findTemporaryDocument(fetcher, tokenProvider(), "folder-1", "run-1")).rejects.toThrow(/multiple temporary documents/);
     expect(new URL(String(fetcher.mock.calls[1]![0])).searchParams.get("pageToken")).toBe("page-2");
+    for (const [url] of fetcher.mock.calls) {
+      expect(new URL(String(url)).searchParams.get("supportsAllDrives")).toBe("true");
+      expect(new URL(String(url)).searchParams.get("includeItemsFromAllDrives")).toBe("true");
+    }
   });
 
   it("escapes literal query values", async () => {
@@ -164,6 +168,8 @@ describe("temporary document discovery and copy", () => {
     expect(await findTemporaryDocument(fetcher, tokenProvider(), "folder-1", "run-1")).toBe("copy-1");
     const [url, init] = fetcher.mock.calls[0]!;
     expect(new URL(String(url)).searchParams.get("q")).toBe("'folder-1' in parents and trashed = false and appProperties has { key='publicationRunId' and value='run-1' }");
+    expect(new URL(String(url)).searchParams.get("supportsAllDrives")).toBe("true");
+    expect(new URL(String(url)).searchParams.get("includeItemsFromAllDrives")).toBe("true");
     expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer access-token-1");
   });
 
@@ -171,7 +177,7 @@ describe("temporary document discovery and copy", () => {
     const fetcher = vi.fn<Fetcher>().mockResolvedValue(jsonResponse({ id: "copy-1" }));
     expect(await copyTemplate(fetcher, tokenProvider(), "template-1", "folder-1", "run-1", "In progress")).toBe("copy-1");
     const [url, init] = fetcher.mock.calls[0]!;
-    expect(String(url)).toBe("https://www.googleapis.com/drive/v3/files/template-1/copy");
+    expect(String(url)).toBe("https://www.googleapis.com/drive/v3/files/template-1/copy?supportsAllDrives=true");
     expect(init?.method).toBe("POST");
     expect(JSON.parse(String(init?.body))).toEqual({ name: "In progress", parents: ["folder-1"], appProperties: { publicationRunId: "run-1" } });
   });
@@ -182,7 +188,7 @@ describe("finalize and cleanup", () => {
     const fetcher = vi.fn<Fetcher>().mockResolvedValue(jsonResponse({ id: "doc-1" }));
     expect(await finalizeDocument(fetcher, tokenProvider(), "doc-1", "Publication today")).toBe("https://docs.google.com/document/d/doc-1/edit");
     const [url, init] = fetcher.mock.calls[0]!;
-    expect(String(url)).toBe("https://www.googleapis.com/drive/v3/files/doc-1");
+    expect(String(url)).toBe("https://www.googleapis.com/drive/v3/files/doc-1?supportsAllDrives=true");
     expect(init?.method).toBe("PATCH");
     expect(JSON.parse(String(init?.body))).toEqual({ name: "Publication today" });
   });
@@ -191,7 +197,7 @@ describe("finalize and cleanup", () => {
     const fetcher = vi.fn<Fetcher>().mockResolvedValue(new Response(null, { status }));
     await deleteDocument(fetcher, tokenProvider(), "doc-1");
     expect(fetcher.mock.calls[0]![1]?.method).toBe("DELETE");
-    expect(String(fetcher.mock.calls[0]![0])).toBe("https://www.googleapis.com/drive/v3/files/doc-1");
+    expect(String(fetcher.mock.calls[0]![0])).toBe("https://www.googleapis.com/drive/v3/files/doc-1?supportsAllDrives=true");
   });
 });
 

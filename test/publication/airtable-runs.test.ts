@@ -37,6 +37,33 @@ function productRecord(id: string, productId: string) {
 }
 
 describe("findRunnableRunForDate", () => {
+  it.each(["Ready", "Failed", "Generated", "Draft"])("rejects a second same-date %s row before reading products", async status => {
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(jsonResponse({ records: [
+      { id: "recRun1", fields: { "Publication Date": "2026-09-01", Status: "Ready" } },
+      { id: "recRun2", fields: { "Publication Date": "2026-09-01", Status: status } },
+    ] }));
+    await expect(findRunnableRunForDate(fetcher, config, "token", "2026-09-01")).rejects.toMatchObject({
+      code: "airtable_duplicate_publication_date", retryable: false,
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["Draft", "Generating", "Generated"])("returns null for a sole %s row", async status => {
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(jsonResponse({ records: [
+      { id: "recRun1", fields: { "Publication Date": "2026-09-01", Status: status } },
+    ] }));
+    expect(await findRunnableRunForDate(fetcher, config, "token", "2026-09-01")).toBeNull();
+  });
+
+  it("rejects a truncated date lookup instead of assuming its first row is unique", async () => {
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(jsonResponse({ records: [
+      { id: "recRun1", fields: { "Publication Date": "2026-09-01", Status: "Ready" } },
+    ], offset: "another-page" }));
+    await expect(findRunnableRunForDate(fetcher, config, "token", "2026-09-01")).rejects.toMatchObject({
+      code: "airtable_duplicate_publication_date", retryable: false,
+    });
+  });
+
   it("returns null when no Ready or Failed run matches the date", async () => {
     const fetcher = vi.fn<Fetcher>().mockResolvedValue(jsonResponse({ records: [] }));
     const result = await findRunnableRunForDate(fetcher, config, "token", "2026-09-01");
@@ -95,6 +122,10 @@ describe("findRunnableRunForDate", () => {
     const firstCallUrl = String(fetcher.mock.calls[0]![0]);
     expect(firstCallUrl).toContain("tblRuns");
     expect(firstCallUrl).toContain(encodeURIComponent("2026-09-01"));
+    const query = new URL(firstCallUrl).searchParams;
+    expect(query.get("filterByFormula")).toBe("{Publication Date}='2026-09-01'");
+    expect(query.get("maxRecords")).toBe("2");
+    expect(query.get("pageSize")).toBe("2");
   });
 
   it("rejects a malformed Airtable attachment before it becomes an R2 key", async () => {
@@ -258,6 +289,7 @@ describe("status writes", () => {
     expect(String(url)).toContain("recRun1");
     expect(init?.method).toBe("PATCH");
     expect(JSON.parse(String(init?.body)).fields.Status).toBe("Generating");
+    expect(JSON.parse(String(init?.body)).fields["Error Summary"]).toBeNull();
   });
 
   it("markRunGenerated writes doc URL, timestamp, and Generated status", async () => {
@@ -267,6 +299,7 @@ describe("status writes", () => {
     expect(body.fields.Status).toBe("Generated");
     expect(body.fields["Google Doc URL"]).toBe("https://docs.google.com/x");
     expect(body.fields["Generated At"]).toBe("2026-09-01T06:00:00.000Z");
+    expect(body.fields["Error Summary"]).toBeNull();
   });
 
   it("markRunNeedsCorrection returns Status to Draft with Error Summary", async () => {

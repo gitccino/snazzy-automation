@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { testEnv } from "../helpers/env";
 import {
   acquireOrResumeJob,
+  claimPublicationDate,
   reopenFailedJobForRestart,
   setJobState,
   incrementAttempt,
@@ -24,6 +25,7 @@ describe("publication-repository", () => {
     const { job, alreadySucceeded } = await acquireOrResumeJob(env.DB, clock, "run-1", "corr-1");
     expect(job.state).toBe("locked");
     expect(job.attemptCount).toBe(0);
+    expect(job.publicationDate).toBeNull();
     expect(alreadySucceeded).toBe(false);
   });
 
@@ -44,6 +46,36 @@ describe("publication-repository", () => {
     ]);
     expect(acquisitions.filter((result) => result.ownsLock)).toHaveLength(1);
     expect(acquisitions.filter((result) => !result.ownsLock)).toHaveLength(1);
+  });
+
+  it("atomically gives a publication date to one run and keeps the losing run unclaimed", async () => {
+    await acquireOrResumeJob(env.DB, clock, "run-a", "corr-a");
+    await acquireOrResumeJob(env.DB, clock, "run-b", "corr-b");
+    const claims = await Promise.all([
+      claimPublicationDate(env.DB, clock, "run-a", "2026-09-02"),
+      claimPublicationDate(env.DB, clock, "run-b", "2026-09-02"),
+    ]);
+    expect(claims.filter(Boolean)).toHaveLength(1);
+    const rows = await env.DB.prepare("SELECT publication_date FROM publication_jobs ORDER BY publication_run_id").all<{ publication_date: string | null }>();
+    expect(rows.results.map(row => row.publication_date).sort()).toEqual(["2026-09-02", null]);
+    const winner = claims[0] ? "run-a" : "run-b";
+    expect(await claimPublicationDate(env.DB, clock, winner, "2026-09-02")).toBe(true);
+  });
+
+  it("retains a date claim across Failed restart and success and refuses moving it to another date", async () => {
+    await acquireOrResumeJob(env.DB, clock, "run-owner", "corr-1");
+    expect(await claimPublicationDate(env.DB, clock, "run-owner", "2026-09-02")).toBe(true);
+    expect(await claimPublicationDate(env.DB, clock, "run-owner", "2026-09-03")).toBe(false);
+    await setJobState(env.DB, clock, "run-owner", "failed");
+    await acquireOrResumeJob(env.DB, clock, "run-other", "corr-2");
+    expect(await claimPublicationDate(env.DB, clock, "run-other", "2026-09-02")).toBe(false);
+    await reopenFailedJobForRestart(env.DB, clock, "run-owner", "corr-1");
+    expect(await claimPublicationDate(env.DB, clock, "run-owner", "2026-09-02")).toBe(true);
+    await setJobState(env.DB, clock, "run-owner", "succeeded");
+    expect(await claimPublicationDate(env.DB, clock, "run-other", "2026-09-02")).toBe(false);
+    expect(await claimPublicationDate(env.DB, clock, "run-other", "2026-09-03")).toBe(true);
+    expect((await acquireOrResumeJob(env.DB, clock, "run-owner", "corr-3")).job.publicationDate).toBe("2026-09-02");
+    expect(await claimPublicationDate(env.DB, clock, "missing", "2026-09-04")).toBe(false);
   });
 
   it("reports alreadySucceeded true and refuses to reset a succeeded job", async () => {
@@ -72,8 +104,8 @@ describe("publication-repository", () => {
 
   it("explicitly reopens a failed job for restart while retaining cached products", async () => {
     await acquireOrResumeJob(env.DB, clock, "run-restart", "old-correlation");
-    await putProductCollage(env.DB, clock, "run-restart", "A-1001", "products/A-1001/collage/1080x1080.jpg");
-    await putProductCaptions(env.DB, clock, "run-restart", "A-1001", '["หนึ่ง","สอง","สาม"]');
+    await putProductCollage(env.DB, clock, "run-restart", "A-1001", "products/A-1001/collage/1080x1080.jpg", "collage-input");
+    await putProductCaptions(env.DB, clock, "run-restart", "A-1001", '["หนึ่ง","สอง","สาม"]', "caption-input");
     await setJobState(env.DB, clock, "run-restart", "failed");
     await setJobState(env.DB, clock, "run-restart", "validating");
     expect((await acquireOrResumeJob(env.DB, clock, "run-restart", "other")).job.state).toBe("failed");
@@ -91,6 +123,8 @@ describe("publication-repository", () => {
     expect(await getProductCache(env.DB, "run-restart", "A-1001")).toEqual({
       collageR2Key: "products/A-1001/collage/1080x1080.jpg",
       captionsJson: '["หนึ่ง","สอง","สาม"]',
+      collageInputFingerprint: "collage-input",
+      captionsInputFingerprint: "caption-input",
     });
   });
 
@@ -156,13 +190,25 @@ describe("publication-repository", () => {
   it("caches and returns per-product collage and caption output", async () => {
     await acquireOrResumeJob(env.DB, clock, "run-3", "corr-1");
     const before = await getProductCache(env.DB, "run-3", "A-1001");
-    expect(before).toEqual({ collageR2Key: null, captionsJson: null });
+    expect(before).toEqual({ collageR2Key: null, collageInputFingerprint: null, captionsJson: null, captionsInputFingerprint: null });
 
-    await putProductCollage(env.DB, clock, "run-3", "A-1001", "products/A-1001/collage/1080x1080.jpg");
-    await putProductCaptions(env.DB, clock, "run-3", "A-1001", JSON.stringify(["a", "b", "c"]));
+    await putProductCollage(env.DB, clock, "run-3", "A-1001", "products/A-1001/collage/1080x1080.jpg", "collage-input-1");
+    await putProductCaptions(env.DB, clock, "run-3", "A-1001", JSON.stringify(["a", "b", "c"]), "caption-input-1");
 
     const after = await getProductCache(env.DB, "run-3", "A-1001");
     expect(after.collageR2Key).toBe("products/A-1001/collage/1080x1080.jpg");
     expect(after.captionsJson).toBe(JSON.stringify(["a", "b", "c"]));
+    expect(after.collageInputFingerprint).toBe("collage-input-1");
+    expect(after.captionsInputFingerprint).toBe("caption-input-1");
+    await putProductCollage(env.DB, clock, "run-3", "A-1001", "new-collage.jpg", "collage-input-2");
+    expect(await getProductCache(env.DB, "run-3", "A-1001")).toEqual({
+      collageR2Key: "new-collage.jpg", collageInputFingerprint: "collage-input-2",
+      captionsJson: JSON.stringify(["a", "b", "c"]), captionsInputFingerprint: "caption-input-1",
+    });
+    await putProductCaptions(env.DB, clock, "run-3", "A-1001", '["new"]', "caption-input-2");
+    expect(await getProductCache(env.DB, "run-3", "A-1001")).toEqual({
+      collageR2Key: "new-collage.jpg", collageInputFingerprint: "collage-input-2",
+      captionsJson: '["new"]', captionsInputFingerprint: "caption-input-2",
+    });
   });
 });

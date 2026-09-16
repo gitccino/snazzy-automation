@@ -46,6 +46,12 @@ function sdkClient(
 }
 
 describe("toCaptionRequestProducts", () => {
+  it("normalizes the exact caption source fields before sending them to Claude", () => {
+    expect(toCaptionRequestProducts([{ ...product("A-1001"), brandName: " Cafe\u0301 ",
+      modelName: " Air Max ", conditionType: " Used ", size: " 42 ", description: " ดี\r\nพร้อมใช้\r\n ",
+    }])).toEqual([{ productId: "A-1001", brandName: "Café", modelName: "Air Max", conditionType: "Used", size: "42", description: "ดี\nพร้อมใช้" }]);
+  });
+
   it("maps only the text fields Claude needs, no images", () => {
     const result = toCaptionRequestProducts([product("A-1001")]);
     expect(result).toEqual([

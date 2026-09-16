@@ -10,6 +10,8 @@ import {
 import type { Fetcher } from "../../src/shared/http";
 import type { PublicationProduct } from "../../src/publication/types";
 import { getProductCache } from "../../src/db/publication-repository";
+import { collageInputFingerprint } from "../../src/publication/collage";
+import { captionInputFingerprint } from "../../src/publication/captions";
 
 const env = testEnv();
 let privateKey = "";
@@ -63,8 +65,10 @@ async function seedJob(state = "generating", tempId: string | null = null, corre
 }
 async function seedCache(id = "A-1001", captions = JSON.stringify(drafts), collage: string | null = `products/${id}/collage/1080x1080.jpg`) {
   await env.DB.prepare(`INSERT INTO publication_product_cache
-    (publication_run_id, product_id, collage_r2_key, captions_json, updated_at) VALUES ('rec-run-1', ?, ?, ?, ?)`)
-    .bind(id, collage, captions, clock.now().toISOString()).run();
+    (publication_run_id, product_id, collage_r2_key, collage_input_fingerprint, captions_json, captions_input_fingerprint, updated_at)
+    VALUES ('rec-run-1', ?, ?, ?, ?, ?, ?)`)
+    .bind(id, collage, await collageInputFingerprint(product.orderedImageKeys), captions,
+      await captionInputFingerprint({ ...product, productId: id }, "claude-opus-5"), clock.now().toISOString()).run();
 }
 async function job() {
   return env.DB.prepare("SELECT state, temp_doc_id, google_doc_id, google_doc_url, correlation_id FROM publication_jobs WHERE publication_run_id = 'rec-run-1'").first();
@@ -85,6 +89,18 @@ function runFetcher(products: PublicationProduct[] = [product]) {
 const token = () => json({ access_token: "google-token", expires_in: 3600 });
 const document = (content: string) => json({ body: { content: [{ paragraph: { elements: [{ startIndex: 1, textRun: { content } }] } }] } });
 const captionResponse = (captions: unknown[]) => ({ content: [{ type: "tool_use", id: "tool-1", name: "submit_captions", input: { captions } }], usage: { input_tokens: 100, output_tokens: 50 } });
+
+function generationDeps(): PublicationServiceDeps {
+  const deps = baseDeps();
+  const pipeline = { transform: vi.fn(), draw: vi.fn(), output: vi.fn(async () => ({
+    response: () => new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/jpeg" } }),
+  })) };
+  pipeline.transform.mockReturnValue(pipeline); pipeline.draw.mockReturnValue(pipeline);
+  vi.mocked(deps.images.input).mockReturnValue(pipeline);
+  vi.mocked(deps.bucket.get).mockImplementation(async () => ({ body: new ReadableStream() }) as R2ObjectBody);
+  vi.mocked(deps.anthropic.messages.create).mockResolvedValue(captionResponse([{ productId: "A-1001", drafts }]) as never);
+  return deps;
+}
 
 describe("publication stages", () => {
   beforeEach(async () => {
@@ -135,6 +151,92 @@ describe("publication stages", () => {
     expect((await validatePublication(deps, "rec-run-1", "corr-1")).kind).toBe("valid");
   });
 
+  it("clears stale D1 validation details after corrected data passes", async () => {
+    const invalid = baseDeps({ fetcher: runFetcher([{ ...product, description: "" }]) });
+    expect((await validatePublication(invalid, "rec-run-1", "corr-1")).kind).toBe("validation_failed");
+    const before = await env.DB.prepare("SELECT validation_result_json FROM publication_jobs WHERE publication_run_id = 'rec-run-1'").first();
+    expect(before?.validation_result_json).toBeTruthy();
+    expect((await validatePublication(baseDeps({ fetcher: runFetcher() }), "rec-run-1", "corr-1")).kind).toBe("valid");
+    expect(await env.DB.prepare("SELECT validation_result_json FROM publication_jobs WHERE publication_run_id = 'rec-run-1'").first())
+      .toEqual({ validation_result_json: null });
+  });
+
+  it("rejects a second run's claim on the loaded publication date before generation", async () => {
+    const first = baseDeps({ fetcher: runFetcher() });
+    expect((await validatePublication(first, "rec-run-1", "corr-1")).kind).toBe("valid");
+    const fetcher = runFetcher();
+    fetcher.mockImplementation(async (url, init) => {
+      const response = await runFetcher()(url, init);
+      const body = await response.json() as Record<string, unknown>;
+      if (body.id) body.id = "rec-run-2";
+      return json(body);
+    });
+    const second = baseDeps({ fetcher });
+    await expect(validatePublication(second, "rec-run-2", "corr-2")).rejects.toMatchObject({
+      code: "publication_date_conflict", retryable: false,
+    });
+    expect(second.anthropic.messages.create).not.toHaveBeenCalled();
+    expect(second.bucket.put).not.toHaveBeenCalled();
+  });
+
+  it("regenerates a reordered first-four collage while preserving matching captions", async () => {
+    await seedJob();
+    const deps = generationDeps();
+    await preparePublicationOutputs(deps, validated);
+    const edited = { ...validated, run: { ...validated.run, products: [{
+      ...product, orderedImageKeys: [...product.orderedImageKeys].reverse(),
+    }] } };
+    await preparePublicationOutputs(deps, edited);
+    expect(deps.bucket.put).toHaveBeenCalledTimes(2);
+    expect(deps.anthropic.messages.create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["brandName", "modelName", "conditionType", "size", "description"] as const)(
+    "regenerates captions when %s changes, preserving the matching collage", async field => {
+      await seedJob();
+      const deps = generationDeps();
+      await preparePublicationOutputs(deps, validated);
+      const edited = { ...validated, run: { ...validated.run, products: [{ ...product, [field]: "ข้อมูลใหม่" }] } };
+      await preparePublicationOutputs(deps, edited);
+      expect(deps.anthropic.messages.create).toHaveBeenCalledTimes(2);
+      expect(deps.bucket.put).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("regenerates captions for a changed model while preserving the matching collage", async () => {
+    await seedJob();
+    const deps = generationDeps();
+    await preparePublicationOutputs(deps, validated);
+    await preparePublicationOutputs({ ...deps, config: { ...deps.config, claudeModel: "future-model" as typeof deps.config.claudeModel } }, validated);
+    expect(deps.anthropic.messages.create).toHaveBeenCalledTimes(2);
+    expect(deps.bucket.put).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses outputs when only normalized whitespace, price, or unused image keys change", async () => {
+    await seedJob();
+    const deps = generationDeps();
+    await preparePublicationOutputs(deps, validated);
+    await preparePublicationOutputs(deps, { ...validated, run: { ...validated.run, products: [{
+      ...product, brandName: " Nike ", description: " Good condition\n", lineSquarePrice: 1500,
+      orderedImageKeys: [...product.orderedImageKeys, "assets/new-unused.jpg"],
+    }] } });
+    expect(deps.anthropic.messages.create).toHaveBeenCalledTimes(1);
+    expect(deps.bucket.put).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["collage_input_fingerprint", "captions_input_fingerprint"])(
+    "regenerates stale %s versions and then preserves their replacements", async column => {
+      await seedJob();
+      const deps = generationDeps();
+      await preparePublicationOutputs(deps, validated);
+      await env.DB.prepare(`UPDATE publication_product_cache SET ${column} = 'previous-version' WHERE publication_run_id = 'rec-run-1'`).run();
+      await preparePublicationOutputs(deps, validated);
+      await preparePublicationOutputs(deps, validated);
+      expect(deps.bucket.put).toHaveBeenCalledTimes(column === "collage_input_fingerprint" ? 2 : 1);
+      expect(deps.anthropic.messages.create).toHaveBeenCalledTimes(column === "captions_input_fingerprint" ? 2 : 1);
+    },
+  );
+
   it("does not reopen a terminal failed run", async () => {
     await seedJob("failed");
     const deps = baseDeps();
@@ -148,7 +250,7 @@ describe("publication stages", () => {
     expect(await preparePublicationOutputs(deps, validated)).toEqual(prepared);
     expect(deps.anthropic.messages.create).not.toHaveBeenCalled();
     expect(deps.bucket.put).not.toHaveBeenCalled();
-    expect(JSON.parse(String(vi.mocked(deps.fetcher).mock.calls[0]![1]?.body)).fields).toEqual({ Status: "Generating" });
+    expect(JSON.parse(String(vi.mocked(deps.fetcher).mock.calls[0]![1]?.body)).fields).toEqual({ Status: "Generating", "Error Summary": null });
   });
 
   it.each(["{malformed", '["english","only","captions"]', '[" หนึ่ง","สอง","สาม"]', '["หนึ่ง","สอง"]'])
@@ -179,7 +281,7 @@ describe("publication stages", () => {
   it("stores newly rendered collage bytes privately and reuses them on retry", async () => {
     await seedJob(); await seedCache("A-1001", JSON.stringify(drafts), null);
     const deps = baseDeps();
-    const pipeline = { transform: vi.fn(), draw: vi.fn(), output: vi.fn(async () => ({ response: () => new Response(new Uint8Array([1, 2, 3])) })) };
+    const pipeline = { transform: vi.fn(), draw: vi.fn(), output: vi.fn(async () => ({ response: () => new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/jpeg" } }) })) };
     pipeline.transform.mockReturnValue(pipeline); pipeline.draw.mockReturnValue(pipeline);
     vi.mocked(deps.images.input).mockReturnValue(pipeline);
     vi.mocked(deps.bucket.get).mockResolvedValue({ body: new ReadableStream() } as never);
@@ -188,6 +290,17 @@ describe("publication stages", () => {
     expect((await getProductCache(env.DB, "rec-run-1", "A-1001")).collageR2Key).toBe("products/A-1001/collage/1080x1080.jpg");
     await preparePublicationOutputs(deps, validated);
     expect(deps.bucket.put).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([400, 429, 503])("does not write R2 or collage cache for Images status %s", async status => {
+    await seedJob(); await seedCache("A-1001", JSON.stringify(drafts), null);
+    const before = await getProductCache(env.DB, "rec-run-1", "A-1001");
+    const deps = generationDeps();
+    const pipeline = vi.mocked(deps.images.input)(new ReadableStream());
+    vi.mocked(pipeline.output).mockResolvedValue({ response: () => new Response("SECRET", { status, headers: { "content-type": "image/jpeg" } }) });
+    await expect(preparePublicationOutputs(deps, validated)).rejects.toMatchObject({ code: "images_output_failed", retryable: status !== 400 });
+    expect(deps.bucket.put).not.toHaveBeenCalled();
+    expect(await getProductCache(env.DB, "rec-run-1", "A-1001")).toEqual(before);
   });
 
   it("caches the first batch even when a later batch throws permanently", async () => {
@@ -267,7 +380,7 @@ describe("publication stages", () => {
     const deps = baseDeps({ fetcher });
     const result = await finalizePublication(deps, prepared, "temp-doc");
     expect(result).toEqual({ publicationRunId: "rec-run-1", googleDocId: "temp-doc", googleDocUrl: "https://docs.google.com/document/d/temp-doc/edit", productIds: ["A-1001"] });
-    expect(JSON.parse(String(fetcher.mock.calls[2]![1]?.body)).fields).toEqual({ Status: "Generated", "Google Doc URL": result.googleDocUrl, "Generated At": "2026-09-01T17:30:00.000Z" });
+    expect(JSON.parse(String(fetcher.mock.calls[2]![1]?.body)).fields).toEqual({ Status: "Generated", "Google Doc URL": result.googleDocUrl, "Generated At": "2026-09-01T17:30:00.000Z", "Error Summary": null });
     expect(await job()).toMatchObject({ state: "succeeded", google_doc_id: "temp-doc", google_doc_url: result.googleDocUrl });
     expect(await finalizePublication(deps, prepared, "temp-doc")).toEqual(result);
     expect(fetcher).toHaveBeenCalledTimes(3);
@@ -295,7 +408,7 @@ describe("publication stages", () => {
       .mockResolvedValueOnce(new Response(null, { status: 204 })).mockResolvedValueOnce(json({}));
     const deps = baseDeps({ fetcher });
     await failPublicationAfterExhaustion(deps, "rec-run-1", "Document preparation failed", null);
-    expect(String(fetcher.mock.calls[2]![0])).toBe("https://www.googleapis.com/drive/v3/files/orphan-doc");
+    expect(String(fetcher.mock.calls[2]![0])).toBe("https://www.googleapis.com/drive/v3/files/orphan-doc?supportsAllDrives=true");
     expect(fetcher.mock.calls[2]![1]?.method).toBe("DELETE");
     expect(await job()).toMatchObject({ state: "failed", temp_doc_id: null });
     expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining("ไม่สามารถอ่านวันที่รายการได้"));

@@ -129,8 +129,9 @@ export async function findRunnableRunForDate(
   token: string,
   isoDate: string,
 ): Promise<PublicationRun | null> {
-  const formula = `AND({Publication Date}='${isoDate}',OR({Status}='Ready',{Status}='Failed'))`;
-  const url = `${airtableUrl(config, config.airtablePublicationRunsTableId)}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=1`;
+  // Inspect all statuses: a Ready row must not hide another row already Generated.
+  const formula = `{Publication Date}='${isoDate}'`;
+  const url = `${airtableUrl(config, config.airtablePublicationRunsTableId)}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=2&pageSize=2`;
   const response = await fetcher(url, { headers: authHeaders(token) });
   if (!response.ok) {
     throw airtableHttpError(
@@ -141,9 +142,13 @@ export async function findRunnableRunForDate(
   }
   const body = z.object({
     records: z.array(AirtableRunRecordSchema),
+    offset: z.string().optional(),
   }).parse(await response.json());
+  if (body.records.length > 1 || body.offset) {
+    throw new OperationalError("airtable_duplicate_publication_date", "Airtable has multiple publication runs for this date", false);
+  }
   const record = body.records[0];
-  if (!record) return null;
+  if (!record || (record.fields.Status !== "Ready" && record.fields.Status !== "Failed")) return null;
 
   const products = await fetchLinkedProducts(fetcher, config, token, record.fields.Products ?? []);
   return {
@@ -202,7 +207,7 @@ async function patchRun(
 }
 
 export async function markRunGenerating(fetcher: Fetcher, config: AirtablePublicationConfig, token: string, airtableRunId: string): Promise<void> {
-  await patchRun(fetcher, config, token, airtableRunId, { Status: "Generating" });
+  await patchRun(fetcher, config, token, airtableRunId, { Status: "Generating", "Error Summary": null });
 }
 
 export async function markRunGenerated(
@@ -217,6 +222,7 @@ export async function markRunGenerated(
     Status: "Generated",
     "Google Doc URL": googleDocUrl,
     "Generated At": generatedAtIso,
+    "Error Summary": null,
   });
 }
 

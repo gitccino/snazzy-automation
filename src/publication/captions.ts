@@ -1,6 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { OperationalError } from "../shared/errors";
+import { sha256Hex } from "../shared/ids";
 import type { CaptionSet, PublicationProduct } from "./types";
 
 export interface CaptionRequestProduct {
@@ -16,6 +17,9 @@ export interface CaptionGenerationOutcome {
   captions: CaptionSet[];
   missingProductIds: string[];
 }
+
+// Bump whenever the prompt, tool schema, or draft validation contract changes.
+const CAPTION_PROMPT_SCHEMA_VERSION = "thai-marketplace-v1";
 
 const CAPTIONS_TOOL_SCHEMA = {
   name: "submit_captions",
@@ -69,14 +73,21 @@ const ResponseSchema = z.object({
 export function toCaptionRequestProducts(
   products: PublicationProduct[],
 ): CaptionRequestProduct[] {
+  const normalize = (text: string) => text.normalize("NFC").replace(/\r\n?/g, "\n").trim();
   return products.map((product) => ({
     productId: product.productId,
-    brandName: product.brandName,
-    modelName: product.modelName,
-    conditionType: product.conditionType,
-    size: product.size,
-    description: product.description,
+    brandName: normalize(product.brandName),
+    modelName: normalize(product.modelName),
+    conditionType: normalize(product.conditionType),
+    size: normalize(product.size),
+    description: normalize(product.description),
   }));
+}
+
+export async function captionInputFingerprint(product: PublicationProduct, model: string): Promise<string> {
+  return sha256Hex(new TextEncoder().encode(JSON.stringify([
+    CAPTION_PROMPT_SCHEMA_VERSION, model, toCaptionRequestProducts([product])[0],
+  ])));
 }
 
 function buildPrompt(products: CaptionRequestProduct[]): string {

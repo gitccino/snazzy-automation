@@ -1,7 +1,12 @@
+import { OperationalError } from "../shared/errors";
+import { sha256Hex } from "../shared/ids";
+
 export const COLLAGE_BASE_R2_KEY = "assets/collage-base-1080.jpg";
 export const COLLAGE_CANVAS_SIZE = 1080;
 export const COLLAGE_CELL_SIZE = 504;
 export const COLLAGE_GUTTER = 24;
+// Bump when the base asset or composition/output parameters change.
+const COLLAGE_BASE_TRANSFORM_VERSION = "white-1080-contain-v1";
 
 export const COLLAGE_CELL_POSITIONS: Array<{ top: number; left: number }> = [
   { top: COLLAGE_GUTTER, left: COLLAGE_GUTTER },
@@ -28,6 +33,12 @@ export interface ImagesBinding {
 
 export function collageR2Key(productId: string): string {
   return `products/${productId}/collage/1080x1080.jpg`;
+}
+
+export async function collageInputFingerprint(orderedR2Keys: string[]): Promise<string> {
+  return sha256Hex(new TextEncoder().encode(JSON.stringify([
+    COLLAGE_BASE_TRANSFORM_VERSION, COLLAGE_BASE_R2_KEY, orderedR2Keys.slice(0, 4),
+  ])));
 }
 
 export async function generateCollage(
@@ -65,5 +76,12 @@ export async function generateCollage(
   }
 
   const result = await pipeline.output({ format: "image/jpeg", quality: 90 });
-  return new Uint8Array(await result.response().arrayBuffer());
+  const response = result.response();
+  if (!response.ok) {
+    throw new OperationalError("images_output_failed", "Cloudflare Images output failed", response.status === 429 || response.status >= 500);
+  }
+  if (response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "image/jpeg") {
+    throw new OperationalError("images_output_invalid", "Cloudflare Images returned an invalid image response", true);
+  }
+  return new Uint8Array(await response.arrayBuffer());
 }
