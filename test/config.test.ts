@@ -44,6 +44,7 @@ describe("parseConfig", () => {
       claudeModel: "claude-opus-5",
       claudeRequestInputTokenLimit: 150_000,
       lineAllowedGroupId: "Cgroup",
+      soldoutConfirmationEnabled: true,
       publicBaseUrl: "https://snazzy-staging.example.workers.dev",
     });
   });
@@ -84,6 +85,15 @@ describe("parseConfig", () => {
       claudeModel: "claude-opus-5",
       claudeRequestInputTokenLimit: 150_000,
     });
+  });
+
+  it("maps LINE confirmation configuration without replacing the existing group ID", () => {
+    const config = parseConfig({
+      ...validRawConfig,
+      SOLDOUT_CONFIRMATION_ENABLED: false,
+    });
+    expect(config.lineAllowedGroupId).toBe("Cgroup");
+    expect(config.soldoutConfirmationEnabled).toBe(false);
   });
 
   it.each([

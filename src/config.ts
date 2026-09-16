@@ -18,6 +18,7 @@ const RawAppConfigSchema = z.object({
   CLAUDE_MODEL: z.literal("claude-opus-5"),
   CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: z.number().int().positive().max(150_000),
   LINE_ALLOWED_GROUP_ID: z.string().min(1),
+  SOLDOUT_CONFIRMATION_ENABLED: z.boolean().default(true),
   PUBLIC_BASE_URL: z.string().url(),
 });
 
@@ -39,6 +40,7 @@ export interface AppConfig {
   claudeModel: "claude-opus-5";
   claudeRequestInputTokenLimit: number;
   lineAllowedGroupId: string;
+  soldoutConfirmationEnabled: boolean;
   publicBaseUrl: string;
 }
 
@@ -63,6 +65,7 @@ export function parseConfig(raw: unknown): AppConfig {
     claudeModel: parsed.CLAUDE_MODEL,
     claudeRequestInputTokenLimit: parsed.CLAUDE_REQUEST_INPUT_TOKEN_LIMIT,
     lineAllowedGroupId: parsed.LINE_ALLOWED_GROUP_ID,
+    soldoutConfirmationEnabled: parsed.SOLDOUT_CONFIRMATION_ENABLED,
     publicBaseUrl: parsed.PUBLIC_BASE_URL,
   };
 }
