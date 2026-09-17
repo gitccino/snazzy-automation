@@ -63,6 +63,18 @@ async function createApplyingCommand(
   return { repo, applyEventId };
 }
 
+async function createApplyingCommandWithoutClaimValidation(
+  command: PendingLineCommand,
+  applyEventId = `evt-apply-${command.token}`,
+) {
+  const repo = createLineRepository(testEnv().DB, sequentialIdGenerator(`line-${command.token}`), fixedClock("2026-09-01T10:00:00.000Z"));
+  await repo.createPending(command);
+  await testEnv().DB.prepare(
+    "UPDATE pending_line_commands SET status = 'applying', apply_event_id = ? WHERE token = ?",
+  ).bind(applyEventId, command.token).run();
+  return { repo, applyEventId };
+}
+
 describe("line repository", () => {
   it("claims one webhook event once", async () => {
     const repo = createLineRepository(testEnv().DB, sequentialIdGenerator("line"), fixedClock("2026-09-01T10:00:00.000Z"));
@@ -81,6 +93,31 @@ describe("line repository", () => {
     expect(await repo.claimPending("tok-1", "C1", "soldout", "evt-approve", "2026-09-01T10:11:00.000Z")).not.toBeNull();
     await repo.resetPending("tok-1", "evt-approve");
     expect(await repo.claimPending("tok-1", "C1", "soldout", "evt-retry", "2026-09-01T10:05:00.000Z")).not.toBeNull();
+  });
+
+  it("does not claim a pending revert after a newer same-group sold-out action", async () => {
+    const target = pendingCommand({ groupId: "C-stale-revert", productId: "A-target" });
+    const targetSetup = await createApplyingCommand(target);
+    const targetAction = await targetSetup.repo.finalizeAction(finalizeInput(target, targetSetup.applyEventId));
+    const revert = pendingCommand({
+      kind: "revert",
+      groupId: target.groupId,
+      productId: target.productId,
+      soldPrice: null,
+      before: after,
+      after: revertedAfter,
+      targetActionId: targetAction.id,
+    });
+    const repo = createLineRepository(testEnv().DB, sequentialIdGenerator("line-stale-revert"), fixedClock("2026-09-01T10:00:00.000Z"));
+    await repo.createPending(revert);
+    const newer = pendingCommand({ groupId: target.groupId, productId: "A-newer" });
+    const newerSetup = await createApplyingCommand(newer);
+    await newerSetup.repo.finalizeAction(finalizeInput(newer, newerSetup.applyEventId));
+
+    expect(await repo.claimPending(
+      revert.token, revert.groupId, "revert", "evt-stale-approve", applyTime,
+    )).toBeNull();
+    expect((await repo.findPendingBySourceEvent(revert.sourceEventId))?.status).toBe("pending");
   });
 
   it("returns latest unreverted action in the same group", async () => {
@@ -203,7 +240,7 @@ describe("line repository", () => {
     const foreignSetup = await createApplyingCommand(foreign);
     const foreignAction = await foreignSetup.repo.finalizeAction(finalizeInput(foreign, foreignSetup.applyEventId));
     const command = pendingCommand({ kind: "revert", groupId: "C-current", productId: foreign.productId, soldPrice: null, before: after, after: revertedAfter, targetActionId: foreignAction.id });
-    const { repo, applyEventId } = await createApplyingCommand(command);
+    const { repo, applyEventId } = await createApplyingCommandWithoutClaimValidation(command);
 
     await expect(repo.finalizeAction(finalizeInput(command, applyEventId))).rejects.toThrow("revert target is no longer reversible");
   });
@@ -213,7 +250,7 @@ describe("line repository", () => {
     const targetSetup = await createApplyingCommand(target);
     const targetAction = await targetSetup.repo.finalizeAction(finalizeInput(target, targetSetup.applyEventId));
     const command = pendingCommand({ kind: "revert", groupId: target.groupId, productId: "A-other", soldPrice: null, before: after, after: revertedAfter, targetActionId: targetAction.id });
-    const { repo, applyEventId } = await createApplyingCommand(command);
+    const { repo, applyEventId } = await createApplyingCommandWithoutClaimValidation(command);
 
     await expect(repo.finalizeAction(finalizeInput(command, applyEventId))).rejects.toThrow("revert target is no longer reversible");
   });
@@ -226,9 +263,9 @@ describe("line repository", () => {
     const firstRevertSetup = await createApplyingCommand(firstRevert);
     const firstRevertAction = await firstRevertSetup.repo.finalizeAction(finalizeInput(firstRevert, firstRevertSetup.applyEventId));
     const staleTarget = pendingCommand({ kind: "revert", groupId: soldout.groupId, productId: soldout.productId, soldPrice: null, before: after, after: revertedAfter, targetActionId: soldoutAction.id });
-    const staleSetup = await createApplyingCommand(staleTarget);
+    const staleSetup = await createApplyingCommandWithoutClaimValidation(staleTarget);
     const wrongType = pendingCommand({ kind: "revert", groupId: soldout.groupId, productId: soldout.productId, soldPrice: null, before: after, after: revertedAfter, targetActionId: firstRevertAction.id });
-    const wrongTypeSetup = await createApplyingCommand(wrongType);
+    const wrongTypeSetup = await createApplyingCommandWithoutClaimValidation(wrongType);
 
     await expect(staleSetup.repo.finalizeAction(finalizeInput(staleTarget, staleSetup.applyEventId))).rejects.toThrow("revert target is no longer reversible");
     await expect(wrongTypeSetup.repo.finalizeAction(finalizeInput(wrongType, wrongTypeSetup.applyEventId))).rejects.toThrow("revert target is no longer reversible");

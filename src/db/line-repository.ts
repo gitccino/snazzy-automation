@@ -77,9 +77,15 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
         .bind(nowIso, token, groupId, kind, nowIso).run();
       const row = await db.prepare(`UPDATE pending_line_commands SET status = 'applying', apply_event_id = ?
         WHERE token = ? AND group_id = ? AND kind = ?
-          AND ((status = 'pending' AND expires_at > ?)
-            OR (status = 'applying' AND apply_event_id = ?)) RETURNING *`)
-        .bind(eventId, token, groupId, kind, nowIso, eventId).first<Record<string, unknown>>();
+          AND ((status = 'applying' AND apply_event_id = ?)
+            OR (status = 'pending' AND expires_at > ?
+              AND (kind != 'revert' OR target_action_id = (
+                SELECT id FROM line_actions
+                WHERE group_id = ? AND kind = 'soldout'
+                  AND reverted_by_action_id IS NULL
+                ORDER BY created_at DESC, rowid DESC LIMIT 1
+              )))) RETURNING *`)
+        .bind(eventId, token, groupId, kind, eventId, nowIso, groupId).first<Record<string, unknown>>();
       return row ? parsePending(row) : null;
     },
     async setPendingAfter(token, eventId, after) {

@@ -114,6 +114,35 @@ it("creates mandatory confirmation for latest same-group action", async () => {
   }));
 });
 
+it("returns the same confirmation from concurrent preparations of one source event", async () => {
+  const d = deps();
+  let saved: PendingLineCommand | null = null;
+  d.repo.findPendingBySourceEvent = vi.fn(async () => saved);
+  d.repo.createPending = vi.fn(async (candidate) => {
+    if (saved !== null) return null;
+    saved = candidate;
+    return candidate;
+  });
+
+  const replies = await Promise.all([
+    prepareRevert(actor, "evt-revert", d),
+    prepareRevert(actor, "evt-revert", d),
+  ]);
+
+  expect(replies).toEqual([
+    expect.objectContaining({
+      kind: "buttons",
+      approveData: "action=revert&decision=approve&token=tok",
+      rejectData: "action=revert&decision=reject&token=tok",
+    }),
+    expect.objectContaining({
+      kind: "buttons",
+      approveData: "action=revert&decision=approve&token=tok",
+      rejectData: "action=revert&decision=reject&token=tok",
+    }),
+  ]);
+});
+
 it("refuses approval when Airtable has a newer edit", async () => {
   const d = deps(product({ ...sold, soldPrice: 1500 }));
   d.repo.claimPending = vi.fn().mockResolvedValue(revertPending());
@@ -127,6 +156,22 @@ it("refuses approval when Airtable has a newer edit", async () => {
   expect(d.repo.resolvePending).toHaveBeenCalledWith(
     "tok", "evt-approve", "rejected", "Beam (U2)",
   );
+});
+
+it("does not write Airtable when D1 refuses a stale revert target", async () => {
+  const d = deps();
+  d.repo.claimPending = vi.fn().mockResolvedValue(null);
+
+  await expect(resolveRevert(
+    "approve", "tok", actor, "evt-approve", "corr-revert", d,
+  )).resolves.toEqual({
+    kind: "text",
+    text: "คำยืนยันหมดอายุหรือถูกใช้แล้ว",
+  });
+
+  expect(d.inventory.findByProductId).not.toHaveBeenCalled();
+  expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
+  expect(d.repo.finalizeAction).not.toHaveBeenCalled();
 });
 
 it("rejects a pending row without an explicit target action", async () => {

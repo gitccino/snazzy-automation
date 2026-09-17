@@ -82,12 +82,16 @@ export async function prepareRevert(
       deps.clock.now().getTime() + 10 * 60_000,
     ).toISOString(),
   };
-  const pending = await deps.repo.createPending(candidate);
+  const pending = await deps.repo.createPending(candidate)
+    ?? await deps.repo.findPendingBySourceEvent(sourceEventId);
   if (pending === null) {
     return {
       kind: "text",
       text: "มีคำยืนยันย้อนกลับรายการนี้อยู่แล้ว",
     };
+  }
+  if (pending.kind !== "revert") {
+    throw new Error("source event belongs to another command");
   }
   return confirmationReply(pending);
 }
