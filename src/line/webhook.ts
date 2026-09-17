@@ -33,6 +33,14 @@ function parsePostback(data: string): {
   token: string;
 } | null {
   const values = new URLSearchParams(data);
+  const keys = Array.from(values.keys());
+  if (
+    keys.length !== 3
+    || new Set(keys).size !== 3
+    || !keys.every((key) => key === "action" || key === "decision" || key === "token")
+  ) {
+    return null;
+  }
   const action = values.get("action");
   const decision = values.get("decision");
   const token = values.get("token");
@@ -50,7 +58,7 @@ function parsePostback(data: string): {
 async function actorFor(event: SupportedLineEvent, line: LineClient): Promise<LineActor> {
   const profile = await line.getGroupMemberProfile(event.source.groupId, event.source.userId);
   return {
-    userId: profile.userId,
+    userId: event.source.userId,
     displayName: profile.displayName,
     groupId: event.source.groupId,
   };

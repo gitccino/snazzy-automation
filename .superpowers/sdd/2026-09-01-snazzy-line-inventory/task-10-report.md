@@ -25,3 +25,11 @@ The current `src/line/search.ts` types take precedence over the stale adapter ex
 ## Notes
 
 The successful full Vitest run emitted existing Miniflare workflow diagnostics (including `Engine was never started` and `instance.not_found`), but exited 0 with all tests passing. No task-specific validation failures remain.
+
+## Fix Round 1 — actor identity and postback structure
+
+- Actor identity now always uses the HMAC-authenticated `event.source.userId`; the LINE profile response supplies only the display name.
+- Postbacks now require exactly one `action`, `decision`, and `token`, and reject duplicate, missing, empty, or unexpected parameters before any pending command can be claimed.
+- RED: the focused suite failed with the profile ID appearing in `requesterUserId`, and duplicate or unexpected postback fields calling `claimPending`.
+- GREEN: `npx vitest run test/line/webhook.test.ts test/routes/line.test.ts` passed 29 tests.
+- Final: `npm run check` passed: typecheck plus 58 test files / 580 tests.

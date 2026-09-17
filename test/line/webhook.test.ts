@@ -99,3 +99,59 @@ it("passes source and applying webhook IDs into soldout lifecycle", async () => 
 
   expect(d.repo.createPending).toHaveBeenCalledWith(expect.objectContaining({ sourceEventId: "evt-1" }));
 });
+
+it("uses the signed source user ID when LINE profile identity disagrees", async () => {
+  const d = deps();
+  const soldoutEvent: SupportedLineEvent = {
+    ...event,
+    message: { ...event.message, text: "/soldout A-1 ราคา 100" },
+  };
+  vi.mocked(d.line.getGroupMemberProfile).mockResolvedValue({
+    userId: "U-profile-mismatch",
+    displayName: "Mint",
+  });
+  vi.mocked(d.inventory.findByProductId).mockResolvedValue({
+    recordId: "rec1", productId: "A-1", uploadDate: null, airtableUrl: "https://airtable/r",
+    inventoryStatus: "In", soldPrice: null, soldAt: null, soldBy: null,
+  });
+  vi.mocked(d.repo.findPendingBySourceEvent).mockResolvedValue(null);
+  vi.mocked(d.repo.createPending).mockImplementation(async (value) => value);
+
+  await processLineEvents([soldoutEvent], d);
+
+  expect(d.repo.createPending).toHaveBeenCalledWith(expect.objectContaining({
+    requesterUserId: "U1",
+  }));
+});
+
+it.each([
+  ["duplicate action", "action=soldout&action=revert&decision=approve&token=tok"],
+  ["duplicate decision", "action=soldout&decision=approve&decision=reject&token=tok"],
+  ["duplicate token", "action=soldout&decision=approve&token=tok&token=other"],
+  ["missing action", "decision=approve&token=tok"],
+  ["missing decision", "action=soldout&token=tok"],
+  ["missing token", "action=soldout&decision=approve"],
+  ["empty action", "action=&decision=approve&token=tok"],
+  ["empty decision", "action=soldout&decision=&token=tok"],
+  ["empty token", "action=soldout&decision=approve&token="],
+  ["unexpected key", "action=soldout&decision=approve&token=tok&extra=value"],
+])("rejects postback with %s without consuming a token", async (_name, data) => {
+  const d = deps();
+  const postback: SupportedLineEvent = {
+    type: "postback",
+    webhookEventId: "evt-postback",
+    replyToken: "reply-postback",
+    source: { type: "group", groupId: "C1", userId: "U1" },
+    postback: { data },
+  };
+  vi.mocked(d.repo.claimPending).mockResolvedValue(null);
+
+  await processLineEvents([postback], d);
+
+  expect(d.repo.claimPending).not.toHaveBeenCalled();
+  expect(d.repo.resolvePending).not.toHaveBeenCalled();
+  expect(d.line.replyText).toHaveBeenCalledWith(
+    "reply-postback",
+    "คำยืนยันไม่ถูกต้อง",
+  );
+});
