@@ -187,6 +187,17 @@ describe("line repository", () => {
     expect((await testEnv().DB.prepare("SELECT COUNT(*) AS count FROM line_actions WHERE pending_token = ?").bind(command.token).first<{ count: number }>())?.count).toBe(0);
   });
 
+  it("rejects finalization by a non-owner event without writing an action or audit", async () => {
+    const command = pendingCommand();
+    const { repo, applyEventId } = await createApplyingCommand(command);
+    const input = finalizeInput(command, "evt-not-owner");
+
+    await expect(repo.finalizeAction(input)).rejects.toThrow("pending command is not owned by this event");
+    expect((await testEnv().DB.prepare("SELECT COUNT(*) AS count FROM line_actions WHERE pending_token = ?").bind(command.token).first<{ count: number }>())?.count).toBe(0);
+    expect((await testEnv().DB.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE correlation_id = ?").bind(input.correlationId).first<{ count: number }>())?.count).toBe(0);
+    expect((await repo.findPendingBySourceEvent(command.sourceEventId))?.applyEventId).toBe(applyEventId);
+  });
+
   it("rejects a revert whose target belongs to another group", async () => {
     const foreign = pendingCommand({ groupId: "C-foreign", productId: "A-foreign" });
     const foreignSetup = await createApplyingCommand(foreign);
