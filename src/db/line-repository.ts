@@ -38,6 +38,13 @@ function parseAction(row: Record<string, unknown>): ReversibleLineAction {
   };
 }
 
+function sameSaleValues(left: SaleValues, right: SaleValues): boolean {
+  return left.inventoryStatus === right.inventoryStatus
+    && left.soldPrice === right.soldPrice
+    && left.soldAt === right.soldAt
+    && left.soldBy === right.soldBy;
+}
+
 export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Clock): LineRepository {
   return {
     async claimEvent(eventId, groupId) {
@@ -89,33 +96,45 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
         .bind(status, clock.now().toISOString(), resolverActor, token, eventId).run();
     },
     async finalizeAction(input) {
+      const pendingRow = await db.prepare(
+        "SELECT * FROM pending_line_commands WHERE token = ?",
+      ).bind(input.pendingToken).first<Record<string, unknown>>();
+      if (pendingRow === null) {
+        throw new Error("pending command is not owned by this event");
+      }
+      const pending = parsePending(pendingRow);
+      if (pending.applyEventId !== input.applyEventId) {
+        throw new Error("pending command is not owned by this event");
+      }
+      if (pending.groupId !== input.groupId
+        || pending.kind !== input.kind
+        || pending.productId !== input.productId
+        || pending.targetActionId !== input.targetActionId
+        || !sameSaleValues(pending.before, input.before)
+        || !sameSaleValues(pending.after, input.after)) {
+        throw new Error("action input does not match owned pending command");
+      }
+
       const existing = await db.prepare(
         "SELECT * FROM line_actions WHERE pending_token = ?",
       ).bind(input.pendingToken).first<Record<string, unknown>>();
       if (existing) return parseAction(existing);
 
-      const pending = await db.prepare(
-        `SELECT token FROM pending_line_commands
-         WHERE token = ? AND group_id = ? AND status = 'applying'
-           AND apply_event_id = ?`,
-      ).bind(
-        input.pendingToken,
-        input.groupId,
-        input.applyEventId,
-      ).first();
-      if (pending === null) {
+      if (pending.status !== "applying") {
         throw new Error("pending command is not owned by this event");
       }
 
-      if (input.targetActionId !== null) {
+      if (pending.targetActionId !== null) {
         const target = await db.prepare(
           `SELECT id FROM line_actions
            WHERE id = ? AND group_id = ?
              AND kind = 'soldout'
+             AND product_id = ?
              AND reverted_by_action_id IS NULL`,
         ).bind(
-          input.targetActionId,
-          input.groupId,
+          pending.targetActionId,
+          pending.groupId,
+          pending.productId,
         ).first();
         if (target === null) {
           throw new Error("revert target is no longer reversible");
@@ -124,12 +143,12 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
 
       const action: ReversibleLineAction = {
         id: ids.next(),
-        pendingToken: input.pendingToken,
-        groupId: input.groupId,
-        productId: input.productId,
-        kind: input.kind,
-        before: input.before,
-        after: input.after,
+        pendingToken: pending.token,
+        groupId: pending.groupId,
+        productId: pending.productId,
+        kind: pending.kind,
+        before: pending.before,
+        after: pending.after,
         actor: input.actor,
         correlationId: input.correlationId,
         createdAt: clock.now().toISOString(),
@@ -182,7 +201,7 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
           action.createdAt,
         ),
       ];
-      if (input.targetActionId !== null) {
+      if (pending.targetActionId !== null) {
         statements.splice(
           1,
           0,
@@ -192,12 +211,20 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
                AND reverted_by_action_id IS NULL`,
           ).bind(
             action.id,
-            input.targetActionId,
-            input.groupId,
+            pending.targetActionId,
+            pending.groupId,
           ),
         );
       }
-      await db.batch(statements);
+      try {
+        await db.batch(statements);
+      } catch (error) {
+        const concurrent = await db.prepare(
+          "SELECT * FROM line_actions WHERE pending_token = ?",
+        ).bind(input.pendingToken).first<Record<string, unknown>>();
+        if (concurrent) return parseAction(concurrent);
+        throw error;
+      }
       return action;
     },
     async latestReversible(groupId) {
