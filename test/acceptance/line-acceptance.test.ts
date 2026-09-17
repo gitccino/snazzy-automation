@@ -15,18 +15,24 @@ import type {
   SaleValues,
 } from "../../src/line/types";
 
-const parserCases: Array<[text: string, ok: boolean, typeOrCode: string]> = [
+const parserCases: Array<[
+  text: string,
+  ok: boolean,
+  typeOrCode: string,
+  productId?: string,
+  soldPrice?: number,
+]> = [
   ["/help", true, "help"],
   ["/upload", true, "upload"],
   ["/docs", true, "docs"],
   ["/revert", true, "revert"],
-  ["/search A-1234", true, "search"],
+  ["/search A-1234", true, "search", "A-1234"],
   ["/search A1234", false, "invalid_product_id"],
   ["/search A 1234", false, "invalid_product_id"],
-  ["/soldout A-1234 thb 1290", true, "soldout"],
-  ["/soldout A-1234 THB 1,290", true, "soldout"],
-  ["/soldout รหัส 1234 ราคา 1290", true, "soldout"],
-  ["/soldout รหัสสินค้า 1234 ราคา 1,290 บาท", true, "soldout"],
+  ["/soldout A-1234 thb 1290", true, "soldout", "A-1234", 1290],
+  ["/soldout A-1234 THB 1,290", true, "soldout", "A-1234", 1290],
+  ["/soldout รหัส 1234 ราคา 1290", true, "soldout", "A-1234", 1290],
+  ["/soldout รหัสสินค้า 1234 ราคา 1,290 บาท", true, "soldout", "A-1234", 1290],
   ["/soldout A1234 ราคา 1290", false, "invalid_product_id"],
   ["/soldout A 1234 ราคา 1290", false, "invalid_product_id"],
   ["/soldout ราคา 1290", false, "missing_product_id"],
@@ -127,10 +133,21 @@ function deps(found: InventoryProduct | null): SoldoutDeps {
 }
 
 describe("LINE acceptance: exactly 30 cases", () => {
-  it.each(parserCases)("parser: %s", (text, ok, typeOrCode) => {
+  it.each(parserCases)("parser: %s", (text, ok, typeOrCode, productId, soldPrice) => {
     const result = parseLineCommand(text);
     expect(result.ok).toBe(ok);
-    expect(result.ok ? result.command.type : result.code).toBe(typeOrCode);
+    if (!result.ok) {
+      expect(result.code).toBe(typeOrCode);
+      return;
+    }
+
+    expect(result.command.type).toBe(typeOrCode);
+    if (result.command.type === "search" || result.command.type === "soldout") {
+      expect(result.command.productId).toBe(productId);
+    }
+    if (result.command.type === "soldout") {
+      expect(result.command.soldPrice).toBe(soldPrice);
+    }
   });
 
   it("21 unknown Product returns not found", async () => {
@@ -167,7 +184,8 @@ describe("LINE acceptance: exactly 30 cases", () => {
   it("25 duplicate or expired soldout callback does nothing", async () => {
     const d = deps(product(original));
     vi.mocked(d.repo.claimPending).mockResolvedValue(null);
-    await resolveSoldout("approve", "used", actor(), "evt-approve", "corr", d);
+    const result = await resolveSoldout("approve", "used", actor(), "evt-approve", "corr", d);
+    expect(result).toEqual({ kind: "text", text: "คำยืนยันหมดอายุหรือถูกใช้แล้ว" });
     expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
   });
 
@@ -189,13 +207,19 @@ describe("LINE acceptance: exactly 30 cases", () => {
     const d = deps(product(sold));
     const result = await prepareRevert(actor(), "evt-revert", d);
     expect(result.kind).toBe("buttons");
+    expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
+    expect(d.repo.finalizeAction).not.toHaveBeenCalled();
   });
 
   it("29 revert refuses newer Airtable edit", async () => {
     const d = deps(product({ ...sold, soldPrice: 200 }));
     vi.mocked(d.repo.claimPending).mockResolvedValue(pending("revert"));
-    await resolveRevert("approve", "tok", actor(), "evt-approve", "corr", d);
+    const result = await resolveRevert("approve", "tok", actor(), "evt-approve", "corr", d);
+    expect(result.text).toContain("ข้อมูลสินค้าเปลี่ยนแล้ว");
     expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
+    expect(d.repo.resolvePending).toHaveBeenCalledWith(
+      "tok", "evt-approve", "rejected", "Mint (U1)",
+    );
   });
 
   it("30 revert restores exact values and finalizes target action", async () => {
