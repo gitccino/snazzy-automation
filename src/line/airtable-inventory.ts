@@ -13,6 +13,7 @@ const AirtableListSchema = z.object({
     id: z.string().min(1),
     fields: z.record(z.string(), z.unknown()),
   })),
+  offset: z.string().optional(),
 });
 
 const InventoryFieldsSchema = z.object({
@@ -22,6 +23,19 @@ const InventoryFieldsSchema = z.object({
   "Sold Price": z.number().int().positive().optional(),
   "Sold At": z.string().optional(),
   "Sold By": z.string().optional(),
+});
+
+const SaleValuesSchema = z.object({
+  inventoryStatus: z.enum(["In", "Out"]),
+  soldPrice: z.number().int().positive().refine(Number.isSafeInteger).nullable(),
+  soldAt: z.string().min(1).nullable(),
+  soldBy: z.string().min(1).nullable(),
+}).superRefine((values, context) => {
+  const hasSaleDetails = values.soldPrice !== null && values.soldAt !== null && values.soldBy !== null;
+  const hasNoSaleDetails = values.soldPrice === null && values.soldAt === null && values.soldBy === null;
+  if ((values.inventoryStatus === "Out" && !hasSaleDetails) || (values.inventoryStatus === "In" && !hasNoSaleDetails)) {
+    context.addIssue({ code: "custom", message: "sale values must match inventory status" });
+  }
 });
 
 export function matchesSaleValues(actual: SaleValues, expected: SaleValues): boolean {
@@ -52,20 +66,31 @@ export function createInventoryClient(config: {
     }
   }
 
+  async function parseList(response: Response): Promise<z.infer<typeof AirtableListSchema>> {
+    try {
+      const parsed = AirtableListSchema.safeParse(await response.json());
+      if (parsed.success) return parsed.data;
+    } catch {
+      // Normalize malformed JSON from Airtable to the adapter's operational error contract.
+    }
+    throw new OperationalError("airtable_inventory_invalid_response", "Airtable inventory response validation failed", false);
+  }
+
   return {
     async findByProductId(productId) {
       const url = new URL(baseUrl);
-      url.searchParams.set("filterByFormula", `{Product ID} = '${productId}'`);
-      url.searchParams.set("maxRecords", "1");
+      url.searchParams.set("filterByFormula", `{Product ID} = ${JSON.stringify(productId)}`);
+      url.searchParams.set("maxRecords", "2");
+      url.searchParams.set("pageSize", "2");
 
       const response = await config.fetch(url.toString(), { headers });
       await requireOk(response, "find");
 
-      const parsedBody = AirtableListSchema.safeParse(await response.json());
-      if (!parsedBody.success) {
-        throw new OperationalError("airtable_inventory_invalid_response", "Airtable inventory response validation failed", false);
+      const body = await parseList(response);
+      if (body.records.length > 1 || body.offset) {
+        throw new OperationalError("airtable_inventory_ambiguous_record", "Airtable inventory lookup returned multiple records", false);
       }
-      const record = parsedBody.data.records[0];
+      const record = body.records[0];
       if (!record) return null;
       const parsedFields = InventoryFieldsSchema.safeParse(record.fields);
       if (!parsedFields.success) {
@@ -73,6 +98,9 @@ export function createInventoryClient(config: {
       }
 
       const fields = parsedFields.data;
+      if (fields["Product ID"] !== productId) {
+        throw new OperationalError("airtable_inventory_invalid_record", "Airtable inventory record product ID did not match lookup", false);
+      }
       return {
         recordId: record.id,
         productId: fields["Product ID"],
@@ -85,6 +113,9 @@ export function createInventoryClient(config: {
       };
     },
     async updateSaleValues(recordId, values) {
+      if (!SaleValuesSchema.safeParse(values).success) {
+        throw new OperationalError("airtable_inventory_invalid_sale_values", "Airtable inventory sale values validation failed", false);
+      }
       const response = await config.fetch(`${baseUrl}/${recordId}`, {
         method: "PATCH",
         headers,
