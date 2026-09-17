@@ -92,4 +92,83 @@ describe("line client", () => {
       retryable: false,
     });
   });
+
+  it("replies with text through the reply endpoint", async () => {
+    let body: unknown;
+    const client = createLineClient({
+      channelAccessToken: "token",
+      fetch: async (_input, init) => {
+        body = JSON.parse(String(init?.body));
+        return new Response("{}", { status: 200 });
+      },
+    });
+
+    await client.replyText("reply-1", "พบสินค้า A-1");
+
+    expect(body).toEqual({
+      replyToken: "reply-1",
+      messages: [{ type: "text", text: "พบสินค้า A-1" }],
+    });
+  });
+
+  it("replies with buttons through the reply endpoint", async () => {
+    let body: unknown;
+    const client = createLineClient({
+      channelAccessToken: "token",
+      fetch: async (_input, init) => {
+        body = JSON.parse(String(init?.body));
+        return new Response("{}", { status: 200 });
+      },
+    });
+
+    await client.replyButtons("reply-1", "เลือกสินค้า", "เลือกสินค้า", [
+      { label: "A-1", data: "item=A-1", style: "primary" },
+    ]);
+
+    expect(body).toEqual({
+      replyToken: "reply-1",
+      messages: [{
+        type: "template",
+        altText: "เลือกสินค้า",
+        template: {
+          type: "buttons",
+          text: "เลือกสินค้า",
+          actions: [{
+            type: "postback",
+            label: "A-1",
+            data: "item=A-1",
+            displayText: "A-1",
+          }],
+        },
+      }],
+    });
+  });
+
+  it("loads group member display name", async () => {
+    const client = createLineClient({
+      channelAccessToken: "token",
+      fetch: async () => new Response(JSON.stringify({
+        userId: "U1",
+        displayName: "Mint",
+        pictureUrl: "https://example.com/p.jpg",
+      }), { status: 200 }),
+    });
+
+    await expect(client.getGroupMemberProfile("C1", "U1")).resolves.toEqual({
+      userId: "U1",
+      displayName: "Mint",
+    });
+  });
+
+  it("rejects a malformed group member profile", async () => {
+    const client = createLineClient({
+      channelAccessToken: "token",
+      fetch: async () => new Response(JSON.stringify({ userId: "U1" }), { status: 200 }),
+    });
+
+    await expect(client.getGroupMemberProfile("C1", "U1")).rejects.toMatchObject({
+      code: "line_invalid_profile_response",
+      retryable: false,
+    });
+  });
 });

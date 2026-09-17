@@ -204,7 +204,15 @@ async function buildHarness(
           checkpointPosition,
         ),
       notify: (result, orphanRange) =>
-        sendImportSummary({ pushMessage: push }, "CtestGroup", {
+        sendImportSummary({
+          pushMessage: push,
+          replyText: async () => undefined,
+          replyButtons: async () => undefined,
+          getGroupMemberProfile: async () => ({
+            userId: "unused",
+            displayName: "unused",
+          }),
+        }, "CtestGroup", {
           result,
           orphanRange,
           nowThaiText: "2026-09-01 16:00 ICT",
