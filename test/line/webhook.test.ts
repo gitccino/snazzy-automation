@@ -1,0 +1,101 @@
+import { expect, it, vi } from "vitest";
+import type { AuditLog } from "../../src/db/audit";
+import type { LineRepository } from "../../src/db/line-repository";
+import type { InventoryClient } from "../../src/line/airtable-inventory";
+import type { LineClient } from "../../src/line/client";
+import { processLineEvents, type WebhookDeps } from "../../src/line/webhook";
+import type { SupportedLineEvent } from "../../src/line/types";
+
+const event: SupportedLineEvent = {
+  type: "message",
+  webhookEventId: "evt-1",
+  replyToken: "reply-1",
+  source: { type: "group", groupId: "C1", userId: "U1" },
+  message: { type: "text", id: "msg-1", text: "/help" },
+};
+
+function deps(): WebhookDeps {
+  const repo = {
+    claimEvent: vi.fn().mockResolvedValue(true),
+    releaseEvent: vi.fn().mockResolvedValue(undefined),
+    findPendingBySourceEvent: vi.fn(),
+    createPending: vi.fn(),
+    claimPending: vi.fn(),
+    setPendingAfter: vi.fn(),
+    resetPending: vi.fn(),
+    resolvePending: vi.fn(),
+    finalizeAction: vi.fn(),
+    latestReversible: vi.fn(),
+  } satisfies LineRepository;
+  const line = {
+    pushMessage: vi.fn(),
+    replyText: vi.fn().mockResolvedValue(undefined),
+    replyButtons: vi.fn().mockResolvedValue(undefined),
+    getGroupMemberProfile: vi.fn().mockResolvedValue({ userId: "U1", displayName: "Mint" }),
+  } satisfies LineClient;
+  const inventory = {
+    findByProductId: vi.fn(),
+    updateSaleValues: vi.fn(),
+  } satisfies InventoryClient;
+  const audit = { record: vi.fn().mockResolvedValue(undefined) } satisfies AuditLog;
+  return {
+    allowedGroupId: "C1",
+    confirmationEnabled: true,
+    clock: { now: () => new Date("2026-09-01T10:00:00.000Z") },
+    ids: { next: () => "corr-1" },
+    repo,
+    audit,
+    inventory,
+    line,
+    triggerUpload: vi.fn(),
+    triggerDocs: vi.fn(),
+  };
+}
+
+it("claims, ignores, and audits a disallowed group once", async () => {
+  const d = deps();
+  const disallowed: SupportedLineEvent = { ...event, source: { ...event.source, groupId: "OTHER" } };
+
+  await processLineEvents([disallowed], d);
+
+  expect(d.repo.claimEvent).toHaveBeenCalledWith("evt-1", "OTHER");
+  expect(d.line.replyText).not.toHaveBeenCalled();
+  expect(d.audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: "line_disallowed_group" }));
+});
+
+it("deduplicates before profile lookup and command execution", async () => {
+  const d = deps();
+  vi.mocked(d.repo.claimEvent).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+
+  await processLineEvents([event, event], d);
+
+  expect(d.line.getGroupMemberProfile).toHaveBeenCalledTimes(1);
+  expect(d.line.replyText).toHaveBeenCalledTimes(1);
+});
+
+it("releases the event claim when command processing throws", async () => {
+  const d = deps();
+  vi.mocked(d.line.getGroupMemberProfile).mockRejectedValueOnce(new Error("LINE unavailable"));
+
+  await expect(processLineEvents([event], d)).rejects.toThrow("LINE unavailable");
+
+  expect(d.repo.releaseEvent).toHaveBeenCalledWith("evt-1");
+});
+
+it("passes source and applying webhook IDs into soldout lifecycle", async () => {
+  const d = deps();
+  const soldoutEvent: SupportedLineEvent = {
+    ...event,
+    message: { ...event.message, text: "/soldout A-1 ราคา 100" },
+  };
+  vi.mocked(d.inventory.findByProductId).mockResolvedValue({
+    recordId: "rec1", productId: "A-1", uploadDate: null, airtableUrl: "https://airtable/r",
+    inventoryStatus: "In", soldPrice: null, soldAt: null, soldBy: null,
+  });
+  vi.mocked(d.repo.findPendingBySourceEvent).mockResolvedValue(null);
+  vi.mocked(d.repo.createPending).mockImplementation(async (value) => value);
+
+  await processLineEvents([soldoutEvent], d);
+
+  expect(d.repo.createPending).toHaveBeenCalledWith(expect.objectContaining({ sourceEventId: "evt-1" }));
+});
