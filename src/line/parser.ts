@@ -3,8 +3,9 @@ import type { ParseResult } from "./types";
 const A_ID = /\bA-([1-9]\d*)\b/gi;
 const THAI_ID = /รหัส(?:สินค้า)?\s+([1-9]\d*)\b/g;
 const PRICE_NUMBER = "(?:\\d{1,3}(?:,\\d{3})+|\\d+)";
-const THB_PRICE = new RegExp(`\\bTHB\\s+(${PRICE_NUMBER})(?![\\d.,])\\s*(?:บาท)?`, "gi");
-const THAI_PRICE = new RegExp(`ราคา\\s+(${PRICE_NUMBER})(?![\\d.,])\\s*(?:บาท)?`, "g");
+const PRICE_END = "(?=\\s*(?:THB\\b|ราคา(?=\\s)|$))";
+const THB_PRICE = new RegExp(`\\bTHB\\s+(${PRICE_NUMBER})(?![\\d.,])(?:\\s+บาท)?${PRICE_END}`, "gi");
+const THAI_PRICE = new RegExp(`ราคา\\s+(${PRICE_NUMBER})(?![\\d.,])(?:\\s+บาท)?${PRICE_END}`, "g");
 
 function allMatches(text: string, patterns: RegExp[]): string[] {
   return patterns.flatMap((pattern) =>
