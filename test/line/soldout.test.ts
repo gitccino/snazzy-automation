@@ -177,3 +177,109 @@ it("confirmation-disabled mode uses sender as approver through same pending prot
     expect.objectContaining({ actor: "Mint (U1)" }),
   );
 });
+
+it("keeps the first approver's applying ownership after an ambiguous intent-write failure", async () => {
+  const d = deps();
+  const pending = soldoutPending();
+  let owner = "evt-approve";
+  d.repo.claimPending = vi.fn(async (_token, _groupId, _kind, eventId) =>
+    owner === eventId ? pending : null,
+  );
+  d.repo.setPendingAfter = vi.fn().mockRejectedValue(new Error("D1 response lost"));
+  d.repo.resetPending = vi.fn(async () => { owner = ""; });
+
+  await expect(resolveSoldout("approve", "tok", actor, "evt-approve", "corr", d))
+    .rejects.toThrow("D1 response lost");
+
+  const differentActor = { ...actor, userId: "U2", displayName: "Ploy" };
+  await expect(resolveSoldout("approve", "tok", differentActor, "evt-other", "corr-other", d))
+    .resolves.toEqual({ kind: "text", text: "คำยืนยันหมดอายุหรือถูกใช้แล้ว" });
+  expect(d.repo.resetPending).not.toHaveBeenCalled();
+});
+
+it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+  "does not persist or mutate for invalid sold price %p",
+  async (soldPrice) => {
+    const d = deps();
+
+    await expect(prepareSoldout(
+      { productId: "A-1", soldPrice }, actor, "evt-command", true, d,
+    )).resolves.toEqual({
+      kind: "text",
+      text: "ราคาต้องเป็นจำนวนเต็มบาท เช่น THB 1,290",
+    });
+
+    expect(d.repo.createPending).not.toHaveBeenCalled();
+    expect(d.inventory.findByProductId).not.toHaveBeenCalled();
+    expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
+  },
+);
+
+it("rejects a claimed command without mutating Airtable", async () => {
+  const d = deps();
+  d.repo.claimPending = vi.fn().mockResolvedValue(soldoutPending());
+
+  await expect(resolveSoldout("reject", "tok", actor, "evt-approve", "corr", d))
+    .resolves.toEqual({ kind: "text", text: "ยกเลิกการขาย A-1" });
+
+  expect(d.repo.resolvePending).toHaveBeenCalledWith(
+    "tok", "evt-approve", "rejected", "Mint (U1)",
+  );
+  expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
+  expect(d.repo.finalizeAction).not.toHaveBeenCalled();
+});
+
+it("returns an expired-or-used reply when the pending command cannot be claimed", async () => {
+  const d = deps();
+  d.repo.claimPending = vi.fn().mockResolvedValue(null);
+
+  await expect(resolveSoldout("approve", "tok", actor, "evt-approve", "corr", d))
+    .resolves.toEqual({ kind: "text", text: "คำยืนยันหมดอายุหรือถูกใช้แล้ว" });
+
+  expect(d.repo.resolvePending).not.toHaveBeenCalled();
+  expect(d.inventory.findByProductId).not.toHaveBeenCalled();
+  expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
+});
+
+it("rejects rather than overwrites Airtable values changed after preparation", async () => {
+  const d = deps({
+    ...product,
+    inventoryStatus: "Out",
+    soldPrice: 900,
+    soldAt: "2026-09-01T09:00:00.000Z",
+    soldBy: "Other (U9)",
+  });
+  d.repo.claimPending = vi.fn().mockResolvedValue(soldoutPending());
+
+  await expect(resolveSoldout("approve", "tok", actor, "evt-approve", "corr", d))
+    .resolves.toEqual({
+      kind: "text",
+      text: "ข้อมูลสินค้าเปลี่ยนแล้ว ไม่ได้เขียนทับ กรุณาตรวจ Airtable",
+    });
+
+  expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
+  expect(d.repo.resolvePending).toHaveBeenCalledWith(
+    "tok", "evt-approve", "rejected", "Mint (U1)",
+  );
+});
+
+it("waits for durable intent persistence before writing Airtable", async () => {
+  const d = deps();
+  d.repo.claimPending = vi.fn().mockResolvedValue(soldoutPending());
+  let beginIntentWrite: (() => void) | undefined;
+  let finishIntentWrite: (() => void) | undefined;
+  const intentWriteBegan = new Promise<void>((resolve) => { beginIntentWrite = resolve; });
+  const intentWrite = new Promise<void>((resolve) => { finishIntentWrite = resolve; });
+  d.repo.setPendingAfter = vi.fn(() => {
+    beginIntentWrite?.();
+    return intentWrite;
+  });
+
+  const resolution = resolveSoldout("approve", "tok", actor, "evt-approve", "corr", d);
+  await intentWriteBegan;
+  expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
+
+  finishIntentWrite?.();
+  await resolution;
+  expect(d.inventory.updateSaleValues).toHaveBeenCalledOnce();
+});

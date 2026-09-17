@@ -9,6 +9,7 @@ import {
   actorText,
   alreadyOutText,
   notFoundText,
+  parseErrorText,
 } from "./messages";
 import type {
   LineActor,
@@ -59,6 +60,10 @@ export async function prepareSoldout(
   confirmationEnabled: boolean,
   deps: SoldoutDeps,
 ): Promise<CommandReply> {
+  if (!Number.isSafeInteger(input.soldPrice) || input.soldPrice <= 0) {
+    return { kind: "text", text: parseErrorText("invalid_price") };
+  }
+
   const existing = await deps.repo.findPendingBySourceEvent(sourceEventId);
   if (existing !== null) {
     return confirmationEnabled
@@ -173,8 +178,8 @@ export async function resolveSoldout(
           soldBy: resolver,
         };
     if (!mutationIntentPersisted) {
-      await deps.repo.setPendingAfter(token, applyEventId, after);
       mutationIntentPersisted = true;
+      await deps.repo.setPendingAfter(token, applyEventId, after);
     }
 
     if (matchesSaleValues(product, pending.before)) {
