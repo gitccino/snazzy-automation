@@ -31,7 +31,7 @@
 
 ---
 
-## Prerequisite: register operational scripts
+### Task 0: Register operational scripts
 
 Foundation Task 1 already installs `tsx`. Add only the scripts implemented by this plan to the existing `package.json` `scripts` object; preserve every existing script:
 
@@ -62,7 +62,7 @@ git commit -m "chore: register hardening operational scripts"
 ### Task 1: Usage-metrics D1 table and repository
 
 **Files:**
-- Create: `migrations/0004_usage_metrics.sql`
+- Create: `migrations/0005_usage_metrics.sql`
 - Create: `src/db/usage-repository.ts`
 - Test: `test/db/usage-repository.test.ts`
 
@@ -73,7 +73,7 @@ git commit -m "chore: register hardening operational scripts"
 - [ ] **Step 1: Write the migration**
 
 ```sql
--- migrations/0004_usage_metrics.sql
+-- migrations/0005_usage_metrics.sql
 CREATE TABLE usage_metrics (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   metric_date TEXT NOT NULL,       -- 'YYYY-MM-DD' in Asia/Bangkok
@@ -90,7 +90,7 @@ CREATE INDEX idx_usage_metrics_name ON usage_metrics(metric_name);
 - [ ] **Step 2: Apply migration locally**
 
 Run: `npm run db:migrate:local`
-Expected: `Migrations to be applied: 0004_usage_metrics.sql` then `✅ Successfully applied`.
+Expected: `Migrations to be applied: 0005_usage_metrics.sql` then `✅ Successfully applied`.
 
 - [ ] **Step 3: Write the failing test**
 
@@ -201,7 +201,7 @@ Expected: PASS — typecheck and full test suite green.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add migrations/0004_usage_metrics.sql src/db/usage-repository.ts test/db/usage-repository.test.ts
+git add migrations/0005_usage_metrics.sql src/db/usage-repository.ts test/db/usage-repository.test.ts
 git commit -m "feat: add usage_metrics table and repository for cost tracking"
 ```
 
@@ -669,7 +669,9 @@ const SECRET_KEY_PATTERN =
 const SECRET_TEXT_PATTERNS: RegExp[] = [
   /sharedstreams\.icloud\.com\/[A-Za-z0-9_-]{10,}/gi,
   /X-Amz-Signature=[^&\s]+/gi,
+  /[?&]sig=[^&\s]+/gi,
   /Bearer\s+[A-Za-z0-9._-]{16,}/g,
+  /LINE_CHANNEL_ACCESS_TOKEN_VALUE_[A-Za-z0-9_-]+/g,
   /pat[A-Za-z0-9]{14,}\.[A-Za-z0-9]+/g,
 ];
 
@@ -1968,6 +1970,7 @@ export async function runSetupChecks(
       "line_events",
       "pending_line_commands",
       "line_actions",
+      "line_event_replies",
       "usage_metrics",
     ];
     const rows = await env.DB.prepare(
@@ -2013,10 +2016,9 @@ export async function runSetupChecks(
         {
           signingSecret: env.ASSET_URL_SIGNING_SECRET,
           publicBaseUrl: config.publicBaseUrl,
-        },
-        clock,
-        env.DB,
-      );
+      },
+      clock,
+    );
       const url = await assets.signUrl(key, 60);
       const response = await handleGetAsset(
         new Request(url),
@@ -2852,7 +2854,7 @@ Carry forward the [publication deployment contract](../../runbooks/publication-s
    ```bash
    npm run db:migrate:staging
    ```
-   Expected: `0001_initial.sql`, `0002_import_run_terminal_details.sql`, `0003_publication.sql`, `0004_line_inventory.sql`, and `0005_usage_metrics.sql` applied successfully. Publication migration 0003 includes the unique date claim and per-output input fingerprints.
+  Expected: `0001_initial.sql`, `0002_import_run_terminal_details.sql`, `0003_line_inventory.sql`, `0003_publication.sql`, `0004_line_recovery.sql`, and `0005_usage_metrics.sql` applied successfully. Publication migration 0003 includes the unique date claim and per-output input fingerprints.
 
 3. Install every secret. Keep the admin token in the current shell because authenticated setup and smoke commands need the same value:
    ```bash
@@ -3137,7 +3139,7 @@ Apple limits a Shared Album to 5,000 items. Rotate before hitting that ceiling �
    npx wrangler secret put APP_CONFIG_JSON --env production
    ```
    (paste the full JSON blob with only `FIRST_IMPORT_CUTOFF_DATE` changed).
-5. Run the setup validator to confirm the new album is reachable and the marker-detection probe still passes:
+5. Run the setup validator to confirm the new album is reachable; marker detection remains covered by the recorded Phase 0 report and automated fixture tests:
    ```bash
    curl --fail-with-body \
      -H "Authorization: Bearer $ADMIN_ROUTE_TOKEN" \
@@ -3595,7 +3597,7 @@ git commit -m "feat: add authenticated deployment smoke checks"
 - Create: `docs/runbooks/handoff-acceptance.md`
 
 **Interfaces:**
-- Consumes: Phase 0 report, all focused and acceptance suites, four D1 migrations, real staging/production bindings, setup and smoke results, rotation rehearsals, Cloudflare notifications, and customer-owned credential evidence from Tasks 1–15.
+- Consumes: Phase 0 report, all focused and acceptance suites, six D1 migration files, real staging/production bindings, setup and smoke results, rotation rehearsals, Cloudflare notifications, and customer-owned credential evidence from Tasks 1–15.
 - Produces: final auditable release gate; production handoff is complete only when every checklist item is checked with actual evidence.
 
 - [ ] **Step 1: Write the checklist, mirroring the index's Plan Completion Definition and spec §18 handoff acceptance**
@@ -3608,11 +3610,11 @@ Run in order. Every item must be checked before customer handoff is considered c
 - [ ] Phase 0 report (`docs/feasibility/icloud-phase-0-report.md`) says `PASS`.
 - [ ] `npm run check` passes on `main` with zero failing tests.
 - [ ] `npm run test:acceptance` passes, covering:
-  - [ ] `test/acceptance/failure-injection.test.ts` — retry exhaustion and per-group rollback.
+  - [ ] `test/acceptance/retry-exhaustion.test.ts` — retry exhaustion and sibling-group isolation.
   - [ ] `test/acceptance/import-batches.test.ts` — all 10 production-sized batches.
   - [ ] `test/acceptance/publication.test.ts` — missing-field block, first-four ordering, one-doc-per-date.
-  - [ ] `test/acceptance/line-commands.test.ts` — all 30 parser cases.
-  - [ ] `test/acceptance/redaction.test.ts` — no secret ever logged across a full import run.
+  - [ ] `test/acceptance/line-acceptance.test.ts` — at least 30 parser/command cases.
+  - [ ] `test/icloud/redaction-audit.test.ts` — no secret or signed URL logged by the iCloud boundary.
   - [ ] `test/acceptance/smoke.test.ts` — smoke-check logic unit tests.
 - [ ] D1 migrations apply cleanly to a fresh local database: `npm run db:migrate:local` from a dropped/recreated local D1.
 - [ ] D1 migrations apply cleanly to fresh staging and production databases (proven during Task 15's fresh-account rehearsal).

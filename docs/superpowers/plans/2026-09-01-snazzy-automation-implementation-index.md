@@ -159,7 +159,9 @@ export type Fetcher = typeof fetch;
 │   ├── 0001_initial.sql
 │   ├── 0002_publication.sql
 │   ├── 0003_line_inventory.sql
-│   └── 0004_usage_metrics.sql
+│   ├── 0003_publication.sql
+│   ├── 0004_line_recovery.sql
+│   └── 0005_usage_metrics.sql
 ├── src/
 │   ├── index.ts
 │   ├── env.ts
