@@ -61,17 +61,29 @@ export function createLineClient(config: {
       );
     },
 
-    replyButtons(replyToken, altText, text, buttons) {
+    async replyButtons(replyToken, altText, text, buttons) {
+      const longText = text.length > 160;
+      const details: Array<{ type: "text"; text: string }> = [];
+      if (longText) {
+        for (let offset = 0; offset < text.length;) {
+          const chunk = text.slice(offset, offset + 5000).replace(/[\uD800-\uDBFF]$/, "");
+          if (details.length === 4 || chunk.length === 0) {
+            throw new OperationalError("line_confirmation_too_long", "Confirmation exceeds LINE reply capacity", false);
+          }
+          details.push({ type: "text", text: chunk });
+          offset += chunk.length;
+        }
+      }
       return send(
         "https://api.line.me/v2/bot/message/reply",
         {
           replyToken,
-          messages: [{
+          messages: [...details, {
             type: "template",
-            altText,
+            altText: altText.slice(0, 400).replace(/[\uD800-\uDBFF]$/, ""),
             template: {
               type: "buttons",
-              text,
+              text: longText ? "โปรดตรวจสอบรายละเอียดด้านบน แล้วเลือกยืนยันหรือยกเลิก" : text,
               actions: buttons.map((button) => ({
                 type: "postback",
                 label: button.label,

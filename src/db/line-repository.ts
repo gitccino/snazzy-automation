@@ -1,10 +1,13 @@
 import type { IdGenerator } from "../shared/ids";
 import type { Clock } from "../shared/time";
 import type { PendingLineCommand, ReversibleLineAction, SaleValues } from "../line/types";
+import type { CommandReply } from "../line/soldout";
 
 export interface LineRepository {
   claimEvent(eventId: string, groupId: string): Promise<boolean>;
   releaseEvent(eventId: string): Promise<void>;
+  findEventReply(eventId: string): Promise<CommandReply | null>;
+  saveEventReply(eventId: string, reply: CommandReply): Promise<void>;
   findPendingBySourceEvent(sourceEventId: string): Promise<PendingLineCommand | null>;
   createPending(command: PendingLineCommand): Promise<PendingLineCommand | null>;
   claimPending(token: string, groupId: string, kind: PendingLineCommand["kind"], eventId: string, nowIso: string): Promise<PendingLineCommand | null>;
@@ -55,6 +58,15 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
     async releaseEvent(eventId) {
       await db.prepare("DELETE FROM line_events WHERE event_id = ?").bind(eventId).run();
     },
+    async findEventReply(eventId) {
+      const row = await db.prepare("SELECT reply_json FROM line_event_replies WHERE event_id = ?")
+        .bind(eventId).first<{ reply_json: string }>();
+      return row ? JSON.parse(row.reply_json) as CommandReply : null;
+    },
+    async saveEventReply(eventId, reply) {
+      await db.prepare("INSERT OR IGNORE INTO line_event_replies (event_id, reply_json) VALUES (?, ?)")
+        .bind(eventId, JSON.stringify(reply)).run();
+    },
     async findPendingBySourceEvent(sourceEventId) {
       const row = await db.prepare("SELECT * FROM pending_line_commands WHERE source_event_id = ?")
         .bind(sourceEventId).first<Record<string, unknown>>();
@@ -64,14 +76,27 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
       const existing = await db.prepare("SELECT * FROM pending_line_commands WHERE source_event_id = ?")
         .bind(command.sourceEventId).first<Record<string, unknown>>();
       if (existing) return parsePending(existing);
-      const result = await db.prepare(`INSERT OR IGNORE INTO pending_line_commands
+      const nowIso = clock.now().toISOString();
+      const [, result] = await db.batch([
+        db.prepare(`UPDATE pending_line_commands SET status = 'expired', resolved_at = ?
+          WHERE product_id = ? AND status = 'pending' AND expires_at <= ?`)
+          .bind(nowIso, command.productId, nowIso),
+        db.prepare(`INSERT OR IGNORE INTO pending_line_commands
         (token, source_event_id, apply_event_id, kind, status, requester_user_id, group_id, product_id, sold_price, before_json, after_json, target_action_id, expires_at, created_at)
         VALUES (?, ?, NULL, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .bind(command.token, command.sourceEventId, command.kind, command.requesterUserId, command.groupId, command.productId, command.soldPrice,
-          JSON.stringify(command.before), JSON.stringify(command.after), command.targetActionId, command.expiresAt, clock.now().toISOString()).run();
-      return result.meta.changes === 1 ? { ...command, status: "pending", applyEventId: null } : null;
+          JSON.stringify(command.before), JSON.stringify(command.after), command.targetActionId, command.expiresAt, nowIso),
+      ]);
+      return result!.meta.changes === 1 ? { ...command, status: "pending", applyEventId: null } : null;
     },
     async claimPending(token, groupId, kind, eventId, nowIso) {
+      // A completed mutation may still need its reply persisted/delivered. Only
+      // its original apply event can read this result; it must never reopen it.
+      const completed = await db.prepare(`SELECT * FROM pending_line_commands
+        WHERE token = ? AND group_id = ? AND kind = ?
+          AND status = 'approved' AND apply_event_id = ?`)
+        .bind(token, groupId, kind, eventId).first<Record<string, unknown>>();
+      if (completed) return parsePending(completed);
       await db.prepare(`UPDATE pending_line_commands SET status = 'expired', resolved_at = ?
         WHERE token = ? AND group_id = ? AND kind = ? AND status = 'pending' AND expires_at <= ?`)
         .bind(nowIso, token, groupId, kind, nowIso).run();

@@ -77,12 +77,32 @@ describe("inventory Airtable client", () => {
     [{ ...sold, soldPrice: 1.5 }],
     [{ ...sold, soldPrice: Number.MAX_SAFE_INTEGER + 1 }],
     [{ ...sold, soldAt: null }],
-    [{ ...unsold, soldBy: "Mint (U1)" }],
+    [{ ...sold, soldBy: "" }],
   ])("rejects invalid outbound sale values: %o", async values => {
     const fetch = vi.fn<Fetcher>();
     const client = createInventoryClient({ ...config, fetch });
     await expect(client.updateSaleValues("rec1", values as SaleValues)).rejects.toMatchObject({ code: "airtable_inventory_invalid_sale_values", retryable: false });
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { "Sold By": "Legacy operator" },
+    { "Sold Price": 800, "Sold At": "2026-08-01", "Sold By": "Legacy operator" },
+    { "Sold Price": 800, "Sold By": "" },
+    { "Sold At": "", "Sold By": "" },
+  ])("can restore every accepted legacy In state exactly: %o", async legacy => {
+    let written: any;
+    const client = createInventoryClient({ ...config, fetch: async (_url, init) => {
+      if (init?.method === "PATCH") {
+        written = JSON.parse(String(init.body)).fields;
+        return response({});
+      }
+      return response({ records: [{ id: "rec1", fields: { "Product ID": "A-1", "Inventory Status": "In", ...legacy } }] });
+    } });
+    const found = await client.findByProductId("A-1");
+    expect(found).not.toBeNull();
+    await client.updateSaleValues("rec1", found!);
+    expect(written).toMatchObject({ "Inventory Status": "In", "Sold Price": legacy["Sold Price"] ?? null, "Sold At": legacy["Sold At"] ?? null, "Sold By": legacy["Sold By"] ?? null });
   });
 
   it.each([

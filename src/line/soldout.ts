@@ -115,7 +115,7 @@ export async function prepareSoldout(
   const pending = await deps.repo.createPending(candidate)
     ?? await deps.repo.findPendingBySourceEvent(sourceEventId);
   if (pending === null) {
-    throw new Error("pending soldout command was not persisted");
+    return { kind: "text", text: `มีคำสั่งสำหรับ ${input.productId} ที่รอยืนยันหรือกำลังดำเนินการอยู่` };
   }
 
   return confirmationEnabled
@@ -149,6 +149,9 @@ export async function resolveSoldout(
   if (pending === null) {
     return { kind: "text", text: "คำยืนยันหมดอายุหรือถูกใช้แล้ว" };
   }
+  if (pending.status === "approved" && pending.soldPrice !== null) {
+    return saleReply(pending.productId, pending.soldPrice);
+  }
 
   const resolver = actorText(actor.displayName, actor.userId);
   if (decision === "reject") {
@@ -160,8 +163,9 @@ export async function resolveSoldout(
     return { kind: "text", text: "คำยืนยันราคาไม่ถูกต้อง" };
   }
 
-  let mutationIntentPersisted = pending.after.soldAt !== null
+  const recoveringMutation = pending.after.soldAt !== null
     && pending.after.soldBy !== null;
+  let mutationIntentPersisted = recoveringMutation;
   try {
     const product = await deps.inventory.findByProductId(pending.productId);
     if (product === null) {
@@ -184,7 +188,7 @@ export async function resolveSoldout(
 
     if (matchesSaleValues(product, pending.before)) {
       await deps.inventory.updateSaleValues(product.recordId, after);
-    } else if (!matchesSaleValues(product, after)) {
+    } else if (!recoveringMutation || !matchesSaleValues(product, after)) {
       await deps.repo.resolvePending(token, applyEventId, "rejected", resolver);
       return {
         kind: "text",

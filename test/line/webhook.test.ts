@@ -18,6 +18,8 @@ function deps(): WebhookDeps {
   const repo = {
     claimEvent: vi.fn().mockResolvedValue(true),
     releaseEvent: vi.fn().mockResolvedValue(undefined),
+    findEventReply: vi.fn().mockResolvedValue(null),
+    saveEventReply: vi.fn().mockResolvedValue(undefined),
     findPendingBySourceEvent: vi.fn(),
     createPending: vi.fn(),
     claimPending: vi.fn(),

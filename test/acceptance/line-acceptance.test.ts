@@ -115,6 +115,8 @@ function deps(found: InventoryProduct | null): SoldoutDeps {
   const repo = {
     claimEvent: vi.fn(),
     releaseEvent: vi.fn(),
+    findEventReply: vi.fn(),
+    saveEventReply: vi.fn(),
     findPendingBySourceEvent: vi.fn().mockResolvedValue(null),
     createPending: vi.fn().mockImplementation(async (value) => value),
     claimPending: vi.fn().mockResolvedValue(pending("soldout")),

@@ -1,7 +1,5 @@
 import type { ParseResult } from "./types";
 
-const A_ID = /\bA-([1-9]\d*)\b/gi;
-const THAI_ID = /รหัส(?:สินค้า)?\s+([1-9]\d*)\b/g;
 const PRICE_NUMBER = "(?:\\d{1,3}(?:,\\d{3})+|\\d+)";
 const PRICE_END = "(?=\\s*(?:THB\\b|ราคา(?=\\s)|$))";
 const THB_PRICE = new RegExp(`\\bTHB\\s+(${PRICE_NUMBER})(?![\\d.,])(?:\\s+บาท)?${PRICE_END}`, "gi");
@@ -16,8 +14,15 @@ function allMatches(text: string, patterns: RegExp[]): string[] {
 }
 
 function extractProductIds(text: string): { values: string[]; malformed: boolean } {
-  const values = allMatches(text, [A_ID, THAI_ID]).map((digits) => `A-${digits}`);
-  const malformed = /\bA\d+\b|\bA\s+\d+\b|\bA-0+\b|รหัส(?:สินค้า)?\s+0+\b/i.test(text);
+  // Validate entire ID candidates, including additional malformed IDs, not numeric prefixes.
+  const candidates = Array.from(text.matchAll(/\bA(?:-\S*|\d\S*|\s+\d\S*)|รหัส(?:สินค้า)?\s+\S+/gi), match => match[0]);
+  const values: string[] = [];
+  let malformed = false;
+  for (const candidate of candidates) {
+    const match = /^(?:A-([1-9]\d*)|รหัส(?:สินค้า)?\s+([1-9]\d*))$/i.exec(candidate);
+    if (match === null) malformed = true;
+    else values.push(`A-${match[1] ?? match[2]}`);
+  }
   return { values, malformed };
 }
 

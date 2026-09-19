@@ -28,12 +28,12 @@ const InventoryFieldsSchema = z.object({
 const SaleValuesSchema = z.object({
   inventoryStatus: z.enum(["In", "Out"]),
   soldPrice: z.number().int().positive().refine(Number.isSafeInteger).nullable(),
-  soldAt: z.string().min(1).nullable(),
-  soldBy: z.string().min(1).nullable(),
+  soldAt: z.string().nullable(),
+  soldBy: z.string().nullable(),
 }).superRefine((values, context) => {
-  const hasSaleDetails = values.soldPrice !== null && values.soldAt !== null && values.soldBy !== null;
-  const hasNoSaleDetails = values.soldPrice === null && values.soldAt === null && values.soldBy === null;
-  if ((values.inventoryStatus === "Out" && !hasSaleDetails) || (values.inventoryStatus === "In" && !hasNoSaleDetails)) {
+  // In records may contain historical sale fields; revert must restore them exactly.
+  const hasSaleDetails = values.soldPrice !== null && Boolean(values.soldAt) && Boolean(values.soldBy);
+  if (values.inventoryStatus === "Out" && !hasSaleDetails) {
     context.addIssue({ code: "custom", message: "sale values must match inventory status" });
   }
 });

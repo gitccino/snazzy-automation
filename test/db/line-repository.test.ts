@@ -27,7 +27,7 @@ function pendingCommand(overrides: Partial<PendingLineCommand> = {}): PendingLin
     status: "pending",
     requesterUserId: "U1",
     groupId: `C-fixture-${suffix}`,
-    productId: `A-${suffix}`,
+    productId: `A-${1000 + suffix}`,
     soldPrice: 1290,
     before,
     after,
@@ -93,6 +93,7 @@ describe("line repository", () => {
     expect(await repo.claimPending("tok-1", "C1", "soldout", "evt-approve", "2026-09-01T10:11:00.000Z")).not.toBeNull();
     await repo.resetPending("tok-1", "evt-approve");
     expect(await repo.claimPending("tok-1", "C1", "soldout", "evt-retry", "2026-09-01T10:05:00.000Z")).not.toBeNull();
+    await repo.resolvePending("tok-1", "evt-retry", "rejected", "Mint (U1)");
   });
 
   it("does not claim a pending revert after a newer same-group sold-out action", async () => {
@@ -246,7 +247,7 @@ describe("line repository", () => {
   });
 
   it("rejects a revert whose sold-out target has a different product", async () => {
-    const target = pendingCommand({ groupId: "C-target-product", productId: "A-target" });
+    const target = pendingCommand({ groupId: "C-target-product", productId: "A-mismatch-target" });
     const targetSetup = await createApplyingCommand(target);
     const targetAction = await targetSetup.repo.finalizeAction(finalizeInput(target, targetSetup.applyEventId));
     const command = pendingCommand({ kind: "revert", groupId: target.groupId, productId: "A-other", soldPrice: null, before: after, after: revertedAfter, targetActionId: targetAction.id });
@@ -264,10 +265,11 @@ describe("line repository", () => {
     const firstRevertAction = await firstRevertSetup.repo.finalizeAction(finalizeInput(firstRevert, firstRevertSetup.applyEventId));
     const staleTarget = pendingCommand({ kind: "revert", groupId: soldout.groupId, productId: soldout.productId, soldPrice: null, before: after, after: revertedAfter, targetActionId: soldoutAction.id });
     const staleSetup = await createApplyingCommandWithoutClaimValidation(staleTarget);
+    await expect(staleSetup.repo.finalizeAction(finalizeInput(staleTarget, staleSetup.applyEventId))).rejects.toThrow("revert target is no longer reversible");
+    await staleSetup.repo.resolvePending(staleTarget.token, staleSetup.applyEventId, "rejected", "Mint (U1)");
     const wrongType = pendingCommand({ kind: "revert", groupId: soldout.groupId, productId: soldout.productId, soldPrice: null, before: after, after: revertedAfter, targetActionId: firstRevertAction.id });
     const wrongTypeSetup = await createApplyingCommandWithoutClaimValidation(wrongType);
 
-    await expect(staleSetup.repo.finalizeAction(finalizeInput(staleTarget, staleSetup.applyEventId))).rejects.toThrow("revert target is no longer reversible");
     await expect(wrongTypeSetup.repo.finalizeAction(finalizeInput(wrongType, wrongTypeSetup.applyEventId))).rejects.toThrow("revert target is no longer reversible");
   });
 });

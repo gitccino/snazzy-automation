@@ -79,12 +79,13 @@ export async function processLineEvents(
   events: SupportedLineEvent[],
   deps: WebhookDeps,
 ): Promise<void> {
+  const failures: unknown[] = [];
   for (const event of events) {
-    const claimed = await deps.repo.claimEvent(event.webhookEventId, event.source.groupId);
-    if (!claimed) continue;
-
-    const correlationId = deps.ids.next();
+    let claimed = false;
     try {
+      claimed = await deps.repo.claimEvent(event.webhookEventId, event.source.groupId);
+      if (!claimed) continue;
+      const correlationId = deps.ids.next();
       if (event.source.groupId !== deps.allowedGroupId) {
         await deps.audit.record({
           correlationId,
@@ -96,11 +97,20 @@ export async function processLineEvents(
         continue;
       }
 
+      const savedReply = await deps.repo.findEventReply(event.webhookEventId);
+      if (savedReply !== null) {
+        await send(event.replyToken, savedReply, deps.line);
+        continue;
+      }
+      const deliver = async (reply: CommandReply) => {
+        await deps.repo.saveEventReply(event.webhookEventId, reply);
+        await send(event.replyToken, reply, deps.line);
+      };
       const actor = await actorFor(event, deps.line);
       if (event.type === "postback") {
         const postback = parsePostback(event.postback.data);
         if (postback === null) {
-          await deps.line.replyText(event.replyToken, "คำยืนยันไม่ถูกต้อง");
+          await deliver({ kind: "text", text: "คำยืนยันไม่ถูกต้อง" });
           continue;
         }
         const reply = postback.action === "soldout"
@@ -120,18 +130,17 @@ export async function processLineEvents(
             correlationId,
             deps,
           );
-        await send(event.replyToken, reply, deps.line);
+        await deliver(reply);
         continue;
       }
 
       const parsed = parseLineCommand(event.message.text);
       if (!parsed.ok) {
-        await deps.line.replyText(event.replyToken, parseErrorText(parsed.code));
+        await deliver({ kind: "text", text: parseErrorText(parsed.code) });
         continue;
       }
       if (parsed.command.type === "soldout") {
-        await send(
-          event.replyToken,
+        await deliver(
           await prepareSoldout(
             parsed.command,
             actor,
@@ -139,25 +148,27 @@ export async function processLineEvents(
             deps.confirmationEnabled,
             deps,
           ),
-          deps.line,
         );
         continue;
       }
       if (parsed.command.type === "revert") {
-        await send(
-          event.replyToken,
+        await deliver(
           await prepareRevert(actor, event.webhookEventId, deps),
-          deps.line,
         );
         continue;
       }
-      await deps.line.replyText(
-        event.replyToken,
-        await handleReadOnlyCommand(parsed.command, deps),
-      );
+      await deliver({ kind: "text", text: await handleReadOnlyCommand(parsed.command, deps) });
     } catch (error) {
-      await deps.repo.releaseEvent(event.webhookEventId);
-      throw error;
+      failures.push(error);
+      if (claimed) {
+        try {
+          await deps.repo.releaseEvent(event.webhookEventId);
+        } catch (releaseError) {
+          failures.push(releaseError);
+        }
+      }
     }
   }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, "LINE webhook batch failed");
 }

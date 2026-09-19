@@ -119,6 +119,9 @@ export async function resolveRevert(
   }
 
   const resolver = actorText(actor.displayName, actor.userId);
+  if (pending.status === "approved") {
+    return { kind: "text", text: `ย้อนกลับ ${pending.productId} สำเร็จ` };
+  }
   if (decision === "reject") {
     await deps.repo.resolvePending(
       token,
@@ -144,7 +147,6 @@ export async function resolveRevert(
     };
   }
 
-  let sideEffectMayExist = false;
   try {
     const product = await deps.inventory.findByProductId(pending.productId);
     if (product === null) {
@@ -161,10 +163,9 @@ export async function resolveRevert(
     }
 
     if (matchesSaleValues(product, pending.before)) {
-      sideEffectMayExist = true;
       await deps.inventory.updateSaleValues(product.recordId, pending.after);
     } else if (matchesSaleValues(product, pending.after)) {
-      sideEffectMayExist = true;
+      // A previous attempt may already have restored the exact values.
     } else {
       await deps.repo.resolvePending(
         token,
@@ -195,9 +196,8 @@ export async function resolveRevert(
       text: `ย้อนกลับ ${pending.productId} สำเร็จ`,
     };
   } catch (error) {
-    if (!sideEffectMayExist) {
-      await deps.repo.resetPending(token, applyEventId);
-    }
+    // Claiming persists the complete revert intent. Even a read failure on this
+    // attempt may follow an uncertain write on an earlier attempt; keep ownership.
     throw error;
   }
 }
