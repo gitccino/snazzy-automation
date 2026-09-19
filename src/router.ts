@@ -1,6 +1,7 @@
 import type { Env } from "./env";
 import { handleGetAsset } from "./routes/assets";
 import { handleDocsRoute } from "./routes/docs";
+import { handleLineRoute } from "./routes/line";
 import { handleUploadTrigger } from "./routes/upload";
 import { verifyAdminBearer } from "./shared/admin-auth";
 
@@ -17,6 +18,9 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
   }
   if (request.method === "POST" && url.pathname === "/docs") {
     return handleDocsRoute(request, env);
+  }
+  if (request.method === "POST" && url.pathname === "/line/webhook") {
+    return handleLineRoute(request, env);
   }
   return Response.json({ error: "not_found" }, { status: 404 });
 }

@@ -1,4 +1,5 @@
 import type { ValidationResult } from "../publication/validator";
+import type { InventoryProduct, ParseErrorCode, SaleValues } from "./types";
 import { formatValidationErrorSummary } from "../publication/validator";
 
 export function buildPublicationSuccessMessage(input: {
@@ -41,5 +42,63 @@ export function buildPublicationWorkflowFailureMessage(input: {
     `สาเหตุ: ${input.reason}`,
     `ลิงก์ Airtable: ${input.airtableRunUrl}`,
     "ส่งคำสั่ง /docs เพื่อลองใหม่",
+  ].join("\n");
+}
+
+const oldValue = (value: string | number | null) => value === null ? "ไม่พบข้อมูลเดิม" : String(value);
+
+export function helpText(): string {
+  return [
+    "คำสั่งที่ใช้ได้",
+    "/search A-1234",
+    "/upload",
+    "/docs",
+    "/soldout A-1234 ราคา 1,290 บาท",
+    "/revert",
+  ].join("\n");
+}
+
+export function parseErrorText(code: ParseErrorCode): string {
+  const messages: Record<ParseErrorCode, string> = {
+    unknown_command: "ไม่รู้จักคำสั่ง ใช้ /help",
+    missing_product_id: "ไม่พบรหัสสินค้า ตัวอย่าง A-1234",
+    invalid_product_id: "รูปแบบรหัสไม่ถูกต้อง ใช้ A-1234, รหัส 1234 หรือ รหัสสินค้า 1234",
+    multiple_product_ids: "กรุณาระบุรหัสสินค้าเพียงหนึ่งรหัส",
+    missing_price: "ไม่พบราคาขาย ตัวอย่าง ราคา 1,290 บาท",
+    invalid_price: "ราคาต้องเป็นจำนวนเต็มบาท เช่น THB 1,290",
+    multiple_prices: "กรุณาระบุราคาเดียว",
+  };
+  return messages[code];
+}
+
+export const actorText = (displayName: string, userId: string) => `${displayName} (${userId})`;
+
+export function searchText(product: InventoryProduct): string {
+  return [
+    `สินค้า ${product.productId}`,
+    `สถานะ: ${product.inventoryStatus}`,
+    `วันที่อัปโหลด: ${product.uploadDate ?? "ไม่พบข้อมูล"}`,
+    product.airtableUrl,
+  ].join("\n");
+}
+
+export const notFoundText = (productId: string) => `ไม่พบสินค้า ${productId}`;
+
+export function alreadyOutText(product: InventoryProduct): string {
+  return [
+    `สินค้า ${product.productId} เป็น Out อยู่แล้ว`,
+    `ราคาขาย: ${oldValue(product.soldPrice)}`,
+    `ขายเมื่อ: ${oldValue(product.soldAt)}`,
+    `บันทึกโดย: ${oldValue(product.soldBy)}`,
+    product.airtableUrl,
+  ].join("\n");
+}
+
+export function saleValuesText(values: SaleValues): string {
+  return [
+    `สถานะ: ${values.inventoryStatus}`,
+    `ราคาขาย: ${oldValue(values.soldPrice)}`,
+    `ขายเมื่อ: ${oldValue(values.soldAt)}`,
+    `บันทึกโดย: ${oldValue(values.soldBy)}`,
   ].join("\n");
 }

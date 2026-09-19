@@ -101,7 +101,12 @@ describe("sendImportSummary", () => {
     };
     const input = { result, orphanRange: null, nowThaiText };
 
-    await sendImportSummary({ pushMessage }, "group-1", input);
+    await sendImportSummary({
+      pushMessage,
+      replyText: async () => undefined,
+      replyButtons: async () => undefined,
+      getGroupMemberProfile: async () => ({ userId: "unused", displayName: "unused" }),
+    }, "group-1", input);
 
     expect(pushMessage).toHaveBeenCalledExactlyOnceWith(
       "group-1",
@@ -120,7 +125,12 @@ describe("sendImportSummary", () => {
 
     await expect(
       sendImportSummary(
-        { pushMessage },
+        {
+          pushMessage,
+          replyText: async () => undefined,
+          replyButtons: async () => undefined,
+          getGroupMemberProfile: async () => ({ userId: "unused", displayName: "unused" }),
+        },
         "group-1",
         { result, orphanRange: null, nowThaiText },
       ),

@@ -14,6 +14,7 @@ export interface Env {
   GOOGLE_SERVICE_ACCOUNT_JSON: string;
   ANTHROPIC_API_KEY: string;
   LINE_CHANNEL_ACCESS_TOKEN: string;
+  LINE_CHANNEL_SECRET: string;
   ICLOUD_SHARED_ALBUM_TOKEN: string;
   ASSET_URL_SIGNING_SECRET: string;
   ADMIN_ROUTE_TOKEN: string;
