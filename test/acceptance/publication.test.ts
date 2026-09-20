@@ -1,6 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
 import type { WorkflowStep } from "cloudflare:workers";
-import { NonRetryableError } from "cloudflare:workflows";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseConfig } from "../../src/config";
 import type { Env } from "../../src/env";
@@ -18,6 +17,7 @@ import { runPublicationWorkflow } from "../../src/publication/workflow";
 import { handleDocsRoute } from "../../src/routes/docs";
 import { createTestEnv, testEnv } from "../helpers/env";
 import { fakeFetch, fixedClock } from "../helpers/fakes";
+import { retryingStep } from "../helpers/workflow-step";
 
 const env = testEnv();
 const clock = fixedClock("2026-09-01T17:30:00.000Z");
@@ -75,24 +75,6 @@ async function seedCollages(products: PublicationProduct[]) {
     await putProductCollage(env.DB, clock, runId, item.productId,
       `products/${item.productId}/collage/1080x1080.jpg`, await collageInputFingerprint(item.orderedImageKeys));
   }
-}
-
-// Only the durable scheduler is replaced; every callback runs the real stages.
-// Honor the retry options emitted by production, without wall-clock delays.
-function retryingStep() {
-  const attempts: string[] = [];
-  const step = {
-    do: async (name: string, options: { retries: { limit: number } }, callback: () => Promise<unknown>) => {
-      for (let attempt = 0; ; attempt += 1) {
-        attempts.push(name);
-        try { return await callback(); }
-        catch (error) {
-          if (error instanceof NonRetryableError || attempt === options.retries.limit) throw error;
-        }
-      }
-    },
-  } as unknown as WorkflowStep;
-  return { step, attempts };
 }
 
 function imageBoundary() {
@@ -243,7 +225,11 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
   const scheduler = retryingStep();
   return {
     products, state, calls, batches, failureSnapshots, image, countTokens, create, notify, deps, scheduler,
-    run: () => runPublicationWorkflow({ publicationRunId: fixtureRunId, trigger: "admin" }, scheduler.step, deps),
+    run: () => runPublicationWorkflow(
+      { publicationRunId: fixtureRunId, trigger: "admin" },
+      scheduler as unknown as WorkflowStep,
+      deps,
+    ),
   };
 }
 
@@ -502,7 +488,11 @@ describe("publication acceptance", () => {
       fixture.state.batchFailureStatus = httpStatus;
       await expect(fixture.run()).rejects.toThrow("Unable to fill or verify the Google document.");
       expect(fixture.batches).toHaveLength(6);
-      expect(fixture.scheduler.attempts.filter(name => name === "fill and verify document")).toHaveLength(6);
+      expect(fixture.scheduler.calls).toContainEqual({
+        name: "fill and verify document",
+        retryLimit: 5,
+        attempts: 6,
+      });
       expect(fixture.failureSnapshots).toEqual(Array.from({ length: 6 }, () => ({
         job: { state: "generating", temp_doc_id: "temp-doc-1", google_doc_id: null, google_doc_url: null, correlation_id: "publication-rec-run-1" },
         docs: 1, status: "Generating",
