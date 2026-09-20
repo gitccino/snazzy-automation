@@ -31,7 +31,14 @@ export function createAssetStore(bucket: R2Bucket, config: { signingSecret: stri
         httpMetadata: { contentType },
       });
       if (created === null) return { r2Key, created: false };
-      if (db) await recordUsage(db, "r2_bytes_added", body.byteLength, todayBangkokDate(clock));
+      if (db) {
+        // ponytail: best-effort metrics; add a durable outbox when billing-grade accuracy is required.
+        try {
+          await recordUsage(db, "r2_bytes_added", body.byteLength, todayBangkokDate(clock));
+        } catch {
+          console.warn("Usage metric recording failed");
+        }
+      }
       return { r2Key, created: true };
     },
 

@@ -236,8 +236,14 @@ export async function requestCaptionBatch(
     return { captions: [], missingProductIds: requestedIds };
   }
   if (usageContext && response.usage) {
-    await recordUsage(usageContext.db, "claude_input_tokens", response.usage.input_tokens, todayBangkokDate(usageContext.clock));
-    await recordUsage(usageContext.db, "claude_output_tokens", response.usage.output_tokens, todayBangkokDate(usageContext.clock));
+    // ponytail: best-effort metrics; add a durable outbox when billing-grade accuracy is required.
+    try {
+      const metricDate = todayBangkokDate(usageContext.clock);
+      await recordUsage(usageContext.db, "claude_input_tokens", response.usage.input_tokens, metricDate);
+      await recordUsage(usageContext.db, "claude_output_tokens", response.usage.output_tokens, metricDate);
+    } catch {
+      console.warn("Usage metric recording failed");
+    }
   }
 
   if (

@@ -277,6 +277,38 @@ describe("requestCaptionBatch", () => {
 });
 
 describe("generateCaptionsForRun", () => {
+  it("returns captions when output-token persistence fails after input tokens", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const client = sdkClient({
+      countTokens: vi.fn().mockResolvedValue({ input_tokens: 500 }),
+      create: vi.fn().mockResolvedValue(toolResponse(
+        [{ productId: "A-1001", drafts: ["หนึ่ง", "สอง", "สาม"] }],
+        { input_tokens: 500, output_tokens: 300 },
+      )),
+    });
+    const failingDb = {
+      prepare: vi.fn()
+        .mockReturnValueOnce({ bind: () => ({ run: async () => undefined }) })
+        .mockImplementationOnce(() => { throw new Error("D1 unavailable"); }),
+    } as unknown as D1Database;
+
+    try {
+      await expect(generateCaptionsForRun(
+        client,
+        "claude-opus-5",
+        1_000,
+        toCaptionRequestProducts([product("A-1001")]),
+        { db: failingDb, clock: { now: () => new Date("2026-09-01T10:00:00+07:00") } },
+      )).resolves.toEqual({
+        captions: [{ productId: "A-1001", drafts: ["หนึ่ง", "สอง", "สาม"] }],
+        missingProductIds: [],
+      });
+      expect(warning).toHaveBeenCalledWith("Usage metric recording failed");
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
   it("records Claude input output token usage in D1", async () => {
     const client = sdkClient({
       countTokens: vi.fn().mockResolvedValue({ input_tokens: 500 }),
