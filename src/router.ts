@@ -2,6 +2,8 @@ import type { Env } from "./env";
 import { handleGetAsset } from "./routes/assets";
 import { handleDocsRoute } from "./routes/docs";
 import { handleLineRoute } from "./routes/line";
+import { handleHealth } from "./routes/health";
+import { handleBootstrapSequence, handleSetup } from "./routes/setup";
 import { handleUploadTrigger } from "./routes/upload";
 import { verifyAdminBearer } from "./shared/admin-auth";
 
@@ -21,6 +23,15 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
   }
   if (request.method === "POST" && url.pathname === "/line/webhook") {
     return handleLineRoute(request, env);
+  }
+  if (request.method === "GET" && url.pathname === "/health") {
+    return handleHealth(env);
+  }
+  if (request.method === "GET" && url.pathname === "/setup") {
+    return handleSetup(request, env);
+  }
+  if (request.method === "POST" && url.pathname === "/setup/bootstrap-sequence") {
+    return handleBootstrapSequence(request, env);
   }
   return Response.json({ error: "not_found" }, { status: 404 });
 }
