@@ -1,5 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it, vi } from "vitest";
+import { getMonthlyUsage } from "../../src/db/usage-repository";
+import { testEnv } from "../helpers/env";
 import {
   generateCaptionsForRun,
   planCaptionBatches,
@@ -24,7 +26,10 @@ function product(productId: string): PublicationProduct {
   };
 }
 
-function toolResponse(captions: Array<{ productId: string; drafts: string[] }>) {
+function toolResponse(
+  captions: Array<{ productId: string; drafts: string[] }>,
+  usage = { input_tokens: 0, output_tokens: 0 },
+) {
   return {
     content: [
       {
@@ -33,6 +38,7 @@ function toolResponse(captions: Array<{ productId: string; drafts: string[] }>) 
         input: { captions },
       },
     ],
+    usage,
   };
 }
 
@@ -210,7 +216,7 @@ describe("requestCaptionBatch", () => {
 
   it("marks every requested Product ID for retry when the response cannot be parsed", async () => {
     const client = sdkClient({
-      create: vi.fn().mockResolvedValue({ content: [] }),
+      create: vi.fn().mockResolvedValue({ content: [], usage: { input_tokens: 0, output_tokens: 0 } }),
     });
     const requested = [toCaptionRequestProducts([product("A-1001")])[0]!, toCaptionRequestProducts([product("A-1002")])[0]!];
     const outcome = await requestCaptionBatch(client, "claude-opus-5", requested);
@@ -271,6 +277,29 @@ describe("requestCaptionBatch", () => {
 });
 
 describe("generateCaptionsForRun", () => {
+  it("records Claude input output token usage in D1", async () => {
+    const client = sdkClient({
+      countTokens: vi.fn().mockResolvedValue({ input_tokens: 500 }),
+      create: vi.fn().mockResolvedValue(toolResponse(
+        [{ productId: "A-1001", drafts: ["หนึ่ง", "สอง", "สาม"] }],
+        { input_tokens: 500, output_tokens: 300 },
+      )),
+    });
+    const products = toCaptionRequestProducts([product("A-1001")]);
+
+    await generateCaptionsForRun(
+      client,
+      "claude-opus-5",
+      1_000,
+      products,
+      { db: testEnv().DB, clock: { now: () => new Date("2026-09-01T10:00:00+07:00") } },
+    );
+
+    const usage = await getMonthlyUsage(testEnv().DB, "2026-09");
+    expect(usage.claude_input_tokens).toBe(500);
+    expect(usage.claude_output_tokens).toBe(300);
+  });
+
   it("preserves earlier captions when a later split batch has a malformed envelope", async () => {
     const client = sdkClient({
       countTokens: vi.fn().mockImplementation(

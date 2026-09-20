@@ -29,7 +29,7 @@ function depsFor(env: Env, clock: Clock): PublicationServiceDeps {
     assets: createAssetStore(env.IMAGES_BUCKET, {
       signingSecret: env.ASSET_URL_SIGNING_SECRET,
       publicBaseUrl: config.publicBaseUrl,
-    }, clock),
+    }, clock, env.DB),
     bucket: env.IMAGES_BUCKET,
     images: env.IMAGES,
     fetcher,

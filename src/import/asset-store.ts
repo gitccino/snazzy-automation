@@ -1,4 +1,6 @@
 import type { Clock } from "../env";
+import { recordUsage } from "../db/usage-repository";
+import { todayBangkokDate } from "../shared/time";
 
 export interface AssetPutResult {
   r2Key: string;
@@ -20,7 +22,7 @@ function isFiniteInteger(value: number): boolean {
   return Number.isFinite(value) && Number.isInteger(value);
 }
 
-export function createAssetStore(bucket: R2Bucket, config: { signingSecret: string; publicBaseUrl: string }, clock: Clock): AssetStore {
+export function createAssetStore(bucket: R2Bucket, config: { signingSecret: string; publicBaseUrl: string }, clock: Clock, db?: D1Database): AssetStore {
   return {
     async putIfAbsent(contentHash, extension, body, contentType) {
       const r2Key = `assets/${contentHash}.${extension}`;
@@ -28,7 +30,9 @@ export function createAssetStore(bucket: R2Bucket, config: { signingSecret: stri
         onlyIf: { etagDoesNotMatch: "*" },
         httpMetadata: { contentType },
       });
-      return { r2Key, created: created !== null };
+      if (created === null) return { r2Key, created: false };
+      if (db) await recordUsage(db, "r2_bytes_added", body.byteLength, todayBangkokDate(clock));
+      return { r2Key, created: true };
     },
 
     async signUrl(r2Key, ttlSeconds) {

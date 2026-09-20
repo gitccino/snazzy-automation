@@ -1,7 +1,9 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { recordUsage } from "../db/usage-repository";
 import { OperationalError } from "../shared/errors";
 import { sha256Hex } from "../shared/ids";
+import { todayBangkokDate, type Clock } from "../shared/time";
 import type { CaptionSet, PublicationProduct } from "./types";
 
 export interface CaptionRequestProduct {
@@ -16,6 +18,11 @@ export interface CaptionRequestProduct {
 export interface CaptionGenerationOutcome {
   captions: CaptionSet[];
   missingProductIds: string[];
+}
+
+interface CaptionUsageContext {
+  db: D1Database;
+  clock: Clock;
 }
 
 // Bump whenever the prompt, tool schema, or draft validation contract changes.
@@ -217,15 +224,20 @@ export async function requestCaptionBatch(
   client: Pick<Anthropic, "messages">,
   model: string,
   products: CaptionRequestProduct[],
+  usageContext?: CaptionUsageContext,
 ): Promise<CaptionGenerationOutcome> {
   const requestedIds = products.map((product) => product.productId);
   const requestedIdSet = new Set(requestedIds);
-  let response: unknown;
+  let response: Anthropic.Messages.Message;
   try {
     response = await client.messages.create(buildRequestParams(model, products));
   } catch (error) {
     rethrowPermanentAnthropicError(error, "create_message");
     return { captions: [], missingProductIds: requestedIds };
+  }
+  if (usageContext && response.usage) {
+    await recordUsage(usageContext.db, "claude_input_tokens", response.usage.input_tokens, todayBangkokDate(usageContext.clock));
+    await recordUsage(usageContext.db, "claude_output_tokens", response.usage.output_tokens, todayBangkokDate(usageContext.clock));
   }
 
   if (
@@ -281,6 +293,7 @@ export async function generateCaptionsForRun(
   model: string,
   inputTokenLimit: number,
   products: CaptionRequestProduct[],
+  usageContext?: CaptionUsageContext,
 ): Promise<CaptionGenerationOutcome> {
   if (products.length === 0) return { captions: [], missingProductIds: [] };
 
@@ -293,7 +306,7 @@ export async function generateCaptionsForRun(
   const captions: CaptionSet[] = [];
   const missingProductIds: string[] = [];
   for (const batch of batches) {
-    const outcome = await requestCaptionBatch(client, model, batch);
+    const outcome = await requestCaptionBatch(client, model, batch, usageContext);
     captions.push(...outcome.captions);
     missingProductIds.push(...outcome.missingProductIds);
   }

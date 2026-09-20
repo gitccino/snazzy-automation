@@ -209,6 +209,7 @@ export class ImportWorkflow extends WorkflowEntrypoint<
           publicBaseUrl: config.publicBaseUrl,
         },
         clock,
+        this.env.DB,
       ),
       clock,
       ids,

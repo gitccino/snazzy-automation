@@ -180,7 +180,12 @@ async function captionsForProducts(deps: PublicationServiceDeps, runId: string, 
   const batches = await planCaptionBatches(deps.anthropic, deps.config.claudeModel, toCaptionRequestProducts(missing), deps.config.claudeRequestInputTokenLimit);
   const unresolved: string[] = [];
   for (const batch of batches) {
-    const generated = await requestCaptionBatch(deps.anthropic, deps.config.claudeModel, batch);
+    const generated = await requestCaptionBatch(
+      deps.anthropic,
+      deps.config.claudeModel,
+      batch,
+      { db: deps.db, clock: deps.clock },
+    );
     // Commit valid work before another batch can throw or return incomplete data.
     for (const item of generated.captions) {
       await putProductCaptions(deps.db, deps.clock, runId, item.productId, JSON.stringify(item.drafts), fingerprints.get(item.productId)!);
