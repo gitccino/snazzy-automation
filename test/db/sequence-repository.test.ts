@@ -17,6 +17,15 @@ describe("sequence-repository", () => {
     expect(await repo.allocateNext(name)).toBe(500);
   });
 
+  it("reports exactly one winner when bootstrap races", async () => {
+    const repo = createSequenceRepository(testEnv().DB);
+    const name = `seq-${crypto.randomUUID()}`;
+    const won = await Promise.all([repo.bootstrap(name, 500), repo.bootstrap(name, 999)]);
+
+    expect(won.filter(Boolean)).toHaveLength(1);
+    expect(await repo.allocateNext(name)).toBe(500);
+  });
+
   it("allocateNext returns strictly increasing, non-repeating numbers under concurrent calls", async () => {
     const repo = createSequenceRepository(testEnv().DB);
     const name = `seq-${crypto.randomUUID()}`;

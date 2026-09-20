@@ -73,6 +73,30 @@ describe("setup routes", () => {
     expect(report.ok).toBe(true);
   });
 
+  it("fails r2_access when the required collage base object is missing", async () => {
+    const env = await readyEnv();
+    await env.IMAGES_BUCKET.delete("assets/collage-base-1080.jpg");
+    const report = await runSetupChecks(env, airtableFetch(), { now: () => new Date("2026-09-02T01:00:00.000Z") }, happyProbes);
+
+    expect(report.checks.find((check) => check.name === "r2_access")).toMatchObject({ ok: false });
+  });
+
+  it("fails r2_access when a temporary read returns different bytes", async () => {
+    const env = await readyEnv();
+    const original = env.IMAGES_BUCKET;
+    const corrupt = Object.create(original) as R2Bucket;
+    corrupt.get = vi.fn(async (key: string) => {
+      const object = await original.get(key);
+      return key.startsWith("setup-check/") && object
+        ? { ...object, arrayBuffer: async () => new TextEncoder().encode("corrupt").buffer } as unknown as R2ObjectBody
+        : object;
+    });
+    env.IMAGES_BUCKET = corrupt;
+    const report = await runSetupChecks(env, airtableFetch(), { now: () => new Date("2026-09-02T01:00:00.000Z") }, happyProbes);
+
+    expect(report.checks.find((check) => check.name === "r2_access")).toMatchObject({ ok: false });
+  });
+
   it("authenticates setup before running dependencies", async () => {
     const response = await handleSetup(
       new Request("https://worker.example/setup"),
@@ -103,9 +127,24 @@ describe("setup routes", () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
+  it("allows only one concurrent bootstrap request to win", async () => {
+    const env = configuredEnv();
+    await env.DB.prepare("DELETE FROM sequences WHERE name = 'product_id'").run();
+    const request = () => new Request("https://worker.example/setup/bootstrap-sequence", {
+      method: "POST", headers: { authorization: `Bearer ${env.ADMIN_ROUTE_TOKEN}` },
+    });
+
+    const responses = await Promise.all([
+      handleBootstrapSequence(request(), env, airtableFetch(["A-500"])),
+      handleBootstrapSequence(request(), env, airtableFetch(["A-500"])),
+    ]);
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+  });
+
   it("rejects a My Drive folder before template access", async () => {
     const probes = createSetupExternalProbes(
-      googleEnv(), googleFetch({ driveId: undefined }), { now: () => new Date("2026-09-02T01:00:00.000Z") },
+      googleEnv(), googleFetch({ driveId: null }), { now: () => new Date("2026-09-02T01:00:00.000Z") },
     );
     await expect(probes.verifyGoogleTemplateAccess()).rejects.toThrow("Shared Drive");
   });
@@ -123,6 +162,35 @@ describe("setup routes", () => {
     expect(driveCalls.some(([input, init]) => String(input).includes("docs.googleapis.com") && init?.method === "POST")).toBe(true);
     expect(driveCalls.some(([input, init]) => String(input).includes("copied-doc?supportsAllDrives=true") && init?.method === "PATCH")).toBe(true);
     expect(driveCalls.some(([input, init]) => String(input).includes("copied-doc?supportsAllDrives=true") && init?.method === "DELETE")).toBe(true);
+    const copy = driveCalls.find(([input, init]) => String(input).includes("/copy?") && init?.method === "POST");
+    expect(JSON.parse(String(copy?.[1]?.body))).toMatchObject({ appProperties: { setupProbeId: expect.any(String) } });
+  });
+
+  it("paginates Shared Drive membership until it finds the exact service account", async () => {
+    const probes = createSetupExternalProbes(
+      googleEnv(), googleFetch({ permissionOnSecondPage: true }), { now: () => new Date("2026-09-02T01:00:00.000Z") },
+    );
+
+    await expect(probes.verifyGoogleTemplateAccess()).resolves.toBeUndefined();
+  });
+
+  it("rejects a template whose required marker is split across text runs", async () => {
+    const probes = createSetupExternalProbes(
+      googleEnv(), googleFetch({ splitMarker: true }), { now: () => new Date("2026-09-02T01:00:00.000Z") },
+    );
+
+    await expect(probes.verifyGoogleTemplateAccess()).rejects.toThrow("one text run");
+  });
+
+  it("recovers a response-lost disposable copy through its appProperty", async () => {
+    const fetcher = googleFetch({ copyResponseLost: true });
+    const probes = createSetupExternalProbes(
+      googleEnv(), fetcher, { now: () => new Date("2026-09-02T01:00:00.000Z") },
+    );
+
+    await expect(probes.verifyGoogleTemplateAccess()).rejects.toThrow("response lost");
+    expect(fetcher.mock.calls.some(([input]) => new URL(String(input)).searchParams.get("q")?.includes("setupProbeId"))).toBe(true);
+    expect(fetcher.mock.calls.some(([input, init]) => String(input).includes("copied-doc?supportsAllDrives=true") && init?.method === "DELETE")).toBe(true);
   });
 });
 
@@ -136,23 +204,39 @@ function googleEnv(): Env {
   };
 }
 
-function googleFetch(options: { driveId?: string } = { driveId: "drive-1" }) {
-  const { driveId } = options;
+function googleFetch(options: { driveId?: string | null; permissionOnSecondPage?: boolean; splitMarker?: boolean; copyResponseLost?: boolean } = {}) {
+  const driveId = options.driveId === null ? undefined : options.driveId ?? "drive-1";
+  const { permissionOnSecondPage, splitMarker, copyResponseLost } = options;
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     if (url.hostname === "oauth2.googleapis.com") return Response.json({ access_token: "token", expires_in: 3600 });
-    if (url.hostname === "docs.googleapis.com") return Response.json({});
+    if (url.hostname === "docs.googleapis.com") {
+      if (init?.method === "POST") return Response.json({});
+      return Response.json({ body: { content: [{ paragraph: { elements: splitMarker
+        ? [{ startIndex: 1, textRun: { content: "{{PUBLICATION_DATE}} {{PRO" } }, { startIndex: 30, textRun: { content: "DUCTS}} {{END_PRODUCTS}}" } }]
+        : [{ startIndex: 1, textRun: { content: "{{PUBLICATION_DATE}} {{PRODUCTS}} {{END_PRODUCTS}}" } }],
+      } }] } });
+    }
     if (url.pathname === "/drive/v3/files/folder-1") return Response.json({
       id: "folder-1", mimeType: "application/vnd.google-apps.folder", ...(driveId ? { driveId } : {}),
       capabilities: { canAddChildren: true, canDeleteChildren: true },
     });
-    if (url.pathname === "/drive/v3/drives/drive-1/permissions") return Response.json({ permissions: [{
-      emailAddress: "setup@example.iam.gserviceaccount.com", role: "organizer", type: "user", deleted: false,
-    }] });
+    if (url.pathname === "/drive/v3/files/drive-1/permissions") {
+      if (permissionOnSecondPage && !url.searchParams.get("pageToken")) return Response.json({
+        permissions: [{ emailAddress: "other@example.iam.gserviceaccount.com", role: "organizer", type: "user", deleted: false }], nextPageToken: "page-2",
+      });
+      return Response.json({ permissions: [{
+        emailAddress: "setup@example.iam.gserviceaccount.com", role: "organizer", type: "user", deleted: false,
+      }] });
+    }
     if (url.pathname === "/drive/v3/files/template-1") return Response.json({
       id: "template-1", mimeType: "application/vnd.google-apps.document", parents: ["folder-1"],
     });
-    if (url.pathname === "/drive/v3/files/template-1/copy" && init?.method === "POST") return Response.json({ id: "copied-doc" });
+    if (url.pathname === "/drive/v3/files/template-1/copy" && init?.method === "POST") {
+      if (copyResponseLost) throw new Error("response lost");
+      return Response.json({ id: "copied-doc" });
+    }
+    if (url.pathname === "/drive/v3/files" && (!init?.method || init.method === "GET")) return Response.json({ files: [{ id: "copied-doc" }] });
     if (url.pathname === "/drive/v3/files/copied-doc" && (init?.method === "PATCH" || init?.method === "DELETE")) return new Response(null, { status: 200 });
     throw new Error(`Unexpected Google request ${url}`);
   });

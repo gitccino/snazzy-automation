@@ -20,3 +20,11 @@
 ## Deployment follow-up
 
 Run `ADMIN_ROUTE_TOKEN="$ADMIN_ROUTE_TOKEN" npm run setup:verify` with `WORKER_BASE_URL` set after deploying to each customer environment. Local tests cannot prove the customer Shared Drive role or remote R2 asset availability.
+
+## Review fix round 1
+
+- Corrected the Shared Drive membership request to Drive v3 `files/{driveId}/permissions` and paginates every permission page.
+- The Google probe now reads and validates the three literal template markers as single text runs. Disposable copies carry a unique `setupProbeId`; successful copies are deleted directly, while response-loss copies are found by that property and deleted.
+- R2 verification compares temporary readback bytes and requires the configured collage-base object. Bootstrap now returns a single atomic winner, so concurrent route calls receive one `200` and one `409`.
+- TDD RED: the new setup/repository tests failed against the original endpoint, non-paginated lookup, missing marker/recovery checks, weak R2 check, and non-atomic bootstrap. GREEN: focused setup/health/repository suite passed 19 tests.
+- `npm run check` passed: 66 files, 679 tests. The existing Miniflare workflow cancellation messages and third-party sourcemap warning remain non-fatal.

@@ -1,6 +1,6 @@
 export interface SequenceRepository {
   isBootstrapped(name: string): Promise<boolean>;
-  bootstrap(name: string, initialNextValue: number): Promise<void>;
+  bootstrap(name: string, initialNextValue: number): Promise<boolean>;
   allocateNext(name: string): Promise<number>;
 }
 
@@ -16,16 +16,18 @@ export function createSequenceRepository(db: D1Database): SequenceRepository {
 
     async bootstrap(name, initialNextValue) {
       const now = new Date().toISOString();
-      await db
+      const result = await db
         .prepare(
           `INSERT INTO sequences (name, next_value, bootstrapped_at) VALUES (?, ?, ?)
            ON CONFLICT(name) DO UPDATE SET
              next_value = excluded.next_value,
              bootstrapped_at = excluded.bootstrapped_at
-           WHERE sequences.bootstrapped_at IS NULL`
+           WHERE sequences.bootstrapped_at IS NULL
+           RETURNING 1 AS bootstrapped`
         )
         .bind(name, initialNextValue, now)
-        .run();
+        .first<{ bootstrapped: number }>();
+      return result !== null;
     },
 
     async allocateNext(name) {

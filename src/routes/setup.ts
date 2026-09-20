@@ -29,8 +29,15 @@ const DrivePermissionsSchema = z.object({
   permissions: z.array(z.object({
     emailAddress: z.string().email().optional(), role: z.string().optional(), type: z.string().optional(), deleted: z.boolean().optional(),
   })).default([]),
+  nextPageToken: z.string().min(1).optional(),
 });
 const DriveCopySchema = z.object({ id: z.string().min(1) });
+const DriveFilesSchema = z.object({ files: z.array(DriveCopySchema).default([]), nextPageToken: z.string().min(1).optional() });
+const GoogleDocumentSchema = z.object({
+  body: z.object({ content: z.array(z.object({ paragraph: z.object({ elements: z.array(z.object({
+    startIndex: z.number().int().nonnegative().optional(), textRun: z.object({ content: z.string() }).optional(),
+  })) }).optional() })) }),
+});
 
 export interface SetupCheckResult { name: string; ok: boolean; detail: string }
 export interface SetupReport { ok: boolean; checks: SetupCheckResult[] }
@@ -39,6 +46,20 @@ export interface SetupExternalProbes {
   verifyGoogleTemplateAccess(): Promise<void>;
   verifyClaudeCredential(): Promise<void>;
   verifyICloudSnapshotAccess(): Promise<number>;
+}
+
+function requireTemplateMarkers(document: z.infer<typeof GoogleDocumentSchema>): void {
+  const runs = document.body.content.flatMap((block) => block.paragraph?.elements ?? [])
+    .flatMap((element) => element.textRun && element.startIndex !== undefined ? [{ content: element.textRun.content, startIndex: element.startIndex }] : []);
+  const marker = (value: string) => {
+    const run = runs.find((candidate) => candidate.content.includes(value));
+    if (!run) throw new Error(`template marker ${value} must remain inside one text run`);
+    return run.startIndex + run.content.indexOf(value);
+  };
+  marker("{{PUBLICATION_DATE}}");
+  const products = marker("{{PRODUCTS}}");
+  const endProducts = marker("{{END_PRODUCTS}}");
+  if (endProducts <= products + "{{PRODUCTS}}".length) throw new Error("template missing ordered {{PRODUCTS}} / {{END_PRODUCTS}} markers");
 }
 
 const requiredFields = {
@@ -126,6 +147,38 @@ export function createSetupExternalProbes(env: Env, fetcher: Fetcher, clock: Clo
     url.searchParams.set("fields", "id,mimeType,parents,driveId,capabilities(canAddChildren,canDeleteChildren)");
     return DriveFileSchema.parse(await (await googleFetch(url.toString())).json());
   }
+  async function isSharedDriveOrganizer(driveId: string): Promise<boolean> {
+    const url = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(driveId)}/permissions`);
+    url.searchParams.set("supportsAllDrives", "true");
+    url.searchParams.set("fields", "permissions(emailAddress,role,type,deleted),nextPageToken");
+    url.searchParams.set("pageSize", "100");
+    let pageToken: string | undefined;
+    do {
+      if (pageToken) url.searchParams.set("pageToken", pageToken);
+      const page = DrivePermissionsSchema.parse(await (await googleFetch(url.toString())).json());
+      if (page.permissions.some((permission) => permission.type === "user" && permission.emailAddress === account.client_email && permission.role === "organizer" && !permission.deleted)) return true;
+      pageToken = page.nextPageToken;
+    } while (pageToken);
+    return false;
+  }
+  async function deleteSetupCopies(folderId: string, probeId: string): Promise<void> {
+    const url = new URL("https://www.googleapis.com/drive/v3/files");
+    const escapeLiteral = (value: string) => value.replaceAll("\\", "\\\\").replaceAll("'", "\\'");
+    url.searchParams.set("q", `'${escapeLiteral(folderId)}' in parents and trashed = false and appProperties has { key='setupProbeId' value='${probeId}' }`);
+    url.searchParams.set("fields", "files(id),nextPageToken");
+    url.searchParams.set("pageSize", "100");
+    url.searchParams.set("supportsAllDrives", "true");
+    url.searchParams.set("includeItemsFromAllDrives", "true");
+    let pageToken: string | undefined;
+    do {
+      if (pageToken) url.searchParams.set("pageToken", pageToken);
+      const page = DriveFilesSchema.parse(await (await googleFetch(url.toString())).json());
+      for (const file of page.files) {
+        await googleFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}?supportsAllDrives=true`, { method: "DELETE" });
+      }
+      pageToken = page.nextPageToken;
+    } while (pageToken);
+  }
 
   return {
     async verifyLineGroupAccess() {
@@ -144,11 +197,7 @@ export function createSetupExternalProbes(env: Env, fetcher: Fetcher, clock: Clo
       if (!folder.capabilities?.canAddChildren || !folder.capabilities.canDeleteChildren) {
         throw new Error("Service account lacks Shared Drive create/delete permissions");
       }
-      const permissionsUrl = new URL(`https://www.googleapis.com/drive/v3/drives/${encodeURIComponent(folder.driveId)}/permissions`);
-      permissionsUrl.searchParams.set("supportsAllDrives", "true");
-      permissionsUrl.searchParams.set("fields", "permissions(emailAddress,role,type,deleted)");
-      const permissions = DrivePermissionsSchema.parse(await (await googleFetch(permissionsUrl.toString())).json()).permissions;
-      if (!permissions.some((permission) => permission.type === "user" && permission.emailAddress === account.client_email && permission.role === "organizer" && !permission.deleted)) {
+      if (!(await isSharedDriveOrganizer(folder.driveId))) {
         throw new Error("Service account is not an organizer member of the Shared Drive");
       }
       const template = await driveFile(config.googleTemplateDocId);
@@ -156,13 +205,18 @@ export function createSetupExternalProbes(env: Env, fetcher: Fetcher, clock: Clo
         throw new Error("Google template is not a document in the configured Shared Drive folder");
       }
 
+      const templateDocument = GoogleDocumentSchema.parse(await (await googleFetch(
+        `https://docs.googleapis.com/v1/documents/${encodeURIComponent(template.id)}`,
+      )).json());
+      requireTemplateMarkers(templateDocument);
+      const probeId = crypto.randomUUID();
       let copyId: string | undefined;
       try {
         const copyUrl = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(template.id)}/copy`);
         copyUrl.searchParams.set("supportsAllDrives", "true");
         copyId = DriveCopySchema.parse(await (await googleFetch(copyUrl.toString(), {
           method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ name: `setup-check-${crypto.randomUUID()}`, parents: [folder.id] }),
+          body: JSON.stringify({ name: `setup-check-${probeId}`, parents: [folder.id], appProperties: { setupProbeId: probeId } }),
         })).json()).id;
         await googleFetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(copyId)}:batchUpdate`, {
           method: "POST", headers: { "content-type": "application/json" },
@@ -175,9 +229,9 @@ export function createSetupExternalProbes(env: Env, fetcher: Fetcher, clock: Clo
         });
       } finally {
         if (copyId) {
-          const deleteUrl = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(copyId)}`);
-          deleteUrl.searchParams.set("supportsAllDrives", "true");
-          await googleFetch(deleteUrl.toString(), { method: "DELETE" });
+          await googleFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(copyId)}?supportsAllDrives=true`, { method: "DELETE" });
+        } else {
+          await deleteSetupCopies(folder.id, probeId);
         }
       }
     },
@@ -209,9 +263,14 @@ export async function runSetupChecks(
   }));
   checks.push(await check("r2_access", async () => {
     const key = `setup-check/${crypto.randomUUID()}.txt`;
-    await env.IMAGES_BUCKET.put(key, "ok");
+    const expected = new TextEncoder().encode("setup-r2-readback");
+    await env.IMAGES_BUCKET.put(key, expected);
     try {
-      if (await env.IMAGES_BUCKET.get(key) === null) throw new Error("R2 read failed");
+      const object = await env.IMAGES_BUCKET.get(key);
+      if (object === null) throw new Error("R2 read failed");
+      const actual = new Uint8Array(await object.arrayBuffer());
+      if (actual.length !== expected.length || actual.some((byte, index) => byte !== expected[index])) throw new Error("R2 readback bytes differ");
+      if (await env.IMAGES_BUCKET.head("assets/collage-base-1080.jpg") === null) throw new Error("R2 collage base asset missing");
     } finally {
       await env.IMAGES_BUCKET.delete(key);
     }
@@ -272,6 +331,8 @@ export async function handleBootstrapSequence(request: Request, env: Env, fetche
   if ((await sequenceState(env))?.bootstrapped) return Response.json({ error: "already_bootstrapped" }, { status: 409 });
   const config = parseConfig(env.APP_CONFIG_JSON);
   const nextValue = Math.max(config.productIdInitialNumber, (await maximumAirtableProductNumber(env, fetcher)) + 1);
-  await createSequenceRepository(env.DB).bootstrap("product_id", nextValue);
+  if (!(await createSequenceRepository(env.DB).bootstrap("product_id", nextValue))) {
+    return Response.json({ error: "already_bootstrapped" }, { status: 409 });
+  }
   return Response.json({ ok: true, bootstrappedFrom: nextValue });
 }
