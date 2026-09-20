@@ -2,17 +2,67 @@ import { describe, expect, it, vi } from "vitest";
 import {
   computeGroupHash,
   groupByMarkers,
+  type GroupingPhoto,
 } from "../../src/import/grouping";
-import type {
-  PersistedGroup,
-  ProcessGroupDeps,
+import {
+  downloadAndGroupSnapshot,
+  type ImportServiceDeps,
+  type ProcessGroupDeps,
 } from "../../src/import/service";
 import { runImportWorkflow } from "../../src/import/workflow";
+import { createImportRepository } from "../../src/db/import-repository";
+import { createAssetStore } from "../../src/import/asset-store";
+import { testEnv } from "../helpers/env";
+import { fixedClock, sequentialIdGenerator } from "../helpers/fakes";
 import { buildGroupingPhotos } from "../helpers/fixtures";
+import { MutableBatchSource, fakeMarkerDetector } from "../helpers/import-fixtures";
 import { retryingStep } from "../helpers/workflow-step";
 
 function forwardedDeps(): ProcessGroupDeps {
   return Object.create(null) as ProcessGroupDeps;
+}
+
+async function downloadProductionBatch(
+  sourceAlbumId: string,
+  photos: GroupingPhoto[],
+) {
+  const importRunId = `run-${crypto.randomUUID()}`;
+  const env = testEnv();
+  const clock = fixedClock("2026-09-01T09:00:00.000Z");
+  const deps: ImportServiceDeps = {
+    imageSource: new MutableBatchSource(
+      sourceAlbumId,
+      photos.map(({ applePhotoId, isMarker }) => ({
+        id: applePhotoId,
+        isMarker,
+      })),
+    ),
+    marker: fakeMarkerDetector,
+    repo: createImportRepository(
+      env.DB,
+      sequentialIdGenerator(`batch-${crypto.randomUUID()}`),
+      clock,
+    ),
+    assets: createAssetStore(
+      env.IMAGES_BUCKET,
+      {
+        signingSecret: "test-secret",
+        publicBaseUrl: "https://example.workers.dev",
+      },
+      clock,
+    ),
+    clock,
+    ids: sequentialIdGenerator(`batch-${crypto.randomUUID()}`),
+    sourceAlbumId,
+    firstImportCutoffDate: null,
+  };
+
+  await deps.repo.createImportRun({
+    id: importRunId,
+    sourceAlbumId,
+    trigger: "admin",
+  });
+  return downloadAndGroupSnapshot(deps, importRunId);
 }
 
 const batches = [
@@ -94,44 +144,37 @@ describe.each(batches)("import batch: $name", (batch) => {
       groupPhotos.map(({ applePhotoId }) => applePhotoId));
     expect(new Set(groupedIds).size).toBe(groupedIds.length);
 
+    const sourceAlbumId = `batch-${crypto.randomUUID()}`;
     const hashes = await Promise.all(
       grouped.groups.map(({ photos: groupPhotos }) =>
-        computeGroupHash("album-1", groupPhotos)),
+        computeGroupHash(sourceAlbumId, groupPhotos)),
     );
     expect(new Set(hashes).size).toBe(hashes.length);
 
-    const pendingGroups: PersistedGroup[] = grouped.groups.map(
-      (group, index) => ({
-        groupId: hashes[index]!,
-        groupRowId: `row-${index}`,
-        ordinal: group.ordinal,
-        markerPhotoId: group.photos[0]!.applePhotoId,
-        attachablePhotos: group.photos
-          .filter(({ isMarker }) => !isMarker)
-          .map(({ applePhotoId, r2Key }) => ({ applePhotoId, r2Key })),
-      }),
+    const outcome = await downloadProductionBatch(sourceAlbumId, photos);
+    const markerIds = new Set(
+      photos.filter(({ isMarker }) => isMarker).map(({ applePhotoId }) => applePhotoId),
     );
+    expect(outcome.pendingGroups.map(({ groupId }) => groupId)).toEqual(hashes);
+    expect(outcome.pendingGroups.map(({ attachablePhotos }) => attachablePhotos.length))
+      .toEqual(batch.groupSizes);
+    expect(
+      outcome.pendingGroups.flatMap(({ attachablePhotos }) => attachablePhotos)
+        .some(({ applePhotoId }) => markerIds.has(applePhotoId)),
+    ).toBe(false);
     const notify = vi.fn().mockResolvedValue(undefined);
     const result = await runImportWorkflow(
       forwardedDeps(),
       {
         importRunId: `run-${batch.name}`,
-        sourceAlbumId: "album-1",
+        sourceAlbumId,
         trigger: "admin",
       },
       retryingStep(),
       {
         retryLimit: 5,
         downloadAndGroup: async () => ({
-          pendingGroups,
-          orphanRange: grouped.orphanPhotos.length === 0
-            ? null
-            : {
-                firstApplePhotoId: grouped.orphanPhotos[0]!.applePhotoId,
-                lastApplePhotoId: grouped.orphanPhotos.at(-1)!.applePhotoId,
-                count: grouped.orphanPhotos.length,
-              },
-          checkpointPosition: photos.at(-1)!.position,
+          ...outcome,
         }),
         recordRunFailure: vi.fn(),
         processGroupAttempt: async (_deps, group) => ({
