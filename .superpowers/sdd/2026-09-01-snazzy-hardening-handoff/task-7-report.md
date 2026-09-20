@@ -28,3 +28,10 @@ Run `ADMIN_ROUTE_TOKEN="$ADMIN_ROUTE_TOKEN" npm run setup:verify` with `WORKER_B
 - R2 verification compares temporary readback bytes and requires the configured collage-base object. Bootstrap now returns a single atomic winner, so concurrent route calls receive one `200` and one `409`.
 - TDD RED: the new setup/repository tests failed against the original endpoint, non-paginated lookup, missing marker/recovery checks, weak R2 check, and non-atomic bootstrap. GREEN: focused setup/health/repository suite passed 19 tests.
 - `npm run check` passed: 66 files, 679 tests. The existing Miniflare workflow cancellation messages and third-party sourcemap warning remain non-fatal.
+
+## Review fix round 2
+
+- Corrected the Drive app-property recovery query to `appProperties has { key='setupProbeId' and value='...' }`; the response-loss test checks the parsed query exactly.
+- The R2 probe now decodes `assets/collage-base-1080.jpg` with the existing `jpeg-js` dependency and requires an actual 1080×1080 JPEG. Tests cover missing, non-JPEG, wrong-size, and valid in-memory assets without reading repository files at Worker runtime.
+- TDD RED: the new invalid-JPEG, wrong-dimension, and exact-query assertions failed against the prior check. GREEN: focused setup/health/repository suite passed 21 tests.
+- `npm run check` passed: 66 files, 681 tests. Existing non-fatal Miniflare workflow cancellation messages and the third-party sourcemap warning remain.

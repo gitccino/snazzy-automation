@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import jpeg from "jpeg-js";
 import { z } from "zod";
 import { parseConfig } from "../config";
 import { createSequenceRepository } from "../db/sequence-repository";
@@ -60,6 +61,18 @@ function requireTemplateMarkers(document: z.infer<typeof GoogleDocumentSchema>):
   const products = marker("{{PRODUCTS}}");
   const endProducts = marker("{{END_PRODUCTS}}");
   if (endProducts <= products + "{{PRODUCTS}}".length) throw new Error("template missing ordered {{PRODUCTS}} / {{END_PRODUCTS}} markers");
+}
+
+function requireCollageBaseJpeg(bytes: Uint8Array): void {
+  let decoded: jpeg.RawImageData<Uint8Array>;
+  try {
+    decoded = jpeg.decode(bytes, { useTArray: true });
+  } catch {
+    throw new Error("R2 collage base asset is not a valid JPEG");
+  }
+  if (decoded.width !== 1080 || decoded.height !== 1080) {
+    throw new Error(`R2 collage base asset must be 1080x1080 JPEG, got ${decoded.width}x${decoded.height}`);
+  }
 }
 
 const requiredFields = {
@@ -164,7 +177,7 @@ export function createSetupExternalProbes(env: Env, fetcher: Fetcher, clock: Clo
   async function deleteSetupCopies(folderId: string, probeId: string): Promise<void> {
     const url = new URL("https://www.googleapis.com/drive/v3/files");
     const escapeLiteral = (value: string) => value.replaceAll("\\", "\\\\").replaceAll("'", "\\'");
-    url.searchParams.set("q", `'${escapeLiteral(folderId)}' in parents and trashed = false and appProperties has { key='setupProbeId' value='${probeId}' }`);
+    url.searchParams.set("q", `'${escapeLiteral(folderId)}' in parents and trashed = false and appProperties has { key='setupProbeId' and value='${probeId}' }`);
     url.searchParams.set("fields", "files(id),nextPageToken");
     url.searchParams.set("pageSize", "100");
     url.searchParams.set("supportsAllDrives", "true");
@@ -270,7 +283,9 @@ export async function runSetupChecks(
       if (object === null) throw new Error("R2 read failed");
       const actual = new Uint8Array(await object.arrayBuffer());
       if (actual.length !== expected.length || actual.some((byte, index) => byte !== expected[index])) throw new Error("R2 readback bytes differ");
-      if (await env.IMAGES_BUCKET.head("assets/collage-base-1080.jpg") === null) throw new Error("R2 collage base asset missing");
+      const base = await env.IMAGES_BUCKET.get("assets/collage-base-1080.jpg");
+      if (base === null) throw new Error("R2 collage base asset missing");
+      requireCollageBaseJpeg(new Uint8Array(await base.arrayBuffer()));
     } finally {
       await env.IMAGES_BUCKET.delete(key);
     }

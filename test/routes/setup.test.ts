@@ -1,4 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
+import jpeg from "jpeg-js";
 import { describe, expect, it, vi } from "vitest";
 import {
   createSetupExternalProbes,
@@ -44,11 +45,18 @@ const happyProbes = {
   verifyClaudeCredential: vi.fn().mockResolvedValue(undefined),
   verifyICloudSnapshotAccess: vi.fn().mockResolvedValue(1),
 };
+const validBaseJpeg = jpeg.encode({
+  data: new Uint8Array(1080 * 1080 * 4).fill(255), width: 1080, height: 1080,
+}, 80).data;
+
+function jpegBytes(width: number, height: number): Uint8Array {
+  return jpeg.encode({ data: new Uint8Array(width * height * 4).fill(255), width, height }, 80).data;
+}
 
 async function readyEnv(): Promise<Env> {
   const env = configuredEnv();
   await env.DB.prepare("DELETE FROM sequences WHERE name = 'product_id'").run();
-  await env.IMAGES_BUCKET.put("assets/collage-base-1080.jpg", "fixture");
+  await env.IMAGES_BUCKET.put("assets/collage-base-1080.jpg", validBaseJpeg);
   await env.DB.prepare(
     "INSERT INTO sequences (name, next_value, bootstrapped_at) VALUES ('product_id', 501, '2026-09-01T00:00:00.000Z')",
   ).run();
@@ -71,11 +79,23 @@ describe("setup routes", () => {
       "claude_credential", "icloud_phase_zero", "cron_timezone",
     ]);
     expect(report.ok).toBe(true);
+    expect(report.checks.find((check) => check.name === "r2_access")).toMatchObject({ ok: true });
   });
 
   it("fails r2_access when the required collage base object is missing", async () => {
     const env = await readyEnv();
     await env.IMAGES_BUCKET.delete("assets/collage-base-1080.jpg");
+    const report = await runSetupChecks(env, airtableFetch(), { now: () => new Date("2026-09-02T01:00:00.000Z") }, happyProbes);
+
+    expect(report.checks.find((check) => check.name === "r2_access")).toMatchObject({ ok: false });
+  });
+
+  it.each([
+    ["not a JPEG", new TextEncoder().encode("not-a-jpeg")],
+    ["wrong dimensions", jpegBytes(100, 100)],
+  ])("fails r2_access when the collage base is %s", async (_description, bytes) => {
+    const env = await readyEnv();
+    await env.IMAGES_BUCKET.put("assets/collage-base-1080.jpg", bytes);
     const report = await runSetupChecks(env, airtableFetch(), { now: () => new Date("2026-09-02T01:00:00.000Z") }, happyProbes);
 
     expect(report.checks.find((check) => check.name === "r2_access")).toMatchObject({ ok: false });
@@ -189,7 +209,12 @@ describe("setup routes", () => {
     );
 
     await expect(probes.verifyGoogleTemplateAccess()).rejects.toThrow("response lost");
-    expect(fetcher.mock.calls.some(([input]) => new URL(String(input)).searchParams.get("q")?.includes("setupProbeId"))).toBe(true);
+    const copy = fetcher.mock.calls.find(([input, init]) => String(input).includes("/copy?") && init?.method === "POST");
+    const probeId = JSON.parse(String(copy?.[1]?.body)).appProperties.setupProbeId;
+    const lookup = fetcher.mock.calls.find(([input]) => new URL(String(input)).searchParams.has("q"));
+    expect(new URL(String(lookup?.[0])).searchParams.get("q")).toBe(
+      `'folder-1' in parents and trashed = false and appProperties has { key='setupProbeId' and value='${probeId}' }`,
+    );
     expect(fetcher.mock.calls.some(([input, init]) => String(input).includes("copied-doc?supportsAllDrives=true") && init?.method === "DELETE")).toBe(true);
   });
 });
