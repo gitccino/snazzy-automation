@@ -5,6 +5,7 @@ import { handleLineRoute } from "./routes/line";
 import { handleHealth } from "./routes/health";
 import { handleBootstrapSequence, handleSetup } from "./routes/setup";
 import { handleUploadTrigger } from "./routes/upload";
+import { handleUsage } from "./routes/usage";
 import { verifyAdminBearer } from "./shared/admin-auth";
 
 export async function routeRequest(request: Request, env: Env): Promise<Response> {
@@ -26,6 +27,9 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
   }
   if (request.method === "GET" && url.pathname === "/health") {
     return handleHealth(env);
+  }
+  if (request.method === "GET" && url.pathname === "/usage") {
+    return handleUsage(request, env);
   }
   if (request.method === "GET" && url.pathname === "/setup") {
     return handleSetup(request, env);
