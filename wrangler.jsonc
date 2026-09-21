@@ -31,7 +31,69 @@
     }
   ],
   "env": {
-    "staging": { "name": "snazzy-automation-staging" },
-    "production": { "name": "snazzy-automation-production" }
+    "staging": {
+      "name": "snazzy-automation-staging",
+      "triggers": {
+        "crons": ["45 22 * * *", "0 23 * * *", "30 23 * * *"]
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "snazzy-automation-staging",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "IMAGES_BUCKET",
+          "bucket_name": "snazzy-automation-staging-images"
+        }
+      ],
+      "images": { "binding": "IMAGES" },
+      "workflows": [
+        {
+          "binding": "IMPORT_WORKFLOW",
+          "name": "snazzy-import-staging",
+          "class_name": "ImportWorkflow"
+        },
+        {
+          "binding": "PUBLICATION_WORKFLOW",
+          "name": "snazzy-publication-staging",
+          "class_name": "PublicationWorkflow"
+        }
+      ]
+    },
+    "production": {
+      "name": "snazzy-automation-production",
+      "triggers": {
+        "crons": ["45 22 * * *", "0 23 * * *", "30 23 * * *"]
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "snazzy-automation-production",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "IMAGES_BUCKET",
+          "bucket_name": "snazzy-automation-production-images"
+        }
+      ],
+      "images": { "binding": "IMAGES" },
+      "workflows": [
+        {
+          "binding": "IMPORT_WORKFLOW",
+          "name": "snazzy-import-production",
+          "class_name": "ImportWorkflow"
+        },
+        {
+          "binding": "PUBLICATION_WORKFLOW",
+          "name": "snazzy-publication-production",
+          "class_name": "PublicationWorkflow"
+        }
+      ]
+    }
   }
 }
