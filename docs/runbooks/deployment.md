@@ -183,7 +183,7 @@ Deploy staging completely before creating or changing production. This runbook u
 
 9. Register `$WORKER_BASE_URL/line/webhook` in the LINE Developers console for the staging channel.
 
-10. Run the non-mutating smoke test:
+10. Run smoke checks. `/setup` temporarily writes an R2 probe object and a Google Doc copy, then cleans them up; the smoke run makes no business import or publication changes:
 
     ```bash
     WORKER_BASE_URL="$WORKER_BASE_URL" \
