@@ -4,15 +4,17 @@ Run in order and retain evidence for each item. Production handoff is complete o
 
 ## Local verification
 
-- [ ] Phase 0 report (`docs/feasibility/icloud-phase-0-report.md`) says `PASS`.
+- [x] Phase 0 report (`docs/feasibility/icloud-phase-0-report.md`) says `PASS` (final verdict at line 24).
 - [ ] `npm run check` passes on `main` with zero failing tests.
 - [ ] `npm run test:acceptance` passes on `main`.
-- [x] `test/acceptance/retry-exhaustion.test.ts` proves retry exhaustion isolates sibling groups (worktree suite passed; see Task 16 report).
-- [x] `test/acceptance/import-batches.test.ts` covers all ten production-sized batches (worktree suite passed; see Task 16 report).
-- [x] `test/acceptance/publication.test.ts` proves missing-field blocking, first-four ordering, and one document per date (worktree suite passed; see Task 16 report).
-- [x] `test/acceptance/line-acceptance.test.ts` covers at least 30 parser and command cases (worktree suite passed; see Task 16 report).
-- [x] `test/icloud/redaction-audit.test.ts` finds no secret or signed URL in iCloud boundary logs (full worktree suite passed; see Task 16 report).
-- [x] `test/acceptance/smoke.test.ts` covers smoke-check logic (worktree suite passed; see Task 16 report).
+- [x] On the feature worktree, `npm run check` passed: 69 files, 697 tests.
+- [x] On the feature worktree, `npm run test:acceptance` passed: 6 files, 66 tests.
+- [x] `test/acceptance/retry-exhaustion.test.ts` passes in the feature worktree.
+- [x] `test/acceptance/import-batches.test.ts` passes in the feature worktree.
+- [x] `test/acceptance/publication.test.ts` passes in the feature worktree.
+- [x] `test/acceptance/line-acceptance.test.ts` passes in the feature worktree.
+- [x] `test/icloud/redaction-audit.test.ts` passes in the full feature-worktree suite.
+- [x] `test/acceptance/smoke.test.ts` passes in the feature worktree.
 - [ ] D1 migrations apply to a fresh local database using `npm run db:migrate:local`.
 
 ## Customer environment verification
@@ -23,8 +25,10 @@ Run in order and retain evidence for each item. Production handoff is complete o
 - [ ] Authenticated staging `GET /setup` returns `"ok": true` and all eleven checks pass.
 - [ ] Authenticated production `GET /setup` returns `"ok": true` and all eleven checks pass.
 - [ ] Staging `npm run smoke` prints `SMOKE TEST PASSED` and accepts the real LINE HMAC.
+- [ ] Production `npm run smoke` prints `SMOKE TEST PASSED` and accepts the real LINE HMAC.
 - [ ] Fresh-account rehearsal proves deployment from `docs/runbooks/deployment.md` using customer-owned resources.
 - [ ] One production external-service credential is rotated using `docs/runbooks/credential-rotation.md` without code changes, then verified through authenticated `/setup` and `npm run smoke`.
+- [ ] Rotate production `ADMIN_ROUTE_TOKEN`: the old token returns HTTP 401; the new token authenticates `/setup` and `/usage`; production smoke passes with the new token.
 - [ ] `docs/runbooks/operations.md` records both native Cloudflare Notification policies: Billing Usage Alert and R2 Storage.
 - [ ] Authenticated production `GET /usage` returns a validated monthly report with plausible `estimatedThb` (expected ฿0–1000 before traffic).
 - [ ] Customer staff receive printed `SNAZZY_PRODUCT_START_V1` marker cards and confirm marker placement in a live test shoot.
