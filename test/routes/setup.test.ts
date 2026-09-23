@@ -53,6 +53,15 @@ function jpegBytes(width: number, height: number): Uint8Array {
   return jpeg.encode({ data: new Uint8Array(width * height * 4).fill(255), width, height }, 80).data;
 }
 
+function imageBinding(response: Response): Env["IMAGES"] {
+  const transformer = {
+    transform: vi.fn(),
+    output: vi.fn(async () => ({ response: () => response })),
+  };
+  transformer.transform.mockReturnValue(transformer);
+  return { input: vi.fn(() => transformer) } as unknown as Env["IMAGES"];
+}
+
 async function readyEnv(): Promise<Env> {
   const env = configuredEnv();
   await env.DB.prepare("DELETE FROM sequences WHERE name = 'product_id'").run();
@@ -60,6 +69,7 @@ async function readyEnv(): Promise<Env> {
   await env.DB.prepare(
     "INSERT INTO sequences (name, next_value, bootstrapped_at) VALUES ('product_id', 501, '2026-09-01T00:00:00.000Z')",
   ).run();
+  env.IMAGES = imageBinding(new Response(validBaseJpeg, { headers: { "content-type": "image/jpeg" } }));
   return env;
 }
 
@@ -117,13 +127,55 @@ describe("setup routes", () => {
     expect(report.checks.find((check) => check.name === "r2_access")).toMatchObject({ ok: false });
   });
 
-  it("authenticates setup before running dependencies", async () => {
-    const response = await handleSetup(
-      new Request("https://worker.example/setup"),
-      { ADMIN_ROUTE_TOKEN: "secret" } as Env,
-      vi.fn(() => { throw new Error("must not fetch"); }),
+  it("verifies images_binding transforms the collage base to JPEG", async () => {
+    const report = await runSetupChecks(
+      await readyEnv(), airtableFetch(), { now: () => new Date("2026-09-02T01:00:00.000Z") }, happyProbes,
     );
-    expect(response.status).toBe(401);
+
+    expect(report.checks.find((check) => check.name === "images_binding")).toMatchObject({ ok: true });
+  });
+
+  it.each([
+    ["fails", new Response(null, { status: 502 })],
+    ["returns non-JPEG bytes", new Response("not a JPEG", { headers: { "content-type": "image/jpeg" } })],
+  ])("fails images_binding when the Images transform %s", async (_description, response) => {
+    const env = await readyEnv();
+    env.IMAGES = imageBinding(response);
+
+    const report = await runSetupChecks(env, airtableFetch(), { now: () => new Date("2026-09-02T01:00:00.000Z") }, happyProbes);
+
+    expect(report.ok).toBe(false);
+    expect(report.checks.find((check) => check.name === "images_binding")).toMatchObject({ ok: false });
+  });
+
+  it("rejects missing and wrong setup bearers before running dependencies", async () => {
+    const fetcher = vi.fn(() => { throw new Error("must not fetch"); });
+    const env = { ADMIN_ROUTE_TOKEN: "secret" } as Env;
+
+    expect((await handleSetup(new Request("https://worker.example/setup"), env, fetcher)).status).toBe(401);
+    expect((await handleSetup(new Request("https://worker.example/setup", {
+      headers: { authorization: "Bearer wrong-token" },
+    }), env, fetcher)).status).toBe(401);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("returns 503 to an authorized caller when an Images setup check fails", async () => {
+    const env = await readyEnv();
+    env.IMAGES = imageBinding(new Response(null, { status: 502 }));
+
+    const response = await handleSetup(
+      new Request("https://worker.example/setup", { headers: { authorization: `Bearer ${env.ADMIN_ROUTE_TOKEN}` } }),
+      env,
+      airtableFetch(),
+      { now: () => new Date("2026-09-02T01:00:00.000Z") },
+      happyProbes,
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      checks: expect.arrayContaining([expect.objectContaining({ name: "images_binding", ok: false })]),
+    });
   });
 
   it("scans every Airtable page and accepts only exact Product IDs during one-time bootstrap", async () => {

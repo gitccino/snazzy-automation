@@ -6,6 +6,7 @@ import { createSequenceRepository } from "../db/sequence-repository";
 import type { Env, Fetcher } from "../env";
 import { createICloudClient } from "../icloud/client";
 import { createAssetStore } from "../import/asset-store";
+import { COLLAGE_BASE_R2_KEY, COLLAGE_CANVAS_SIZE } from "../publication/collage";
 import { createGoogleAuthClient, parseServiceAccountJson } from "../publication/google-auth";
 import { verifyAdminBearer } from "../shared/admin-auth";
 import type { Clock } from "../shared/time";
@@ -283,7 +284,7 @@ export async function runSetupChecks(
       if (object === null) throw new Error("R2 read failed");
       const actual = new Uint8Array(await object.arrayBuffer());
       if (actual.length !== expected.length || actual.some((byte, index) => byte !== expected[index])) throw new Error("R2 readback bytes differ");
-      const base = await env.IMAGES_BUCKET.get("assets/collage-base-1080.jpg");
+      const base = await env.IMAGES_BUCKET.get(COLLAGE_BASE_R2_KEY);
       if (base === null) throw new Error("R2 collage base asset missing");
       requireCollageBaseJpeg(new Uint8Array(await base.arrayBuffer()));
     } finally {
@@ -305,7 +306,18 @@ export async function runSetupChecks(
   }));
   checks.push(await check("images_binding", async () => {
     if (!env.IMAGES || !env.IMPORT_WORKFLOW || !env.PUBLICATION_WORKFLOW || !env.ADMIN_ROUTE_TOKEN) throw new Error("required Images, Workflow, or admin binding missing");
-    return "Images, Workflow, and admin bindings present";
+    const base = await env.IMAGES_BUCKET.get(COLLAGE_BASE_R2_KEY);
+    if (base === null) throw new Error("R2 collage base asset missing for Images transform");
+    const result = await env.IMAGES.input(base.body)
+      .transform({ width: COLLAGE_CANVAS_SIZE, height: COLLAGE_CANVAS_SIZE, fit: "contain", background: "#FFFFFF" })
+      .output({ format: "image/jpeg", quality: 90 });
+    const response = result.response();
+    if (!response.ok) throw new Error(`Cloudflare Images transform failed: ${response.status}`);
+    if (response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "image/jpeg") {
+      throw new Error("Cloudflare Images transform did not return JPEG");
+    }
+    requireCollageBaseJpeg(new Uint8Array(await response.arrayBuffer()));
+    return "Images JPEG transform verified";
   }));
   checks.push(await check("airtable_schema", async () => { await validateAirtableSchema(env, fetcher); return "Airtable schema verified"; }));
   checks.push(await check("sequence_consistency", async () => {

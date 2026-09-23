@@ -38,12 +38,14 @@ Deploy staging completely before creating or changing production. This runbook u
 
    Expect `0001_initial.sql`, `0002_import_run_terminal_details.sql`, `0003_line_inventory.sql`, `0003_publication.sql`, `0004_line_recovery.sql`, and `0005_usage_metrics.sql`. The publication migration establishes the date claim and per-output input fingerprints.
 
-3. Install every staging secret. Keep the LINE secret and admin token in this shell for the smoke commands.
+3. Install every staging secret. Keep the LINE secret and admin token in this shell for the smoke commands. These prompts work in zsh and do not use Bash-only `read -p`.
 
    ```bash
    npx wrangler secret put AIRTABLE_TOKEN --env staging
 
-   read -r -s -p "LINE channel secret: " LINE_CHANNEL_SECRET
+   printf '%s' 'LINE channel secret: '
+   IFS= read -r -s LINE_CHANNEL_SECRET
+   printf '\n'
    printf '%s' "$LINE_CHANNEL_SECRET" |
      npx wrangler secret put LINE_CHANNEL_SECRET --env staging
    export LINE_CHANNEL_SECRET
@@ -53,11 +55,15 @@ Deploy staging completely before creating or changing production. This runbook u
    npx wrangler secret put ANTHROPIC_API_KEY --env staging
    npx wrangler secret put ICLOUD_SHARED_ALBUM_TOKEN --env staging
 
-   read -r -s -p "Asset URL signing secret: " ASSET_URL_SIGNING_SECRET
+   printf '%s' 'Asset URL signing secret: '
+   IFS= read -r -s ASSET_URL_SIGNING_SECRET
+   printf '\n'
    printf '%s' "$ASSET_URL_SIGNING_SECRET" |
      npx wrangler secret put ASSET_URL_SIGNING_SECRET --env staging
 
-   read -r -s -p "Admin route token: " ADMIN_ROUTE_TOKEN
+   printf '%s' 'Admin route token: '
+   IFS= read -r -s ADMIN_ROUTE_TOKEN
+   printf '\n'
    printf '%s' "$ADMIN_ROUTE_TOKEN" |
      npx wrangler secret put ADMIN_ROUTE_TOKEN --env staging
    export ADMIN_ROUTE_TOKEN
@@ -67,20 +73,28 @@ Deploy staging completely before creating or changing production. This runbook u
 
    ```bash
    npm run deploy:staging
-   read -r -p "Exact staging Worker base URL: " WORKER_BASE_URL
+   printf '%s' 'Exact staging Worker base URL: '
+   IFS= read -r WORKER_BASE_URL
    export WORKER_BASE_URL
    ```
 
 5. Read the customer-owned non-secret IDs and first import cutoff into the current shell:
 
    ```bash
-   read -r -p "Airtable base ID: " AIRTABLE_BASE_ID
-   read -r -p "Airtable Products table ID: " AIRTABLE_PRODUCTS_TABLE_ID
-   read -r -p "Airtable Publication Runs table ID: " AIRTABLE_PUBLICATION_RUNS_TABLE_ID
-   read -r -p "Allowed LINE group ID: " LINE_ALLOWED_GROUP_ID
-   read -r -p "Google Drive folder ID: " GOOGLE_DRIVE_FOLDER_ID
-   read -r -p "Google template document ID: " GOOGLE_TEMPLATE_DOC_ID
-   read -r -p "First import cutoff ISO timestamp: " FIRST_IMPORT_CUTOFF_DATE
+   printf '%s' 'Airtable base ID: '
+   IFS= read -r AIRTABLE_BASE_ID
+   printf '%s' 'Airtable Products table ID: '
+   IFS= read -r AIRTABLE_PRODUCTS_TABLE_ID
+   printf '%s' 'Airtable Publication Runs table ID: '
+   IFS= read -r AIRTABLE_PUBLICATION_RUNS_TABLE_ID
+   printf '%s' 'Allowed LINE group ID: '
+   IFS= read -r LINE_ALLOWED_GROUP_ID
+   printf '%s' 'Google Drive folder ID: '
+   IFS= read -r GOOGLE_DRIVE_FOLDER_ID
+   printf '%s' 'Google template document ID: '
+   IFS= read -r GOOGLE_TEMPLATE_DOC_ID
+   printf '%s' 'First import cutoff ISO timestamp: '
+   IFS= read -r FIRST_IMPORT_CUTOFF_DATE
    export AIRTABLE_BASE_ID AIRTABLE_PRODUCTS_TABLE_ID
    export AIRTABLE_PUBLICATION_RUNS_TABLE_ID LINE_ALLOWED_GROUP_ID
    export GOOGLE_DRIVE_FOLDER_ID GOOGLE_TEMPLATE_DOC_ID
@@ -151,12 +165,16 @@ Deploy staging completely before creating or changing production. This runbook u
 8. Run the authenticated setup validator:
 
    ```bash
+   curl -sS -o /dev/null -w '%{http_code}\n' "$WORKER_BASE_URL/setup"
+   curl -sS -o /dev/null -w '%{http_code}\n' \
+     -H 'Authorization: Bearer wrong-token' \
+     "$WORKER_BASE_URL/setup"
    curl --fail-with-body \
      -H "Authorization: Bearer $ADMIN_ROUTE_TOKEN" \
      "$WORKER_BASE_URL/setup"
    ```
 
-   Expect HTTP 200 and all eleven checks with `ok: true`: `d1_migrations`, `r2_access`, `asset_delivery`, `images_binding`, `airtable_schema`, `sequence_consistency`, `line_webhook_config`, `google_template_access`, `claude_credential`, `icloud_phase_zero`, and `cron_timezone`. `r2_access` remotely verifies the private `assets/collage-base-1080.jpg` asset as a 1080×1080 JPEG. `google_template_access` performs the Shared Drive membership and disposable copy/edit/rename/delete rehearsal. Missing and wrong bearer values must return HTTP 401. Stop on any failed check; separately confirm `docs/feasibility/icloud-phase-0-report.md` says `PASS` before enabling publication traffic.
+   Expect the first two commands to print HTTP 401. Expect the authorized request to return HTTP 200 and all eleven checks with `ok: true`: `d1_migrations`, `r2_access`, `asset_delivery`, `images_binding`, `airtable_schema`, `sequence_consistency`, `line_webhook_config`, `google_template_access`, `claude_credential`, `icloud_phase_zero`, and `cron_timezone`. `r2_access` remotely verifies the private `assets/collage-base-1080.jpg` asset as a 1080×1080 JPEG. `images_binding` is a hard publication gate: it runs a real Cloudflare Images JPEG transform of that remote base asset and validates the resulting JPEG. `google_template_access` performs the Shared Drive membership and disposable copy/edit/rename/delete rehearsal. The authorized endpoint returns HTTP 503 when any one of the eleven checks is false. Stop on any failed check; separately confirm `docs/feasibility/icloud-phase-0-report.md` says `PASS` before enabling publication traffic.
 
 9. Register `$WORKER_BASE_URL/line/webhook` in the LINE Developers console for the staging channel.
 
@@ -173,13 +191,24 @@ Deploy staging completely before creating or changing production. This runbook u
 
 ## Production deployment
 
-11. Create `snazzy-automation-production` and `snazzy-automation-production-images`, then repeat steps 1–10 with each `--env staging` changed to `--env production`, `npm run db:migrate:staging` changed to `npm run db:migrate:production`, and `npm run deploy:staging` changed to `npm run deploy:production`. At step 4, set `WORKER_BASE_URL` to the exact production Worker origin. Use production customer IDs and secrets. Copy the exact returned production `database_id` into `env.production.d1_databases[0].database_id` and rerun this before migration or deployment:
+11. Create the production resources and upload the same private collage base canvas:
+
+    ```bash
+    npx wrangler d1 create snazzy-automation-production
+    npx wrangler r2 bucket create snazzy-automation-production-images
+    npx wrangler r2 object put \
+      snazzy-automation-production-images/assets/collage-base-1080.jpg \
+      --file docs/runbooks/collage-base-1080.jpg \
+      --remote
+    ```
+
+    Copy the exact returned production `database_id` into `env.production.d1_databases[0].database_id` and rerun this before migration or deployment:
 
     ```bash
     npx wrangler deploy --dry-run --env production
     ```
 
-    Commit both real D1 IDs in `wrangler.jsonc` after their dry-run validations. Those customer-owned resource IDs are not secrets.
+    Then repeat staging steps 2–10 with each `--env staging` changed to `--env production`, `npm run db:migrate:staging` changed to `npm run db:migrate:production`, and `npm run deploy:staging` changed to `npm run deploy:production`. At step 4, set `WORKER_BASE_URL` to the exact production Worker origin. Use production customer IDs and secrets. Commit both real D1 IDs in `wrangler.jsonc` after their dry-run validations. Those customer-owned resource IDs are not secrets.
 
 ## Rollback
 
