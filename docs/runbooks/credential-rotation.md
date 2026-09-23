@@ -26,7 +26,7 @@ Rotate customer-owned production secrets without a code change. Obtain the repla
    ```
 
    `/setup` only checks that a LINE channel secret is present; it cannot prove an incoming webhook signature. For an admin token, confirm the old bearer now receives HTTP 401 and the new bearer works on both `/setup` and `/usage`.
-4. With `WORKER_BASE_URL`, `ADMIN_ROUTE_TOKEN`, and `LINE_CHANNEL_SECRET` set to current production values, run the non-mutating smoke checks. They verify health, setup, usage, and a signed empty LINE webhook; they do not exercise an import, publication, or LINE push:
+4. With `WORKER_BASE_URL`, `ADMIN_ROUTE_TOKEN`, and `LINE_CHANNEL_SECRET` set to current production values, run smoke checks. They verify health, setup, usage, and a signed empty LINE webhook; they do not exercise an import, publication, or LINE push. `/setup` temporarily writes an R2 probe object and a Google Doc copy, then cleans them up:
 
    ```bash
    npm run smoke
