@@ -165,16 +165,21 @@ Deploy staging completely before creating or changing production. This runbook u
 8. Run the authenticated setup validator:
 
    ```bash
-   curl -sS -o /dev/null -w '%{http_code}\n' "$WORKER_BASE_URL/setup"
-   curl -sS -o /dev/null -w '%{http_code}\n' \
+   set -euo pipefail
+   test "$(curl -sS -o /dev/null -w '%{http_code}' "$WORKER_BASE_URL/setup")" = 401
+   test "$(curl -sS -o /dev/null -w '%{http_code}' \
      -H 'Authorization: Bearer wrong-token' \
-     "$WORKER_BASE_URL/setup"
-   curl --fail-with-body \
+     "$WORKER_BASE_URL/setup")" = 401
+   setup_report="$(curl --fail-with-body \
      -H "Authorization: Bearer $ADMIN_ROUTE_TOKEN" \
-     "$WORKER_BASE_URL/setup"
+     "$WORKER_BASE_URL/setup")"
+   printf '%s' "$setup_report" | node -e '
+   const report = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+   if (report.ok !== true || !Array.isArray(report.checks) || report.checks.length !== 11 || report.checks.some((check) => check.ok !== true)) process.exit(1);
+   '
    ```
 
-   Expect the first two commands to print HTTP 401. Expect the authorized request to return HTTP 200 and all eleven checks with `ok: true`: `d1_migrations`, `r2_access`, `asset_delivery`, `images_binding`, `airtable_schema`, `sequence_consistency`, `line_webhook_config`, `google_template_access`, `claude_credential`, `icloud_phase_zero`, and `cron_timezone`. `r2_access` remotely verifies the private `assets/collage-base-1080.jpg` asset as a 1080×1080 JPEG. `images_binding` is a hard publication gate: it runs a real Cloudflare Images JPEG transform of that remote base asset and validates the resulting JPEG. `google_template_access` performs the Shared Drive membership and disposable copy/edit/rename/delete rehearsal. The authorized endpoint returns HTTP 503 when any one of the eleven checks is false. Stop on any failed check; separately confirm `docs/feasibility/icloud-phase-0-report.md` says `PASS` before enabling publication traffic.
+   Each assertion exits nonzero unless the missing and wrong bearer probes return exactly HTTP 401, the authorized request succeeds, and all eleven checks are `ok: true`: `d1_migrations`, `r2_access`, `asset_delivery`, `images_binding`, `airtable_schema`, `sequence_consistency`, `line_webhook_config`, `google_template_access`, `claude_credential`, `icloud_phase_zero`, and `cron_timezone`. `r2_access` remotely verifies the private `assets/collage-base-1080.jpg` asset as a 1080×1080 JPEG. `images_binding` is a hard publication gate: it runs a real Cloudflare Images JPEG transform of that remote base asset and validates the resulting JPEG. `google_template_access` performs the Shared Drive membership and disposable copy/edit/rename/delete rehearsal. The authorized endpoint returns HTTP 503 when any one of the eleven checks is false. Stop on any failed check; separately confirm `docs/feasibility/icloud-phase-0-report.md` says `PASS` before enabling publication traffic.
 
 9. Register `$WORKER_BASE_URL/line/webhook` in the LINE Developers console for the staging channel.
 
