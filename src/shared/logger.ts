@@ -2,6 +2,8 @@ export type LogFields = Record<string, string | number | boolean | null>;
 
 const SECRET_KEY_PATTERN = /token|secret|signedurl|signed_url|derivativeurl|password|authorization/i;
 const SECRET_TEXT_PATTERNS = [
+  /https?:\/\/(?:[a-z0-9-]+\.)*icloud-content\.com\/[^\s"'<>]+/gi,
+  /https?:\/\/(?:www\.)?icloud\.com\/sharedalbum\/[^\s"'<>]+/gi,
   /sharedstreams\.icloud\.com\/[A-Za-z0-9_-]{10,}/gi,
   /X-Amz-Signature=[^&\s]+/gi,
   /[?&]sig=[^&\s]+/gi,

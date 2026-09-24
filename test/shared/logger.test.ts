@@ -39,6 +39,20 @@ describe("createLogger", () => {
 
 describe("redactText", () => {
   it.each([
+    "https://cvws.icloud-content.com/B/private-photo?o=download&s=secret-signature&k=secret-key",
+    "https://www.icloud.com/sharedalbum/#secret-album",
+    "https://icloud.com/sharedalbum/#secret-album",
+  ])("redacts complete iCloud capability URLs in errors and logs: %s", (url) => {
+    expect(redactText(`fetch ${url} failed`)).toBe("fetch [REDACTED] failed");
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      createLogger({ endpoint: url }).error(`failed ${url}`, { detail: url });
+      expect(JSON.parse(String(spy.mock.calls[0]![0]))).toMatchObject({
+        endpoint: "[REDACTED]", message: "failed [REDACTED]", detail: "[REDACTED]",
+      });
+    } finally { spy.mockRestore(); }
+  });
+  it.each([
     [
       "iCloud URL",
       "fetch https://p123-sharedstreams.icloud.com/A1b2C3d4Token/00/asset.jpg",

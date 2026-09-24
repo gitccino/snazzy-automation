@@ -11,6 +11,7 @@ import {
 } from "../../src/import/service";
 import { runImportWorkflow } from "../../src/import/workflow";
 import { createImportRepository } from "../../src/db/import-repository";
+import { createSequenceRepository } from "../../src/db/sequence-repository";
 import { createAssetStore } from "../../src/import/asset-store";
 import { testEnv } from "../helpers/env";
 import { fixedClock, sequentialIdGenerator } from "../helpers/fakes";
@@ -163,6 +164,9 @@ describe.each(batches)("import batch: $name", (batch) => {
         .some(({ applePhotoId }) => markerIds.has(applePhotoId)),
     ).toBe(false);
     const notify = vi.fn().mockResolvedValue(undefined);
+    const sequence = createSequenceRepository(testEnv().DB);
+    await testEnv().DB.prepare("DELETE FROM sequences WHERE name = 'product_id'").run();
+    await sequence.bootstrap("product_id", 1001);
     const result = await runImportWorkflow(
       forwardedDeps(),
       {
@@ -179,7 +183,7 @@ describe.each(batches)("import batch: $name", (batch) => {
         recordRunFailure: vi.fn(),
         processGroupAttempt: async (_deps, group) => ({
           outcome: "succeeded",
-          productId: `A-${1001 + group.ordinal}`,
+          productId: `A-${await sequence.allocateNext("product_id")}`,
         }),
         recordExhaustedFailure: vi.fn(),
         finalize: vi.fn().mockResolvedValue(undefined),
@@ -192,6 +196,7 @@ describe.each(batches)("import batch: $name", (batch) => {
     expect(new Set(result.succeededProductIds).size).toBe(
       result.succeededProductIds.length,
     );
+    expect(await sequence.allocateNext("product_id")).toBe(1001 + batch.groupSizes.length);
     expect(notify).toHaveBeenCalledTimes(1);
   });
 });

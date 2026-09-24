@@ -114,6 +114,20 @@ async function validateAirtableSchema(env: Env, fetcher: Fetcher): Promise<void>
   }
 }
 
+export async function hasAirtableSequenceDrift(env: Env, fetcher: Fetcher, nextValue: number): Promise<boolean> {
+  const config = parseConfig(env.APP_CONFIG_JSON);
+  const url = new URL(`https://api.airtable.com/v0/${config.airtableBaseId}/${config.airtableProductsTableId}`);
+  url.searchParams.append("fields[]", "Product ID");
+  url.searchParams.set("maxRecords", "1");
+  url.searchParams.set("pageSize", "1");
+  url.searchParams.set("filterByFormula", `IF(REGEX_MATCH({Product ID}&"", "^A-[0-9]+$"), VALUE(MID({Product ID}, 3, LEN({Product ID}))) >= ${nextValue}, 0)`);
+  const body = AirtableRecordsSchema.parse(await airtableJson(fetcher, url.toString(), env.AIRTABLE_TOKEN));
+  return body.records.some((record) => {
+    const match = /^A-(\d+)$/.exec(record.fields["Product ID"] ?? "");
+    return match !== null && Number(match[1]) >= nextValue;
+  });
+}
+
 export async function maximumAirtableProductNumber(env: Env, fetcher: Fetcher): Promise<number> {
   const config = parseConfig(env.APP_CONFIG_JSON);
   let maximum = 0;
