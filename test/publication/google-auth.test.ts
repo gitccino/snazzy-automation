@@ -1,233 +1,141 @@
-import { beforeAll, describe, expect, it, vi } from "vitest";
-import { generateKeyPairSync } from "node:crypto";
-import {
-  createGoogleAuthClient,
-  parseServiceAccountJson,
-  signServiceAccountJwt,
-} from "../../src/publication/google-auth";
+import { describe, expect, it, vi } from "vitest";
+import { createGoogleAuthClient } from "../../src/publication/google-auth";
+import { OperationalError } from "../../src/shared/errors";
 import type { Fetcher } from "../../src/shared/http";
 
-let privateKeyPem: string;
-let publicKeyDer: ArrayBuffer;
-
-beforeAll(() => {
-  const { publicKey, privateKey } = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    publicKeyEncoding: { type: "spki", format: "pem" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  privateKeyPem = privateKey;
-  const body = publicKey
-    .replace(/-----BEGIN PUBLIC KEY-----/, "")
-    .replace(/-----END PUBLIC KEY-----/, "")
-    .replace(/\s+/g, "");
-  publicKeyDer = Uint8Array.from(atob(body), (character) => character.charCodeAt(0)).buffer;
-});
-
-function base64UrlDecode(segment: string): string {
-  const padded = segment
-    .replace(/-/g, "+")
-    .replace(/_/g, "/")
-    .padEnd(Math.ceil(segment.length / 4) * 4, "=");
-  return atob(padded);
-}
-
-describe("parseServiceAccountJson", () => {
-  it("extracts and validates client_email and PKCS#8 private_key", () => {
-    const result = parseServiceAccountJson(JSON.stringify({
-      client_email: "svc@example.iam.gserviceaccount.com",
-      private_key: privateKeyPem,
-    }));
-
-    expect(result).toEqual({
-      client_email: "svc@example.iam.gserviceaccount.com",
-      private_key: privateKeyPem,
-    });
-  });
-
-  it("rejects malformed secret JSON at the configuration boundary", () => {
-    expect(() => parseServiceAccountJson(JSON.stringify({
-      client_email: "not-an-email",
-      private_key: "not-a-key",
-    }))).toThrow();
-  });
-
-  it("redacts malformed configuration text from the configuration error", () => {
-    const credentialText = "configuration-private-key-material-must-not-leak";
-    let error: unknown;
-
-    try {
-      parseServiceAccountJson(credentialText);
-    } catch (caught) {
-      error = caught;
-    }
-
-    expect(error).toMatchObject({
-      code: "google_service_account_configuration_invalid",
-      retryable: false,
-      message: "Google service account configuration is invalid",
-    });
-    expect((error as Error).message).not.toContain(credentialText);
-  });
-});
-
-describe("signServiceAccountJwt", () => {
-  it("produces a JWT with correct header, claims, and a verifiable RS256 signature", async () => {
-    const clock = { now: () => new Date("2026-09-01T05:00:00.000Z") };
-    const jwt = await signServiceAccountJwt(
-      { client_email: "svc@example.iam.gserviceaccount.com", private_key: privateKeyPem },
-      clock,
-      ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/documents"],
-    );
-
-    const [headerB64, claimsB64, signatureB64] = jwt.split(".");
-    if (!headerB64 || !claimsB64 || !signatureB64) {
-      throw new Error("JWT must contain three segments");
-    }
-    const header = JSON.parse(base64UrlDecode(headerB64));
-    const claims = JSON.parse(base64UrlDecode(claimsB64));
-
-    expect(header).toEqual({ alg: "RS256", typ: "JWT" });
-    expect(claims.iss).toBe("svc@example.iam.gserviceaccount.com");
-    expect(claims.scope).toBe("https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents");
-    expect(claims.aud).toBe("https://oauth2.googleapis.com/token");
-    expect(claims.iat).toBe(1788238800);
-    expect(claims.exp).toBe(1788242400);
-
-    const publicKey = await crypto.subtle.importKey(
-      "spki",
-      publicKeyDer,
-      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-      false,
-      ["verify"],
-    );
-    const signingInput = `${headerB64}.${claimsB64}`;
-    const signatureBytes = Uint8Array.from(base64UrlDecode(signatureB64), (character) => character.charCodeAt(0));
-    const valid = await crypto.subtle.verify(
-      "RSASSA-PKCS1-v1_5",
-      publicKey,
-      signatureBytes,
-      new TextEncoder().encode(signingInput),
-    );
-
-    expect(valid).toBe(true);
-  });
-});
+const credentials = {
+  clientId: "oauth-client-id",
+  clientSecret: "oauth-client-secret",
+  refreshToken: "refresh-token",
+};
+const clock = { now: () => new Date("2026-09-24T05:00:00.000Z") };
 
 describe("createGoogleAuthClient", () => {
-  it("classifies token-exchange transport failures as retryable without retaining their message", async () => {
-    const transportMessage = "fetch failed while sending assertion";
-    const fetcher = vi.fn<Fetcher>().mockRejectedValue(new TypeError(transportMessage));
-    const client = createGoogleAuthClient(
-      JSON.stringify({ client_email: "svc@example.iam.gserviceaccount.com", private_key: privateKeyPem }),
-      { now: () => new Date("2026-09-01T05:00:00.000Z") },
-      fetcher,
+  it("exchanges a refresh token for an access token", async () => {
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(
+      new Response(JSON.stringify({ access_token: "access-token", expires_in: 3600 }), { status: 200 }),
     );
-    let error: unknown;
+    const client = createGoogleAuthClient(credentials, clock, fetcher);
 
+    await expect(client.getAccessToken()).resolves.toBe("access-token");
+    expect(fetcher.mock.calls[0]?.[0]).toBe("https://oauth2.googleapis.com/token");
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+    });
+    const body = new URLSearchParams(String(fetcher.mock.calls[0]?.[1]?.body));
+    expect(body.get("grant_type")).toBe("refresh_token");
+    expect(body.get("client_id")).toBe("oauth-client-id");
+    expect(body.get("client_secret")).toBe("oauth-client-secret");
+    expect(body.get("refresh_token")).toBe("refresh-token");
+  });
+
+  it("caches a token until one minute before expiry", async () => {
+    let now = new Date("2026-09-24T05:00:00.000Z");
+    const fetcher = vi.fn<Fetcher>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "first", expires_in: 3600 })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "second", expires_in: 3600 })));
+    const client = createGoogleAuthClient(credentials, { now: () => now }, fetcher);
+
+    expect(await client.getAccessToken()).toBe("first");
+    now = new Date("2026-09-24T05:58:59.000Z");
+    expect(await client.getAccessToken()).toBe("first");
+    now = new Date("2026-09-24T05:59:00.000Z");
+    expect(await client.getAccessToken()).toBe("second");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("sanitizes transport rejection", async () => {
+    const secret = "transport-error-with-oauth-client-secret";
+    const fetcher = vi.fn<Fetcher>().mockRejectedValue(new TypeError(secret));
+    const client = createGoogleAuthClient(credentials, clock, fetcher);
+
+    let error: unknown;
     try {
       await client.getAccessToken();
     } catch (caught) {
       error = caught;
     }
-
+    expect(error).toBeInstanceOf(OperationalError);
     expect(error).toMatchObject({
       code: "google_token_exchange_transport_failed",
       retryable: true,
       message: "Google token exchange transport failed",
     });
-    expect((error as Error).message).not.toContain(transportMessage);
+    expect((error as Error).message).not.toContain(secret);
   });
 
-  it("redacts malformed token-response text from the token exchange error", async () => {
-    const responseText = "malformed-token-response-must-not-leak";
-    const fetcher = vi.fn<Fetcher>().mockResolvedValue(new Response(responseText, { status: 200 }));
-    const client = createGoogleAuthClient(
-      JSON.stringify({ client_email: "svc@example.iam.gserviceaccount.com", private_key: privateKeyPem }),
-      { now: () => new Date("2026-09-01T05:00:00.000Z") },
-      fetcher,
-    );
-    let error: unknown;
+  it.each([
+    [429, true],
+    [503, true],
+    [400, false],
+  ])("reports HTTP %i errors without response content", async (status, retryable) => {
+    const secret = "response-with-oauth-client-secret-and-refresh-token";
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(new Response(secret, { status }));
+    const client = createGoogleAuthClient(credentials, clock, fetcher);
 
+    let error: unknown;
     try {
       await client.getAccessToken();
     } catch (caught) {
       error = caught;
     }
+    expect(error).toBeInstanceOf(OperationalError);
+    expect(error).toMatchObject({
+      code: "google_token_exchange_failed",
+      retryable,
+      message: `Google token exchange failed with status ${status}`,
+    });
+    expect((error as Error).message).not.toContain(secret);
+    expect((error as Error).message).not.toContain(credentials.clientSecret);
+    expect((error as Error).message).not.toContain(credentials.refreshToken);
+  });
 
+  it("treats invalid_grant as a non-retryable exchange error", async () => {
+    const responseBody = JSON.stringify({ error: "invalid_grant", error_description: credentials.refreshToken });
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(
+      new Response(responseBody, { status: 400 }),
+    );
+    const client = createGoogleAuthClient(credentials, clock, fetcher);
+
+    let error: unknown;
+    try {
+      await client.getAccessToken();
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(OperationalError);
+    expect(error).toMatchObject({
+      code: "google_token_exchange_failed",
+      retryable: false,
+      message: "Google token exchange failed with status 400",
+    });
+    expect((error as Error).message).not.toContain(responseBody);
+    expect((error as Error).message).not.toContain(credentials.clientSecret);
+    expect((error as Error).message).not.toContain(credentials.refreshToken);
+  });
+
+  it.each([
+    ["malformed JSON", "secret-malformed-response"],
+    ["missing access token", JSON.stringify({ expires_in: 3600, secret: credentials.clientSecret })],
+  ])("sanitizes %s token response", async (_case, responseBody) => {
+    const fetcher = vi.fn<Fetcher>().mockResolvedValue(new Response(responseBody, { status: 200 }));
+    const client = createGoogleAuthClient(credentials, clock, fetcher);
+
+    let error: unknown;
+    try {
+      await client.getAccessToken();
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(OperationalError);
     expect(error).toMatchObject({
       code: "google_token_response_invalid",
       retryable: false,
       message: "Google token response is invalid",
     });
-    expect((error as Error).message).not.toContain(responseText);
+    expect((error as Error).message).not.toContain(responseBody);
+    expect((error as Error).message).not.toContain(credentials.clientSecret);
+    expect((error as Error).message).not.toContain(credentials.refreshToken);
   });
-
-  it("exchanges the signed JWT for an access token and caches it until near expiry", async () => {
-    const clock = { now: () => new Date("2026-09-01T05:00:00.000Z") };
-    const fetcher = vi.fn<Fetcher>().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          access_token: "token-1",
-          expires_in: 3600,
-        }),
-        { status: 200 },
-      ),
-    );
-    const client = createGoogleAuthClient(
-      JSON.stringify({ client_email: "svc@example.iam.gserviceaccount.com", private_key: privateKeyPem }),
-      clock,
-      fetcher,
-    );
-
-    const first = await client.getAccessToken();
-    const second = await client.getAccessToken();
-
-    expect(first).toBe("token-1");
-    expect(second).toBe("token-1");
-    expect(fetcher).toHaveBeenCalledTimes(1);
-  });
-
-  it("refreshes the token once it expires", async () => {
-    let currentTime = new Date("2026-09-01T05:00:00.000Z");
-    const clock = { now: () => currentTime };
-    const fetcher = vi
-      .fn<Fetcher>()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "token-1", expires_in: 60 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "token-2", expires_in: 3600 }), { status: 200 }));
-    const client = createGoogleAuthClient(
-      JSON.stringify({ client_email: "svc@example.iam.gserviceaccount.com", private_key: privateKeyPem }),
-      clock,
-      fetcher,
-    );
-
-    const first = await client.getAccessToken();
-    currentTime = new Date("2026-09-01T05:02:00.000Z");
-    const second = await client.getAccessToken();
-
-    expect(first).toBe("token-1");
-    expect(second).toBe("token-2");
-    expect(fetcher).toHaveBeenCalledTimes(2);
-  });
-
-  it.each([
-    [429, true],
-    [400, false],
-  ])(
-    "classifies token endpoint status %i with retryable=%s",
-    async (status, retryable) => {
-      const clock = { now: () => new Date("2026-09-01T05:00:00.000Z") };
-      const fetcher = vi.fn<Fetcher>().mockResolvedValue(new Response(null, { status }));
-      const client = createGoogleAuthClient(
-        JSON.stringify({ client_email: "svc@example.iam.gserviceaccount.com", private_key: privateKeyPem }),
-        clock,
-        fetcher,
-      );
-
-      await expect(client.getAccessToken()).rejects.toMatchObject({
-        code: "google_token_exchange_failed",
-        retryable,
-      });
-    },
-  );
 });
