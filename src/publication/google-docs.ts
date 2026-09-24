@@ -102,8 +102,6 @@ export async function findTemporaryDocument(
   url.searchParams.set("q", `'${escapeLiteral(driveFolderId)}' in parents and trashed = false and appProperties has { key='publicationRunId' and value='${escapeLiteral(publicationRunId)}' }`);
   url.searchParams.set("fields", "files(id),nextPageToken");
   url.searchParams.set("pageSize", "2");
-  url.searchParams.set("supportsAllDrives", "true");
-  url.searchParams.set("includeItemsFromAllDrives", "true");
   let foundId: string | null = null;
   while (true) {
     const response = await request(fetcher, tokenProvider, url.toString(), "drive lookup");
@@ -127,7 +125,7 @@ export async function copyTemplate(
   publicationRunId: string,
   newTitle: string,
 ): Promise<string> {
-  const response = await request(fetcher, tokenProvider, `${DRIVE_BASE}/files/${encodeURIComponent(templateDocId)}/copy?supportsAllDrives=true`, "drive copy", {
+  const response = await request(fetcher, tokenProvider, `${DRIVE_BASE}/files/${encodeURIComponent(templateDocId)}/copy`, "drive copy", {
     method: "POST",
     body: JSON.stringify({ name: newTitle, parents: [driveFolderId], appProperties: { publicationRunId } }),
   });
@@ -257,7 +255,7 @@ export async function finalizeDocument(
   finalTitle: string,
 ): Promise<string> {
   const encodedId = encodeURIComponent(docId);
-  await request(fetcher, tokenProvider, `${DRIVE_BASE}/files/${encodedId}?supportsAllDrives=true`, "drive rename", {
+  await request(fetcher, tokenProvider, `${DRIVE_BASE}/files/${encodedId}`, "drive rename", {
     method: "PATCH",
     body: JSON.stringify({ name: finalTitle }),
   });
@@ -265,7 +263,7 @@ export async function finalizeDocument(
 }
 
 export async function deleteDocument(fetcher: Fetcher, tokenProvider: AccessTokenProvider, docId: string): Promise<void> {
-  await request(fetcher, tokenProvider, `${DRIVE_BASE}/files/${encodeURIComponent(docId)}?supportsAllDrives=true`, "drive delete", {
+  await request(fetcher, tokenProvider, `${DRIVE_BASE}/files/${encodeURIComponent(docId)}`, "drive delete", {
     method: "DELETE",
   }, true);
 }
