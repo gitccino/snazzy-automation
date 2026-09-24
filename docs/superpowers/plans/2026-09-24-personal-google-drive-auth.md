@@ -330,11 +330,11 @@ const picker = new google.picker.PickerBuilder()
 
 - [ ] **Step 6: Validate Picker selections against Drive metadata**
 
-Reject a Shared Drive folder, wrong file types, a template outside the selected folder, incomplete Drive metadata, and Google errors. Show the authorized email and selected IDs for confirmation. Display the refresh token once to the local terminal for immediate entry into `npx wrangler secret put GOOGLE_REFRESH_TOKEN --env staging` or the production equivalent. Never put the token in shell arguments, source files, persistent logs, or Worker responses.
+Reject a Shared Drive folder, wrong file types, a template outside the selected folder, incomplete Drive metadata, and Google errors. Show the authorized email and selected IDs for confirmation. Display the refresh token once to the local terminal for immediate entry into `npx wrangler secret put GOOGLE_REFRESH_TOKEN --env staging` or the production equivalent; enforce this once-only completion server-side even if duplicate selection submissions race. Never put the token in shell arguments, source files, persistent logs, or Worker responses.
 
 - [ ] **Step 7: Add the package command and complete utility tests**
 
-Add `google:drive-setup` to `package.json` as `tsx scripts/google-drive-oauth-setup.ts`. Read the named OAuth and Picker inputs from the process environment and require `--expected-owner <email>`. Cover `state` mismatch, API denial, wrong account confirmation, Shared Drive folder, wrong file types, template outside folder, and sanitized Google error responses.
+Add `google:drive-setup` to `package.json` as `tsx scripts/google-drive-oauth-setup.ts`. Read the named OAuth and Picker inputs from the process environment and require `--expected-owner <email>`. Cover `state` mismatch, API denial, wrong account confirmation, Shared Drive folder, wrong file types, template outside folder, sanitized Google error responses, and concurrent successful selection submissions producing the refresh token only once.
 
 - [ ] **Step 8: Run setup utility tests and typecheck**
 
@@ -358,6 +358,7 @@ git commit -m "feat(google): add owner OAuth setup utility"
 
 **Files:**
 
+- Modify: `docs/superpowers/specs/2026-09-24-personal-google-drive-auth-design.md`
 - Modify: `docs/superpowers/specs/2026-09-01-snazzy-automation-design.md`
 - Modify: `docs/superpowers/plans/2026-09-01-snazzy-hardening-handoff.md`
 - Modify: `docs/runbooks/deployment.md`
@@ -373,7 +374,7 @@ git commit -m "feat(google): add owner OAuth setup utility"
 
 - [ ] **Step 1: Update the current system design's Google assumptions**
 
-Change only Google ownership, credentials, scope, storage, and cost passages: one personal account owns My Drive output; collaborators use folder sharing; no Workspace subscription or service account is required; account storage/recovery are operator dependencies. Keep the rest of the approved design unchanged.
+Mark the user-approved personal Drive authorization spec `Approved` (it still says `Draft for user review`). In the system design, change only Google ownership, credentials, scope, storage, and cost passages: one personal account owns My Drive output; collaborators use folder sharing; no Workspace subscription or service account is required; account storage and recovery are operator dependencies. Keep all other approved design content unchanged.
 
 - [ ] **Step 2: Replace the publication setup contract**
 
@@ -405,7 +406,7 @@ Expected: no active provisioning instructions remain; any remaining matches are 
 - [ ] **Step 7: Commit documentation updates**
 
 ```bash
-git add docs/superpowers/specs/2026-09-01-snazzy-automation-design.md docs/superpowers/plans/2026-09-01-snazzy-hardening-handoff.md docs/runbooks/deployment.md docs/runbooks/publication-setup.md docs/runbooks/credential-rotation.md docs/runbooks/operations.md docs/runbooks/handoff-acceptance.md
+git add docs/superpowers/specs/2026-09-24-personal-google-drive-auth-design.md docs/superpowers/specs/2026-09-01-snazzy-automation-design.md docs/superpowers/plans/2026-09-01-snazzy-hardening-handoff.md docs/runbooks/deployment.md docs/runbooks/publication-setup.md docs/runbooks/credential-rotation.md docs/runbooks/operations.md docs/runbooks/handoff-acceptance.md
 git commit -m "docs(google): document personal Drive OAuth setup"
 ```
 
