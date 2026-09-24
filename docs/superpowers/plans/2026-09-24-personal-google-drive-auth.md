@@ -91,13 +91,11 @@ Implement the declared credentials type and send `grant_type=refresh_token` to `
 
 Cover transport rejection, 429, 5xx, ordinary 4xx, `invalid_grant`, malformed JSON, missing `access_token`, and cache refresh after expiry. For each failure assert the `OperationalError` code/retryability and assert the raw response body and credential values are absent from its message.
 
-- [ ] **Step 5: Run focused auth tests and typecheck**
+- [ ] **Step 5: Run focused auth tests**
 
 Run: `npx vitest run test/publication/google-auth.test.ts`
 
-Run: `npm run typecheck`
-
-Expected: PASS; all refresh failures are sanitized and the existing provider interface still typechecks.
+Expected: PASS; all refresh failures are sanitized. The repository-wide typecheck is intentionally deferred until Tasks 2 and 4 migrate the service and setup-probe consumers from the removed service-account API.
 
 - [ ] **Step 6: Commit the auth-provider increment**
 
@@ -152,13 +150,11 @@ googleOAuthCredentials: {
 }
 ```
 
-- [ ] **Step 4: Run publication tests and typecheck**
+- [ ] **Step 4: Run publication tests**
 
 Run: `npx vitest run test/publication/service.test.ts test/publication/workflow.test.ts test/acceptance/publication.test.ts`
 
-Run: `npm run typecheck`
-
-Expected: PASS with no `GOOGLE_SERVICE_ACCOUNT_JSON` reference under `src/` or `test/`.
+Expected: PASS. The setup-probe consumer still uses the old API until Task 4, so the repository-wide typecheck is deferred to Task 4; no `GOOGLE_SERVICE_ACCOUNT_JSON` references should remain in `src/publication` or the migrated publication fixtures.
 
 - [ ] **Step 5: Commit the runtime wiring increment**
 
