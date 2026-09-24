@@ -7,7 +7,7 @@ Run in order and retain evidence for each item. Production handoff is complete o
 - [x] Phase 0 report (`docs/feasibility/icloud-phase-0-report.md`) says `PASS` (final verdict at line 24).
 - [ ] `npm run check` passes on `main` with zero failing tests.
 - [ ] `npm run test:acceptance` passes on `main`.
-- [x] On the feature worktree, `npm run check` passed: 69 files, 697 tests.
+- [x] On the feature worktree, `npm run check` passed: 69 files, 714 tests.
 - [x] On the feature worktree, `npm run test:acceptance` passed: 6 files, 66 tests.
 - [x] `test/acceptance/retry-exhaustion.test.ts` passes in the feature worktree.
 - [x] `test/acceptance/import-batches.test.ts` passes in the feature worktree.
@@ -15,7 +15,7 @@ Run in order and retain evidence for each item. Production handoff is complete o
 - [x] `test/acceptance/line-acceptance.test.ts` passes in the feature worktree.
 - [x] `test/icloud/redaction-audit.test.ts` passes in the full feature-worktree suite.
 - [x] `test/acceptance/smoke.test.ts` passes in the feature worktree.
-- [ ] D1 migrations apply to a fresh local database using `npm run db:migrate:local`.
+- [x] D1 migrations applied to a fresh isolated local database with `wrangler d1 migrations apply snazzy-automation-local --local --persist-to <isolated-dir>`; `d1_migrations` lists all six files through `0005_usage_metrics.sql`.
 
 ## Customer environment verification
 
