@@ -7,7 +7,7 @@ import type { Env, Fetcher } from "../env";
 import { createICloudClient } from "../icloud/client";
 import { createAssetStore } from "../import/asset-store";
 import { COLLAGE_BASE_R2_KEY, COLLAGE_CANVAS_SIZE } from "../publication/collage";
-import { createGoogleAuthClient, parseServiceAccountJson } from "../publication/google-auth";
+import { createGoogleAuthClient } from "../publication/google-auth";
 import { verifyAdminBearer } from "../shared/admin-auth";
 import type { Clock } from "../shared/time";
 import { todayBangkokDate } from "../shared/time";
@@ -26,12 +26,6 @@ const DriveFileSchema = z.object({
   parents: z.array(z.string()).optional(),
   driveId: z.string().min(1).optional(),
   capabilities: z.object({ canAddChildren: z.boolean().optional(), canDeleteChildren: z.boolean().optional() }).optional(),
-});
-const DrivePermissionsSchema = z.object({
-  permissions: z.array(z.object({
-    emailAddress: z.string().email().optional(), role: z.string().optional(), type: z.string().optional(), deleted: z.boolean().optional(),
-  })).default([]),
-  nextPageToken: z.string().min(1).optional(),
 });
 const DriveCopySchema = z.object({ id: z.string().min(1) });
 const DriveFilesSchema = z.object({ files: z.array(DriveCopySchema).default([]), nextPageToken: z.string().min(1).optional() });
@@ -156,8 +150,11 @@ export async function sequenceState(env: Env): Promise<{ nextValue: number; boot
 
 export function createSetupExternalProbes(env: Env, fetcher: Fetcher, clock: Clock): SetupExternalProbes {
   const config = parseConfig(env.APP_CONFIG_JSON);
-  const account = parseServiceAccountJson(env.GOOGLE_SERVICE_ACCOUNT_JSON);
-  const googleAuth = createGoogleAuthClient(env.GOOGLE_SERVICE_ACCOUNT_JSON, clock, fetcher);
+  const googleAuth = createGoogleAuthClient({
+    clientId: env.GOOGLE_OAUTH_CLIENT_ID,
+    clientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
+    refreshToken: env.GOOGLE_REFRESH_TOKEN,
+  }, clock, fetcher);
   const imageSource = createICloudClient(env.ICLOUD_SHARED_ALBUM_TOKEN, fetcher);
 
   async function googleFetch(url: string, init?: RequestInit): Promise<Response> {
@@ -171,23 +168,8 @@ export function createSetupExternalProbes(env: Env, fetcher: Fetcher, clock: Clo
   }
   async function driveFile(id: string) {
     const url = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}`);
-    url.searchParams.set("supportsAllDrives", "true");
     url.searchParams.set("fields", "id,mimeType,parents,driveId,capabilities(canAddChildren,canDeleteChildren)");
     return DriveFileSchema.parse(await (await googleFetch(url.toString())).json());
-  }
-  async function isSharedDriveOrganizer(driveId: string): Promise<boolean> {
-    const url = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(driveId)}/permissions`);
-    url.searchParams.set("supportsAllDrives", "true");
-    url.searchParams.set("fields", "permissions(emailAddress,role,type,deleted),nextPageToken");
-    url.searchParams.set("pageSize", "100");
-    let pageToken: string | undefined;
-    do {
-      if (pageToken) url.searchParams.set("pageToken", pageToken);
-      const page = DrivePermissionsSchema.parse(await (await googleFetch(url.toString())).json());
-      if (page.permissions.some((permission) => permission.type === "user" && permission.emailAddress === account.client_email && permission.role === "organizer" && !permission.deleted)) return true;
-      pageToken = page.nextPageToken;
-    } while (pageToken);
-    return false;
   }
   async function deleteSetupCopies(folderId: string, probeId: string): Promise<void> {
     const url = new URL("https://www.googleapis.com/drive/v3/files");
@@ -195,14 +177,12 @@ export function createSetupExternalProbes(env: Env, fetcher: Fetcher, clock: Clo
     url.searchParams.set("q", `'${escapeLiteral(folderId)}' in parents and trashed = false and appProperties has { key='setupProbeId' and value='${probeId}' }`);
     url.searchParams.set("fields", "files(id),nextPageToken");
     url.searchParams.set("pageSize", "100");
-    url.searchParams.set("supportsAllDrives", "true");
-    url.searchParams.set("includeItemsFromAllDrives", "true");
     let pageToken: string | undefined;
     do {
       if (pageToken) url.searchParams.set("pageToken", pageToken);
       const page = DriveFilesSchema.parse(await (await googleFetch(url.toString())).json());
       for (const file of page.files) {
-        await googleFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}?supportsAllDrives=true`, { method: "DELETE" });
+        await googleFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}`, { method: "DELETE" });
       }
       pageToken = page.nextPageToken;
     } while (pageToken);
@@ -221,16 +201,13 @@ export function createSetupExternalProbes(env: Env, fetcher: Fetcher, clock: Clo
     async verifyGoogleTemplateAccess() {
       const folder = await driveFile(config.googleDriveFolderId);
       if (folder.mimeType !== "application/vnd.google-apps.folder") throw new Error("Configured Google folder is not a Drive folder");
-      if (!folder.driveId) throw new Error("Configured Google folder must be in a Shared Drive");
+      if (folder.driveId) throw new Error("Configured Google folder must be in My Drive");
       if (!folder.capabilities?.canAddChildren || !folder.capabilities.canDeleteChildren) {
-        throw new Error("Service account lacks Shared Drive create/delete permissions");
-      }
-      if (!(await isSharedDriveOrganizer(folder.driveId))) {
-        throw new Error("Service account is not an organizer member of the Shared Drive");
+        throw new Error("Authorized account lacks required My Drive folder capabilities");
       }
       const template = await driveFile(config.googleTemplateDocId);
       if (template.mimeType !== "application/vnd.google-apps.document" || !template.parents?.includes(folder.id)) {
-        throw new Error("Google template is not a document in the configured Shared Drive folder");
+        throw new Error("Google template is not a document in the configured My Drive folder");
       }
 
       const templateDocument = GoogleDocumentSchema.parse(await (await googleFetch(
@@ -241,7 +218,6 @@ export function createSetupExternalProbes(env: Env, fetcher: Fetcher, clock: Clo
       let copyId: string | undefined;
       try {
         const copyUrl = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(template.id)}/copy`);
-        copyUrl.searchParams.set("supportsAllDrives", "true");
         copyId = DriveCopySchema.parse(await (await googleFetch(copyUrl.toString(), {
           method: "POST", headers: { "content-type": "application/json" },
           body: JSON.stringify({ name: `setup-check-${probeId}`, parents: [folder.id], appProperties: { setupProbeId: probeId } }),
@@ -251,13 +227,12 @@ export function createSetupExternalProbes(env: Env, fetcher: Fetcher, clock: Clo
           body: JSON.stringify({ requests: [{ insertText: { location: { index: 1 }, text: "setup check" } }] }),
         });
         const renameUrl = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(copyId)}`);
-        renameUrl.searchParams.set("supportsAllDrives", "true");
         await googleFetch(renameUrl.toString(), {
           method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: `setup-checked-${crypto.randomUUID()}` }),
         });
       } finally {
         if (copyId) {
-          await googleFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(copyId)}?supportsAllDrives=true`, { method: "DELETE" });
+          await googleFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(copyId)}`, { method: "DELETE" });
         } else {
           await deleteSetupCopies(folder.id, probeId);
         }
@@ -346,7 +321,7 @@ export async function runSetupChecks(
     await probes.verifyLineGroupAccess();
     return "LINE token can access configured allowed group";
   }));
-  checks.push(await check("google_template_access", async () => { await probes.verifyGoogleTemplateAccess(); return "Google Shared Drive template rehearsal verified"; }));
+  checks.push(await check("google_template_access", async () => { await probes.verifyGoogleTemplateAccess(); return "Google My Drive template rehearsal verified"; }));
   checks.push(await check("claude_credential", async () => { await probes.verifyClaudeCredential(); return `Anthropic model ${config.claudeModel} verified`; }));
   checks.push(await check("icloud_phase_zero", async () => {
     const count = await probes.verifyICloudSnapshotAccess();

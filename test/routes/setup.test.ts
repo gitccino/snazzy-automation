@@ -1,4 +1,3 @@
-import { generateKeyPairSync } from "node:crypto";
 import jpeg from "jpeg-js";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -90,6 +89,9 @@ describe("setup routes", () => {
     ]);
     expect(report.ok).toBe(true);
     expect(report.checks.find((check) => check.name === "r2_access")).toMatchObject({ ok: true });
+    expect(report.checks.find((check) => check.name === "google_template_access")).toEqual({
+      name: "google_template_access", ok: true, detail: "Google My Drive template rehearsal verified",
+    });
   });
 
   it("fails r2_access when the required collage base object is missing", async () => {
@@ -214,14 +216,7 @@ describe("setup routes", () => {
     expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
   });
 
-  it("rejects a My Drive folder before template access", async () => {
-    const probes = createSetupExternalProbes(
-      googleEnv(), googleFetch({ driveId: null }), { now: () => new Date("2026-09-02T01:00:00.000Z") },
-    );
-    await expect(probes.verifyGoogleTemplateAccess()).rejects.toThrow("Shared Drive");
-  });
-
-  it("requires the Shared Drive permission rehearsal to copy, edit, rename, and delete", async () => {
+  it("rehearses copy, edit, rename, and permanent delete in My Drive using OAuth", async () => {
     const fetcher = googleFetch();
     const probes = createSetupExternalProbes(
       googleEnv(), fetcher, { now: () => new Date("2026-09-02T01:00:00.000Z") },
@@ -229,21 +224,32 @@ describe("setup routes", () => {
 
     await probes.verifyGoogleTemplateAccess();
 
+    const tokenCall = fetcher.mock.calls.find(([input]) => new URL(String(input)).hostname === "oauth2.googleapis.com");
+    expect(new URLSearchParams(String(tokenCall?.[1]?.body)).get("grant_type")).toBe("refresh_token");
+    expect(new URLSearchParams(String(tokenCall?.[1]?.body)).get("refresh_token")).toBe("test-refresh-token");
     const driveCalls = fetcher.mock.calls.filter(([input]) => String(input).includes("googleapis.com"));
-    expect(driveCalls.some(([input]) => String(input).includes("/copy?supportsAllDrives=true"))).toBe(true);
+    expect(driveCalls.some(([input]) => String(input).includes("/copy") && !new URL(String(input)).searchParams.has("supportsAllDrives"))).toBe(true);
     expect(driveCalls.some(([input, init]) => String(input).includes("docs.googleapis.com") && init?.method === "POST")).toBe(true);
-    expect(driveCalls.some(([input, init]) => String(input).includes("copied-doc?supportsAllDrives=true") && init?.method === "PATCH")).toBe(true);
-    expect(driveCalls.some(([input, init]) => String(input).includes("copied-doc?supportsAllDrives=true") && init?.method === "DELETE")).toBe(true);
-    const copy = driveCalls.find(([input, init]) => String(input).includes("/copy?") && init?.method === "POST");
+    expect(driveCalls.some(([input, init]) => new URL(String(input)).pathname.endsWith("/copied-doc") && init?.method === "PATCH")).toBe(true);
+    expect(driveCalls.some(([input, init]) => new URL(String(input)).pathname.endsWith("/copied-doc") && init?.method === "DELETE")).toBe(true);
+    expect(driveCalls.every(([input]) => !new URL(String(input)).searchParams.has("supportsAllDrives"))).toBe(true);
+    const copy = driveCalls.find(([input, init]) => String(input).includes("/copy") && init?.method === "POST");
     expect(JSON.parse(String(copy?.[1]?.body))).toMatchObject({ appProperties: { setupProbeId: expect.any(String) } });
   });
 
-  it("paginates Shared Drive membership until it finds the exact service account", async () => {
+  it.each([
+    ["a Shared Drive folder", { driveId: "drive-1" }, "My Drive"],
+    ["a non-folder", { folderMimeType: "application/vnd.google-apps.document" }, "Drive folder"],
+    ["missing capabilities", { capabilities: null }, "capabilities"],
+    ["missing add capability", { capabilities: { canAddChildren: false, canDeleteChildren: true } }, "capabilities"],
+    ["missing delete capability", { capabilities: { canAddChildren: true, canDeleteChildren: false } }, "capabilities"],
+    ["a non-document template", { templateMimeType: "application/pdf" }, "configured My Drive folder"],
+    ["an out-of-folder template", { templateParents: ["other-folder"] }, "configured My Drive folder"],
+  ])("rejects %s", async (_description, options, message) => {
     const probes = createSetupExternalProbes(
-      googleEnv(), googleFetch({ permissionOnSecondPage: true }), { now: () => new Date("2026-09-02T01:00:00.000Z") },
+      googleEnv(), googleFetch(options), { now: () => new Date("2026-09-02T01:00:00.000Z") },
     );
-
-    await expect(probes.verifyGoogleTemplateAccess()).resolves.toBeUndefined();
+    await expect(probes.verifyGoogleTemplateAccess()).rejects.toThrow(message);
   });
 
   it("rejects a template whose required marker is split across text runs", async () => {
@@ -254,6 +260,14 @@ describe("setup routes", () => {
     await expect(probes.verifyGoogleTemplateAccess()).rejects.toThrow("one text run");
   });
 
+  it("rejects a template missing a required marker", async () => {
+    const probes = createSetupExternalProbes(
+      googleEnv(), googleFetch({ missingMarker: true }), { now: () => new Date("2026-09-02T01:00:00.000Z") },
+    );
+
+    await expect(probes.verifyGoogleTemplateAccess()).rejects.toThrow("{{END_PRODUCTS}}");
+  });
+
   it("recovers a response-lost disposable copy through its appProperty", async () => {
     const fetcher = googleFetch({ copyResponseLost: true });
     const probes = createSetupExternalProbes(
@@ -261,29 +275,23 @@ describe("setup routes", () => {
     );
 
     await expect(probes.verifyGoogleTemplateAccess()).rejects.toThrow("response lost");
-    const copy = fetcher.mock.calls.find(([input, init]) => String(input).includes("/copy?") && init?.method === "POST");
+    const copy = fetcher.mock.calls.find(([input, init]) => String(input).includes("/copy") && init?.method === "POST");
     const probeId = JSON.parse(String(copy?.[1]?.body)).appProperties.setupProbeId;
     const lookup = fetcher.mock.calls.find(([input]) => new URL(String(input)).searchParams.has("q"));
     expect(new URL(String(lookup?.[0])).searchParams.get("q")).toBe(
       `'folder-1' in parents and trashed = false and appProperties has { key='setupProbeId' and value='${probeId}' }`,
     );
-    expect(fetcher.mock.calls.some(([input, init]) => String(input).includes("copied-doc?supportsAllDrives=true") && init?.method === "DELETE")).toBe(true);
+    expect(fetcher.mock.calls.some(([input, init]) => new URL(String(input)).pathname.endsWith("/copied-doc") && init?.method === "DELETE")).toBe(true);
+    expect(new URL(String(lookup?.[0])).searchParams.has("includeItemsFromAllDrives")).toBe(false);
   });
 });
 
 function googleEnv(): Env {
-  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" } });
-  return {
-    ...configuredEnv(),
-    GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({
-      client_email: "setup@example.iam.gserviceaccount.com", private_key: privateKey,
-    }),
-  };
+  return configuredEnv();
 }
 
-function googleFetch(options: { driveId?: string | null; permissionOnSecondPage?: boolean; splitMarker?: boolean; copyResponseLost?: boolean } = {}) {
-  const driveId = options.driveId === null ? undefined : options.driveId ?? "drive-1";
-  const { permissionOnSecondPage, splitMarker, copyResponseLost } = options;
+function googleFetch(options: { driveId?: string; folderMimeType?: string; capabilities?: { canAddChildren: boolean; canDeleteChildren: boolean } | null; templateMimeType?: string; templateParents?: string[]; splitMarker?: boolean; missingMarker?: boolean; copyResponseLost?: boolean } = {}) {
+  const { driveId, splitMarker, missingMarker, copyResponseLost } = options;
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     if (url.hostname === "oauth2.googleapis.com") return Response.json({ access_token: "token", expires_in: 3600 });
@@ -291,23 +299,15 @@ function googleFetch(options: { driveId?: string | null; permissionOnSecondPage?
       if (init?.method === "POST") return Response.json({});
       return Response.json({ body: { content: [{ paragraph: { elements: splitMarker
         ? [{ startIndex: 1, textRun: { content: "{{PUBLICATION_DATE}} {{PRO" } }, { startIndex: 30, textRun: { content: "DUCTS}} {{END_PRODUCTS}}" } }]
-        : [{ startIndex: 1, textRun: { content: "{{PUBLICATION_DATE}} {{PRODUCTS}} {{END_PRODUCTS}}" } }],
+        : [{ startIndex: 1, textRun: { content: missingMarker ? "{{PUBLICATION_DATE}} {{PRODUCTS}}" : "{{PUBLICATION_DATE}} {{PRODUCTS}} {{END_PRODUCTS}}" } }],
       } }] } });
     }
     if (url.pathname === "/drive/v3/files/folder-1") return Response.json({
-      id: "folder-1", mimeType: "application/vnd.google-apps.folder", ...(driveId ? { driveId } : {}),
-      capabilities: { canAddChildren: true, canDeleteChildren: true },
+      id: "folder-1", mimeType: options.folderMimeType ?? "application/vnd.google-apps.folder", ...(driveId ? { driveId } : {}),
+      ...(options.capabilities === null ? {} : { capabilities: options.capabilities ?? { canAddChildren: true, canDeleteChildren: true } }),
     });
-    if (url.pathname === "/drive/v3/files/drive-1/permissions") {
-      if (permissionOnSecondPage && !url.searchParams.get("pageToken")) return Response.json({
-        permissions: [{ emailAddress: "other@example.iam.gserviceaccount.com", role: "organizer", type: "user", deleted: false }], nextPageToken: "page-2",
-      });
-      return Response.json({ permissions: [{
-        emailAddress: "setup@example.iam.gserviceaccount.com", role: "organizer", type: "user", deleted: false,
-      }] });
-    }
     if (url.pathname === "/drive/v3/files/template-1") return Response.json({
-      id: "template-1", mimeType: "application/vnd.google-apps.document", parents: ["folder-1"],
+      id: "template-1", mimeType: options.templateMimeType ?? "application/vnd.google-apps.document", parents: options.templateParents ?? ["folder-1"],
     });
     if (url.pathname === "/drive/v3/files/template-1/copy" && init?.method === "POST") {
       if (copyResponseLost) throw new Error("response lost");
