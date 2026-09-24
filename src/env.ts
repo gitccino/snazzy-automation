@@ -11,7 +11,9 @@ export interface Env {
   IMPORT_WORKFLOW: Workflow<{ importRunId: string; sourceAlbumId: string; trigger: "cron" | "line" | "admin" }>;
   PUBLICATION_WORKFLOW: Workflow<PublicationWorkflowParams>;
   AIRTABLE_TOKEN: string;
-  GOOGLE_SERVICE_ACCOUNT_JSON: string;
+  GOOGLE_OAUTH_CLIENT_ID: string;
+  GOOGLE_OAUTH_CLIENT_SECRET: string;
+  GOOGLE_REFRESH_TOKEN: string;
   ANTHROPIC_API_KEY: string;
   LINE_CHANNEL_ACCESS_TOKEN: string;
   LINE_CHANNEL_SECRET: string;

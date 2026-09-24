@@ -5,7 +5,9 @@ export interface TestEnvConfig {
   ICLOUD_SHARED_ALBUM_TOKEN: string;
   AIRTABLE_TOKEN: string;
   LINE_CHANNEL_ACCESS_TOKEN: string;
-  GOOGLE_SERVICE_ACCOUNT_JSON: string;
+  GOOGLE_OAUTH_CLIENT_ID: string;
+  GOOGLE_OAUTH_CLIENT_SECRET: string;
+  GOOGLE_REFRESH_TOKEN: string;
   ANTHROPIC_API_KEY: string;
   ASSET_URL_SIGNING_SECRET: string;
   ADMIN_ROUTE_TOKEN: string;
@@ -17,10 +19,9 @@ export function createTestEnv(overrides: Partial<TestEnvConfig> = {}): TestEnvCo
     ICLOUD_SHARED_ALBUM_TOKEN: "TEST-TOKEN-ABC123",
     AIRTABLE_TOKEN: "test-airtable-token",
     LINE_CHANNEL_ACCESS_TOKEN: "test-line-token",
-    GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({
-      client_email: "publication-test@example.iam.gserviceaccount.com",
-      private_key: "test-private-key",
-    }),
+    GOOGLE_OAUTH_CLIENT_ID: "test-oauth-client-id",
+    GOOGLE_OAUTH_CLIENT_SECRET: "test-oauth-client-secret",
+    GOOGLE_REFRESH_TOKEN: "test-refresh-token",
     ANTHROPIC_API_KEY: "test-anthropic-key",
     ASSET_URL_SIGNING_SECRET: "test-signing-secret",
     ADMIN_ROUTE_TOKEN: "test-admin-route-token",

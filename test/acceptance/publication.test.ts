@@ -1,6 +1,5 @@
-import { generateKeyPairSync } from "node:crypto";
 import type { WorkflowStep } from "cloudflare:workers";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseConfig } from "../../src/config";
 import type { Env } from "../../src/env";
 import {
@@ -26,15 +25,6 @@ const configEnv = createTestEnv();
 const config = parseConfig(configEnv.APP_CONFIG_JSON);
 const suffix = "\nสนใจทักแชต\n#Snazzy\n";
 const template = `หัวกระดาษ {{PUBLICATION_DATE}}\n{{PRODUCTS}}${suffix}{{END_PRODUCTS}}\nท้ายกระดาษ\n`;
-let privateKey = "";
-
-beforeAll(() => {
-  privateKey = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-    publicKeyEncoding: { type: "spki", format: "pem" },
-  }).privateKey;
-});
 
 function product(productId: string): PublicationProduct {
   return {
@@ -218,7 +208,11 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
     db: env.DB, bucket: image.bucket, images: image.images,
     assets: createAssetStore(image.bucket, { signingSecret: "test-secret", publicBaseUrl: config.publicBaseUrl }, clock),
     fetcher, clock, config, airtableToken: "airtable-token",
-    googleServiceAccountJson: JSON.stringify({ client_email: "svc@example.com", private_key: privateKey }),
+    googleOAuthCredentials: {
+      clientId: "test-oauth-client-id",
+      clientSecret: "test-oauth-client-secret",
+      refreshToken: "test-refresh-token",
+    },
     anthropic: { messages: { countTokens, create } } as unknown as PublicationServiceDeps["anthropic"],
     notify,
   };

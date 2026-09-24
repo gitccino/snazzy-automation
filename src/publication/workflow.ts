@@ -37,7 +37,11 @@ function depsFor(env: Env, clock: Clock): PublicationServiceDeps {
     clock,
     config,
     airtableToken: env.AIRTABLE_TOKEN,
-    googleServiceAccountJson: env.GOOGLE_SERVICE_ACCOUNT_JSON,
+    googleOAuthCredentials: {
+      clientId: env.GOOGLE_OAUTH_CLIENT_ID,
+      clientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
+      refreshToken: env.GOOGLE_REFRESH_TOKEN,
+    },
     notify: (text) => line.pushMessage(config.lineAllowedGroupId, text),
   };
 }

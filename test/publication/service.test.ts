@@ -1,5 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { generateKeyPairSync } from "node:crypto";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { testEnv } from "../helpers/env";
 import {
   ensureTemporaryDocument, failPublicationAfterExhaustion, fillAndVerifyDocument,
@@ -14,14 +13,6 @@ import { collageInputFingerprint } from "../../src/publication/collage";
 import { captionInputFingerprint } from "../../src/publication/captions";
 
 const env = testEnv();
-let privateKey = "";
-beforeAll(() => {
-  privateKey = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-    publicKeyEncoding: { type: "spki", format: "pem" },
-  }).privateKey;
-});
 const clock = { now: () => new Date("2026-09-01T17:30:00.000Z") };
 const drafts: [string, string, string] = ["หนึ่ง", "สอง", "สาม"];
 const product: PublicationProduct = {
@@ -53,7 +44,11 @@ function baseDeps(overrides: Partial<PublicationServiceDeps> = {}): PublicationS
       claudeRequestInputTokenLimit: 150_000, publicBaseUrl: "https://worker.example", timeZone: "Asia/Bangkok",
     } as PublicationServiceDeps["config"],
     airtableToken: "airtable-token",
-    googleServiceAccountJson: JSON.stringify({ client_email: "svc@example.com", private_key: privateKey }),
+    googleOAuthCredentials: {
+      clientId: "test-oauth-client-id",
+      clientSecret: "test-oauth-client-secret",
+      refreshToken: "test-refresh-token",
+    },
     notify: vi.fn().mockResolvedValue(undefined), ...overrides,
   };
 }
