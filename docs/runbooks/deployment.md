@@ -1,4 +1,4 @@
-# Deployment Runbook
+# Deployment Runbook9
 
 Deploy staging completely before creating or changing production. This runbook uses only customer-owned Cloudflare, Airtable, Google, LINE, Anthropic, and iCloud resources. Do not place real D1 IDs or credentials in committed files until Cloudflare has created the resources.
 
@@ -6,10 +6,10 @@ Deploy staging completely before creating or changing production. This runbook u
 
 - Customer Cloudflare account with the Workers Paid plan ($5/month minimum), and `npx wrangler login` completed against that account.
 - Customer-owned Airtable base with `Products` and `Publication Runs` tables that match the required schema.
-- Customer-owned Google Cloud service account with the Docs and Drive APIs enabled. Add its `client_email` as an organizer to a dedicated customer-owned Shared Drive; the configured folder must be in that Shared Drive. Do not use domain-wide delegation or user impersonation.
+- Customer-owned Google Cloud project with Drive, Docs, and Picker APIs enabled, OAuth consent **In production**, and a Web OAuth client. The owner needs account recovery access and available My Drive storage. Prepare separate staging and production folders and templates; see [publication setup](publication-setup.md).
 - Customer-owned LINE Official Account and Messaging API channel with an admin group created.
 - Printed `SNAZZY_PRODUCT_START_V1` QR marker cards (`npm run generate-marker`).
-- Review the [publication setup contract](publication-setup.md). The authenticated setup check must prove the service account can copy, edit, rename, and permanently delete a disposable template copy; readable access alone is insufficient.
+- Review the [publication setup contract](publication-setup.md). The authenticated setup check must prove the owner's OAuth grant can copy, edit, rename, and permanently delete a disposable template copy; readable access alone is insufficient.
 
 ## Staging deployment
 
@@ -38,7 +38,7 @@ Deploy staging completely before creating or changing production. This runbook u
 
    Expect `0001_initial.sql`, `0002_import_run_terminal_details.sql`, `0003_line_inventory.sql`, `0003_publication.sql`, `0004_line_recovery.sql`, and `0005_usage_metrics.sql`. The publication migration establishes the date claim and per-output input fingerprints.
 
-3. Install every staging secret. Keep the LINE secret and admin token in this shell for the smoke commands. These prompts work in zsh and do not use Bash-only `read -p`.
+3. In an interactive local terminal, set `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_PICKER_API_KEY`, and `GOOGLE_CLOUD_PROJECT_NUMBER`. Run `npm run google:drive-setup -- --expected-owner <owner-email>` and select the staging My Drive folder and template. Enter `GOOGLE_OAUTH_CLIENT_ID` as a non-secret value in `env.staging.vars` in `wrangler.jsonc` before deploying. Use the printed staging IDs at step 5 and enter the refresh token only through Wrangler's interactive prompt below. Install every staging secret. Keep the LINE secret and admin token in this shell for the smoke commands. These prompts work in zsh and do not use Bash-only `read -p`.
 
    ```bash
    npx wrangler secret put AIRTABLE_TOKEN --env staging
@@ -51,7 +51,8 @@ Deploy staging completely before creating or changing production. This runbook u
    export LINE_CHANNEL_SECRET
 
    npx wrangler secret put LINE_CHANNEL_ACCESS_TOKEN --env staging
-   npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON --env staging
+   npx wrangler secret put GOOGLE_OAUTH_CLIENT_SECRET --env staging
+   npx wrangler secret put GOOGLE_REFRESH_TOKEN --env staging
    npx wrangler secret put ANTHROPIC_API_KEY --env staging
    npx wrangler secret put ICLOUD_SHARED_ALBUM_TOKEN --env staging
 
@@ -78,7 +79,7 @@ Deploy staging completely before creating or changing production. This runbook u
    export WORKER_BASE_URL
    ```
 
-5. Read the customer-owned non-secret IDs and first import cutoff into the current shell:
+5. Read the customer-owned non-secret IDs and first import cutoff into the current shell. For the Google IDs, use the values printed by the staging setup utility:
 
    ```bash
    printf '%s' 'Airtable base ID: '
@@ -179,7 +180,7 @@ Deploy staging completely before creating or changing production. This runbook u
    '
    ```
 
-   Each assertion exits nonzero unless the missing and wrong bearer probes return exactly HTTP 401, the authorized request succeeds, and all eleven checks are `ok: true`: `d1_migrations`, `r2_access`, `asset_delivery`, `images_binding`, `airtable_schema`, `sequence_consistency`, `line_webhook_config`, `google_template_access`, `claude_credential`, `icloud_phase_zero`, and `cron_timezone`. `r2_access` remotely verifies the private `assets/collage-base-1080.jpg` asset as a 1080×1080 JPEG. `images_binding` is a hard publication gate: it runs a real Cloudflare Images JPEG transform of that remote base asset and validates the resulting JPEG. `google_template_access` performs the Shared Drive membership and disposable copy/edit/rename/delete rehearsal. The authorized endpoint returns HTTP 503 when any one of the eleven checks is false. Stop on any failed check; separately confirm `docs/feasibility/icloud-phase-0-report.md` says `PASS` before enabling publication traffic.
+   Each assertion exits nonzero unless the missing and wrong bearer probes return exactly HTTP 401, the authorized request succeeds, and all eleven checks are `ok: true`: `d1_migrations`, `r2_access`, `asset_delivery`, `images_binding`, `airtable_schema`, `sequence_consistency`, `line_webhook_config`, `google_template_access`, `claude_credential`, `icloud_phase_zero`, and `cron_timezone`. `r2_access` remotely verifies the private `assets/collage-base-1080.jpg` asset as a 1080×1080 JPEG. `images_binding` is a hard publication gate: it runs a real Cloudflare Images JPEG transform of that remote base asset and validates the resulting JPEG. `google_template_access` performs the My Drive folder/template and disposable copy/read/edit/rename/delete rehearsal using the owner's `drive.file` grant. The authorized endpoint returns HTTP 503 when any one of the eleven checks is false. Stop on any failed check; separately confirm `docs/feasibility/icloud-phase-0-report.md` says `PASS` before enabling publication traffic.
 
 9. Register `$WORKER_BASE_URL/line/webhook` in the LINE Developers console for the staging channel.
 
@@ -213,7 +214,7 @@ Deploy staging completely before creating or changing production. This runbook u
     npx wrangler deploy --dry-run --env production
     ```
 
-    Then repeat staging steps 2–10 with each `--env staging` changed to `--env production`, `npm run db:migrate:staging` changed to `npm run db:migrate:production`, and `npm run deploy:staging` changed to `npm run deploy:production`. At step 4, set `WORKER_BASE_URL` to the exact production Worker origin. Use production customer IDs and secrets. Commit both real D1 IDs in `wrangler.jsonc` after their dry-run validations. Those customer-owned resource IDs are not secrets.
+    Then repeat staging steps 2–10 with each `--env staging` changed to `--env production`, `npm run db:migrate:staging` changed to `npm run db:migrate:production`, and `npm run deploy:staging` changed to `npm run deploy:production`. At step 3, rerun owner authorization for the separate production folder and template, and set `GOOGLE_OAUTH_CLIENT_ID` in `env.production.vars` before deployment. At step 4, set `WORKER_BASE_URL` to the exact production Worker origin. Use production customer IDs and secrets. Commit both real D1 IDs in `wrangler.jsonc` after their dry-run validations. Those customer-owned resource IDs are not secrets.
 
 ## Rollback
 

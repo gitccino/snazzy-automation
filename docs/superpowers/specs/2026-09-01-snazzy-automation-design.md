@@ -40,7 +40,7 @@ Architecture diagrams:
 8. Generate one Google Doc per publication date after all linked products are complete.
 9. Generate one 4-in-1 image and three editable Thai captions per product.
 10. Support LINE commands for search, sold-out handling, retry triggers, help, and safe revert.
-11. Keep monthly infrastructure and AI spend under ฿1,000, excluding Airtable, Google Workspace, and LINE plan fees.
+11. Keep monthly infrastructure and AI spend under ฿1,000, excluding Airtable and LINE plan fees; the personal Google account must have available Drive storage.
 12. Make customer handoff reproducible through configuration, migrations, and a setup runbook.
 
 ## 3. Non-goals
@@ -72,7 +72,7 @@ Architecture diagrams:
 - Original photos remain in R2 indefinitely.
 - Airtable paid plan and existing base are available.
 - Google Docs is required initially but may be replaced later.
-- Customer owns a dedicated deployment and all service accounts.
+- Customer owns a dedicated deployment and all provider accounts. One personal Google account owns the My Drive publication output and may share its folder with collaborators.
 - All members of the allowlisted LINE admin group may run commands.
 
 ## 5. System boundaries
@@ -553,7 +553,7 @@ No message includes secrets, public-album token, signed R2 URL, or raw stack tra
 - Secrets use Cloudflare secret storage.
 - R2 bucket stays private.
 - Airtable receives temporary signed URLs long enough for attachment ingestion.
-- Google service account accesses only dedicated publication folder.
+- Google OAuth uses `drive.file` for the owner's Picker-selected My Drive folder, template, and app-created documents. The owner maintains account recovery and available Drive storage.
 - LINE signatures are mandatory.
 - Only allowlisted group ID is accepted.
 - Public iCloud link is treated as sensitive but cannot provide real authentication.
@@ -568,7 +568,7 @@ No message includes secrets, public-album token, signed R2 URL, or raw stack tra
 - `staging`
 - `production`
 
-Each environment has separate D1 database, R2 namespace/prefix, cron configuration, LINE group/channel, Airtable base or test tables, and Google output folder.
+Each environment has a separate D1 database, R2 namespace/prefix, cron configuration, LINE group/channel, Airtable base or test tables, and My Drive output folder and template. The same personal Google account may own both folders.
 
 ### Secrets
 
@@ -576,7 +576,8 @@ Each environment has separate D1 database, R2 namespace/prefix, cron configurati
 AIRTABLE_TOKEN
 LINE_CHANNEL_SECRET
 LINE_CHANNEL_ACCESS_TOKEN
-GOOGLE_SERVICE_ACCOUNT_JSON
+GOOGLE_OAUTH_CLIENT_SECRET
+GOOGLE_REFRESH_TOKEN
 ANTHROPIC_API_KEY
 ICLOUD_SHARED_ALBUM_TOKEN
 ASSET_URL_SIGNING_SECRET
@@ -592,6 +593,7 @@ AIRTABLE_PUBLICATION_RUNS_TABLE_ID
 LINE_ALLOWED_GROUP_ID
 GOOGLE_DRIVE_FOLDER_ID
 GOOGLE_TEMPLATE_DOC_ID
+GOOGLE_OAUTH_CLIENT_ID
 PUBLIC_BASE_URL
 TIME_ZONE=Asia/Bangkok
 IMPORT_CRON
@@ -620,7 +622,7 @@ A setup command must verify:
 - Airtable base/table/field mappings
 - one-time Product ID bootstrap or ongoing D1/Airtable sequence consistency
 - LINE webhook signature and group ID
-- Google template/folder permissions, including a Shared Drive folder and explicit service-account membership with copy/edit/rename/delete access; direct service-account auth only (no impersonation), as detailed in [publication setup](../../runbooks/publication-setup.md)
+- Google owner OAuth authorization and Picker-selected My Drive template/folder access, including a disposable copy/read/edit/rename/delete rehearsal, as detailed in [publication setup](../../runbooks/publication-setup.md)
 - Claude API credential
 - iCloud connector Phase 0 status
 - cron timezone and cutoff
@@ -658,7 +660,7 @@ Expected at roughly 22–24 products/day:
 - Claude Opus 5 captions: approximately $5–10/month depending caption length
 - R2: 10 GB free, then $0.015/GB-month; indefinite storage likely reaches roughly $1–5/month by end of year one if average image is approximately 2 MB
 
-Expected total: roughly $11–22/month, approximately ฿400–800 depending exchange rate, excluding Airtable, Google Workspace, and LINE plan fees.
+Expected total: roughly $11–22/month, approximately ฿400–800 depending exchange rate, excluding Airtable and LINE plan fees. A personal Google account needs available Drive storage; no Workspace subscription is required.
 
 Cost controls:
 

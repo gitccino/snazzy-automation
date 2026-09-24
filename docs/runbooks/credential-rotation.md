@@ -11,7 +11,8 @@ Rotate customer-owned production secrets without a code change. Obtain the repla
    npx wrangler secret put AIRTABLE_TOKEN --env production
    npx wrangler secret put LINE_CHANNEL_SECRET --env production
    npx wrangler secret put LINE_CHANNEL_ACCESS_TOKEN --env production
-   npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON --env production
+   npx wrangler secret put GOOGLE_OAUTH_CLIENT_SECRET --env production
+   npx wrangler secret put GOOGLE_REFRESH_TOKEN --env production
    npx wrangler secret put ANTHROPIC_API_KEY --env production
    npx wrangler secret put ICLOUD_SHARED_ALBUM_TOKEN --env production
    npx wrangler secret put ASSET_URL_SIGNING_SECRET --env production
@@ -41,7 +42,8 @@ Rotate customer-owned production secrets without a code change. Obtain the repla
 | `AIRTABLE_TOKEN` | Replace the customer personal access token with `data.records:read`, `data.records:write`, and `schema.bases:read` on the correct base. |
 | `LINE_CHANNEL_SECRET` | Regenerate in the same LINE Messaging API channel. Test a real signed webhook; setup checks only presence. |
 | `LINE_CHANNEL_ACCESS_TOKEN` | Issue for the same LINE channel; verify admin-group delivery as well as setup group access. |
-| `GOOGLE_SERVICE_ACCOUNT_JSON` | Add a key to the *existing* service account in Google Cloud IAM, preserving its Shared Drive permissions; disable the old key after verification. |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | Rotate the Web OAuth client secret in Google Cloud, update the Worker secret, and confirm `google_template_access` before retiring the old secret. Keep `GOOGLE_OAUTH_CLIENT_ID` as the matching non-secret environment variable. |
+| `GOOGLE_REFRESH_TOKEN` | The owner reruns `npm run google:drive-setup -- --expected-owner <owner-email>` in an interactive terminal and reselects that environment's My Drive folder/template through Picker. Enter the new token through Wrangler's prompt, verify `google_template_access` and a controlled publication, then revoke the old grant if it still works. For an invalid, expired, or revoked token, pause Google publication until reconnect succeeds; a rollback to the old token cannot restore access. The OAuth consent screen must be **In production** for unattended use; Testing tokens may expire after seven days. |
 | `ANTHROPIC_API_KEY` | Create a key in the same Anthropic workspace and verify `claude_credential`. |
 | `ICLOUD_SHARED_ALBUM_TOKEN` | Use [album rotation](album-rotation.md) for a new album and its cutoff. A new token for the same album changes its source ID and risks duplicate imports. |
 | `ASSET_URL_SIGNING_SECRET` | Changing it invalidates outstanding signed asset URLs immediately; there is no dual-key grace period. Allow at least 15 minutes after the last old URL was issued before rotation, or schedule a window when old links may expire. The longest current signed URL TTL is 900 seconds. |

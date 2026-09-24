@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-01-snazzy-automation-design.md`
 
+**Current Google operator guidance:** The personal Drive OAuth design and [deployment](../../runbooks/deployment.md), [publication setup](../../runbooks/publication-setup.md), and [credential rotation](../../runbooks/credential-rotation.md) runbooks supersede all service-account and Shared Drive instructions below. The Task 7 setup implementation excerpts and Task 11 and 14 runbook drafts are retained as historical records of completed work; do not execute their Google commands or use them for provisioning. Use `npm run google:drive-setup -- --expected-owner <owner-email>` for each environment, then install `GOOGLE_OAUTH_CLIENT_SECRET` and `GOOGLE_REFRESH_TOKEN` as Worker secrets and bind `GOOGLE_OAUTH_CLIENT_ID` as a non-secret variable.
+
 ## Global Constraints
 
 - Dedicated customer-owned staging and production deployments.
@@ -21,7 +23,7 @@
 - Already-Out Product is never overwritten.
 - Only allowlisted LINE group may execute commands; every LINE webhook signature is verified.
 - Never log credentials, public-album token/link, signed URLs, Product images, or raw external response bodies containing them.
-- Infrastructure and AI spend target remains under ฿1,000/month, excluding Airtable, Google Workspace, and LINE plan fees.
+- Infrastructure and AI spend target remains under ฿1,000/month, excluding Airtable and LINE plan fees. The personal Google account needs available Drive storage.
 - Use native `fetch` routing; do not add a web framework.
 - Use official `@anthropic-ai/sdk`; do not call Claude through raw HTTP.
 - Cloudflare compatibility date must be `2026-09-01` or later and include `nodejs_compat`.
@@ -1332,6 +1334,8 @@ git commit -m "test: bind publication cleanup to Workflow retry budget"
 
 ---
 ### Task 7: Setup validator route and CLI script
+
+**Historical Google implementation record:** The service-account and Shared Drive probe instructions and code examples in this task are superseded. Current validation uses owner OAuth, a Picker-selected My Drive folder/template, and a disposable copy/read/edit/rename/delete rehearsal; see [publication setup](../../runbooks/publication-setup.md).
 
 **Files:**
 - Create: `src/routes/setup.ts` (validator and one-time sequence bootstrap)
@@ -2811,6 +2815,8 @@ git commit -m "feat: add staging and production wrangler environments with full 
 
 ### Task 11: Deployment runbook
 
+**Historical runbook draft:** Do not execute the Google provisioning commands in the example below. Follow the current [deployment runbook](../../runbooks/deployment.md) and [publication setup](../../runbooks/publication-setup.md) for personal-account OAuth. The Images binding and base-canvas requirements still apply.
+
 Carry forward the [publication deployment contract](../../runbooks/publication-setup.md): verify Shared Drive membership and a disposable copy/edit/rename/delete rehearsal, provide Images bindings in each named environment, and upload and remotely verify the private collage base asset before publication traffic.
 
 **Files:**
@@ -3171,6 +3177,8 @@ git commit -m "docs: add iCloud Shared Album rotation runbook"
 ---
 
 ### Task 14: Credential rotation runbook
+
+**Historical runbook draft:** The Google service-account key commands below are superseded. Follow the current [credential rotation runbook](../../runbooks/credential-rotation.md) for OAuth client-secret and refresh-token rotation.
 
 **Files:**
 - Create: `docs/runbooks/credential-rotation.md`

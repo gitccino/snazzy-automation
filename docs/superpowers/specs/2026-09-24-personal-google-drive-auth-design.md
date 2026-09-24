@@ -1,7 +1,7 @@
 # Personal Google Drive Authorization Design
 
 **Date:** 2026-09-24
-**Status:** Draft for user review
+**Status:** Approved
 **Supersedes:** Google Drive account and storage assumptions only in [the system design](2026-09-01-snazzy-automation-design.md) and related deployment documentation. All other approved product and workflow behavior remains unchanged.
 
 ## 1. Decision
@@ -115,7 +115,7 @@ Before resuming deployment:
 5. Configure production with its separate folder/template and environment-scoped OAuth secrets; run readiness checks before enabling publication traffic.
 6. Remove the old service-account credential only after the new staging and production paths have passed their acceptance checks.
 
-Do not deploy application code or enable publication using the old Shared Drive assumptions while this design is pending review.
+Do not enable publication using the old Shared Drive assumptions.
 
 ## 9. Acceptance criteria
 

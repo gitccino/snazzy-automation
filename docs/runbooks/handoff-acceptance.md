@@ -24,6 +24,10 @@ Run in order and retain evidence for each item. Production handoff is complete o
 - [ ] Missing and incorrect bearer tokens return HTTP 401 on `/setup` and `/usage` before dependency access.
 - [ ] Authenticated staging `GET /setup` returns `"ok": true` and all eleven checks pass.
 - [ ] Authenticated production `GET /setup` returns `"ok": true` and all eleven checks pass.
+- [ ] Customer owner confirms account recovery access and available My Drive storage; staging and production use separate Picker-selected folders and templates, with `GOOGLE_OAUTH_CLIENT_ID` bound per environment and `GOOGLE_OAUTH_CLIENT_SECRET`/`GOOGLE_REFRESH_TOKEN` stored only as Worker secrets.
+- [ ] Google consent screen is **In production** with `drive.file`; any Google verification requirement is resolved. The owner completes `npm run google:drive-setup -- --expected-owner <owner-email>` for each environment and retains the refresh tokens only in the customer secret store.
+- [ ] `google_template_access` passes the disposable copy/read/edit/rename/delete rehearsal in both environments. A staging generated document is owned by the personal account, and a collaborator with folder access can open it without authorizing the app.
+- [ ] Owner rehearses refresh-token reconnect/rotation using [credential rotation](credential-rotation.md), including an invalid or revoked grant and recovery before resuming Google publication.
 - [ ] Staging `npm run smoke` prints `SMOKE TEST PASSED` and accepts the real LINE HMAC.
 - [ ] Production `npm run smoke` prints `SMOKE TEST PASSED` and accepts the real LINE HMAC.
 - [ ] Fresh-account rehearsal proves deployment from `docs/runbooks/deployment.md` using customer-owned resources.
