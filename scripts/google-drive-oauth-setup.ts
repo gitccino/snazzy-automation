@@ -108,6 +108,20 @@ export async function fetchAndValidateSelection(folderId: string, templateId: st
   return validatePickerSelection(folder, template);
 }
 
+export function createSelectionCompletion(
+  accessToken: string, fetcher: Fetcher,
+  onComplete: (ids: { folderId: string; templateId: string }) => void,
+) {
+  let completed = false;
+  return async (folderId: string, templateId: string) => {
+    const ids = await fetchAndValidateSelection(folderId, templateId, accessToken, fetcher);
+    if (completed) return null;
+    completed = true;
+    onComplete(ids);
+    return ids;
+  };
+}
+
 export function pickerPage(projectNumber: string, apiKey: string): string {
   const literal = (value: string) => JSON.stringify(value).replaceAll("<", "\\u003c");
   return `<!doctype html>
@@ -189,6 +203,7 @@ async function main() {
   const auth = buildAuthorization(clientId, callbackUrl);
   const sessionCookie = Buffer.from(randomBytes(32)).toString("base64url");
   let tokens: Awaited<ReturnType<typeof completeOAuthCallback>> | undefined;
+  let completeSelection: ReturnType<typeof createSelectionCompletion> | undefined;
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", origin);
@@ -197,6 +212,12 @@ async function main() {
         if (tokens) return send(response, 400, "Authorization already completed");
         tokens = await completeOAuthCallback(url.toString(), auth.state, auth.codeVerifier,
           { clientId, clientSecret, redirectUri: callbackUrl }, expectedOwner);
+        const authorized = tokens;
+        completeSelection = createSelectionCompletion(authorized.accessToken, fetch, (ids) => {
+          process.stdout.write(`Confirmed owner: ${authorized.email}\nGOOGLE_DRIVE_FOLDER_ID=${ids.folderId}\nGOOGLE_TEMPLATE_DOC_ID=${ids.templateId}\n`);
+          process.stdout.write("Enter the refresh token through Wrangler's interactive prompt:\n  npx wrangler secret put GOOGLE_REFRESH_TOKEN --env staging\n  npx wrangler secret put GOOGLE_REFRESH_TOKEN --env production\n");
+          process.stdout.write(`Refresh token (shown once): ${authorized.refreshToken}\n`);
+        });
         response.setHeader("set-cookie", `setup=${sessionCookie}; HttpOnly; SameSite=Strict; Path=/`);
         return send(response, 200, pickerPage(projectNumber, apiKey), "text/html; charset=utf-8");
       }
@@ -210,12 +231,11 @@ async function main() {
         if (!selection || typeof selection !== "object" ||
           typeof (selection as Record<string, unknown>).folderId !== "string" ||
           typeof (selection as Record<string, unknown>).templateId !== "string") throw new Error("Invalid Picker selection");
-        const ids = await fetchAndValidateSelection((selection as { folderId: string }).folderId,
-          (selection as { templateId: string }).templateId, tokens.accessToken);
+        if (!completeSelection) throw new Error("Invalid Picker selection");
+        const ids = await completeSelection((selection as { folderId: string }).folderId,
+          (selection as { templateId: string }).templateId);
+        if (!ids) return send(response, 409, JSON.stringify({ error: "Selection already completed" }), "application/json; charset=utf-8");
         send(response, 200, JSON.stringify({ ...ids, email: tokens.email }), "application/json; charset=utf-8");
-        process.stdout.write(`Confirmed owner: ${tokens.email}\nGOOGLE_DRIVE_FOLDER_ID=${ids.folderId}\nGOOGLE_TEMPLATE_DOC_ID=${ids.templateId}\n`);
-        process.stdout.write("Enter the refresh token through Wrangler's interactive prompt:\n  npx wrangler secret put GOOGLE_REFRESH_TOKEN --env staging\n  npx wrangler secret put GOOGLE_REFRESH_TOKEN --env production\n");
-        process.stdout.write(`Refresh token (shown once): ${tokens.refreshToken}\n`);
         server.close();
         return;
       }

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildAuthorization,
   completeOAuthCallback,
+  createSelectionCompletion,
   fetchAndValidateSelection,
   pickerPage,
   validateOAuthCallback,
@@ -112,6 +113,25 @@ describe("local Google Drive OAuth setup", () => {
       .mockResolvedValueOnce(new Response("null", { headers: { "content-type": "application/json" } }))
       .mockResolvedValueOnce(Response.json({ id: "template-1", mimeType: "application/vnd.google-apps.document", parents: ["folder-1"] }));
     await expect(fetchAndValidateSelection("folder-1", "template-1", "access-value", fetcher)).rejects.toThrow("Invalid Google Drive metadata");
+  });
+
+  it("emits the refresh token once when two valid selections finish together", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      await gate;
+      return new URL(String(input)).pathname.endsWith("/folder-1")
+        ? Response.json({ id: "folder-1", mimeType: "application/vnd.google-apps.folder" })
+        : Response.json({ id: "template-1", mimeType: "application/vnd.google-apps.document", parents: ["folder-1"] });
+    });
+    let output = "";
+    const complete = createSelectionCompletion("access-value", fetcher, () => { output += "refresh-value\n"; });
+    const first = complete("folder-1", "template-1");
+    const second = complete("folder-1", "template-1");
+    release();
+    const results = await Promise.all([first, second]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(output).toBe("refresh-value\n");
   });
 
   it("renders a Picker page without embedding credentials or tokens", () => {
