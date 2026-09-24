@@ -19,7 +19,8 @@
     "generate-marker": "tsx scripts/generate-marker.ts",
     "setup:verify": "tsx scripts/verify-airtable-schema.ts",
     "smoke": "tsx scripts/smoke-test.ts",
-    "test:acceptance": "vitest run test/acceptance"
+    "test:acceptance": "vitest run test/acceptance",
+    "google:drive-setup": "tsx scripts/google-drive-oauth-setup.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.125.0",
