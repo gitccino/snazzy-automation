@@ -216,7 +216,7 @@ describe("setup routes", () => {
     expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
   });
 
-  it("rehearses copy, edit, rename, and permanent delete in My Drive using OAuth", async () => {
+  it("rehearses copy, edit, readback, rename, and permanent delete in My Drive using OAuth", async () => {
     const fetcher = googleFetch();
     const probes = createSetupExternalProbes(
       googleEnv(), fetcher, { now: () => new Date("2026-09-02T01:00:00.000Z") },
@@ -230,6 +230,12 @@ describe("setup routes", () => {
     const driveCalls = fetcher.mock.calls.filter(([input]) => String(input).includes("googleapis.com"));
     expect(driveCalls.some(([input]) => String(input).includes("/copy") && !new URL(String(input)).searchParams.has("supportsAllDrives"))).toBe(true);
     expect(driveCalls.some(([input, init]) => String(input).includes("docs.googleapis.com") && init?.method === "POST")).toBe(true);
+    const edit = driveCalls.findIndex(([input, init]) => String(input).endsWith("/copied-doc:batchUpdate") && init?.method === "POST");
+    const readback = driveCalls.findIndex(([input, init]) => String(input).endsWith("/copied-doc") && String(input).includes("docs.googleapis.com") && !init?.method);
+    const rename = driveCalls.findIndex(([input, init]) => new URL(String(input)).pathname.endsWith("/copied-doc") && init?.method === "PATCH");
+    expect(edit).toBeGreaterThanOrEqual(0);
+    expect(readback).toBeGreaterThan(edit);
+    expect(rename).toBeGreaterThan(readback);
     expect(driveCalls.some(([input, init]) => new URL(String(input)).pathname.endsWith("/copied-doc") && init?.method === "PATCH")).toBe(true);
     expect(driveCalls.some(([input, init]) => new URL(String(input)).pathname.endsWith("/copied-doc") && init?.method === "DELETE")).toBe(true);
     expect(driveCalls.every(([input]) => !new URL(String(input)).searchParams.has("supportsAllDrives"))).toBe(true);
@@ -241,8 +247,7 @@ describe("setup routes", () => {
     ["a Shared Drive folder", { driveId: "drive-1" }, "My Drive"],
     ["a non-folder", { folderMimeType: "application/vnd.google-apps.document" }, "Drive folder"],
     ["missing capabilities", { capabilities: null }, "capabilities"],
-    ["missing add capability", { capabilities: { canAddChildren: false, canDeleteChildren: true } }, "capabilities"],
-    ["missing delete capability", { capabilities: { canAddChildren: true, canDeleteChildren: false } }, "capabilities"],
+    ["missing add capability", { capabilities: { canAddChildren: false } }, "capabilities"],
     ["a non-document template", { templateMimeType: "application/pdf" }, "configured My Drive folder"],
     ["an out-of-folder template", { templateParents: ["other-folder"] }, "configured My Drive folder"],
   ])("rejects %s", async (_description, options, message) => {
@@ -268,6 +273,41 @@ describe("setup routes", () => {
     await expect(probes.verifyGoogleTemplateAccess()).rejects.toThrow("{{END_PRODUCTS}}");
   });
 
+  it("fails when the disposable edit is not visible on readback", async () => {
+    const fetcher = googleFetch({ copyReadbackMissingText: true });
+    const probes = createSetupExternalProbes(googleEnv(), fetcher, { now: () => new Date("2026-09-02T01:00:00.000Z") });
+
+    await expect(probes.verifyGoogleTemplateAccess()).rejects.toThrow("setup check");
+    expect(fetcher.mock.calls.some(([input, init]) => new URL(String(input)).pathname.endsWith("/copied-doc") && init?.method === "DELETE")).toBe(true);
+  });
+
+  it("keeps malformed Google response bodies out of the setup report", async () => {
+    const env = await readyEnv();
+    const clock = { now: () => new Date("2026-09-02T01:00:00.000Z") };
+    const google = googleFetch({ malformedFolderBody: true });
+    const probes = createSetupExternalProbes(env, google, clock);
+    const report = await runSetupChecks(env, airtableFetch(), clock, { ...happyProbes, verifyGoogleTemplateAccess: probes.verifyGoogleTemplateAccess });
+    const detail = report.checks.find((check) => check.name === "google_template_access")?.detail;
+
+    expect(report.ok).toBe(false);
+    expect(detail).toBe("Invalid provider response");
+    expect(JSON.stringify(report)).not.toContain("PRIVATE-SENTINEL");
+  });
+
+  it("reports the safe copy ID if disposable deletion fails", async () => {
+    const env = await readyEnv();
+    const clock = { now: () => new Date("2026-09-02T01:00:00.000Z") };
+    const google = googleFetch({ copyDeleteFails: true });
+    const probes = createSetupExternalProbes(env, google, clock);
+    const report = await runSetupChecks(env, airtableFetch(), clock, { ...happyProbes, verifyGoogleTemplateAccess: probes.verifyGoogleTemplateAccess });
+    const detail = report.checks.find((check) => check.name === "google_template_access")?.detail;
+
+    expect(report.ok).toBe(false);
+    expect(detail).toContain("copied-doc");
+    expect(detail).not.toContain("PRIVATE-SENTINEL");
+    expect(detail).not.toContain("test-refresh-token");
+  });
+
   it("recovers a response-lost disposable copy through its appProperty", async () => {
     const fetcher = googleFetch({ copyResponseLost: true });
     const probes = createSetupExternalProbes(
@@ -290,21 +330,23 @@ function googleEnv(): Env {
   return configuredEnv();
 }
 
-function googleFetch(options: { driveId?: string; folderMimeType?: string; capabilities?: { canAddChildren: boolean; canDeleteChildren: boolean } | null; templateMimeType?: string; templateParents?: string[]; splitMarker?: boolean; missingMarker?: boolean; copyResponseLost?: boolean } = {}) {
+function googleFetch(options: { driveId?: string; folderMimeType?: string; capabilities?: { canAddChildren: boolean } | null; templateMimeType?: string; templateParents?: string[]; splitMarker?: boolean; missingMarker?: boolean; copyResponseLost?: boolean; copyReadbackMissingText?: boolean; malformedFolderBody?: boolean; copyDeleteFails?: boolean } = {}) {
   const { driveId, splitMarker, missingMarker, copyResponseLost } = options;
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     if (url.hostname === "oauth2.googleapis.com") return Response.json({ access_token: "token", expires_in: 3600 });
     if (url.hostname === "docs.googleapis.com") {
       if (init?.method === "POST") return Response.json({});
+      if (url.pathname === "/v1/documents/copied-doc") return Response.json({ body: { content: [{ paragraph: { elements: [{ startIndex: 1, textRun: { content: options.copyReadbackMissingText ? "unchanged" : "setup check\n" } }] } }] } });
       return Response.json({ body: { content: [{ paragraph: { elements: splitMarker
         ? [{ startIndex: 1, textRun: { content: "{{PUBLICATION_DATE}} {{PRO" } }, { startIndex: 30, textRun: { content: "DUCTS}} {{END_PRODUCTS}}" } }]
         : [{ startIndex: 1, textRun: { content: missingMarker ? "{{PUBLICATION_DATE}} {{PRODUCTS}}" : "{{PUBLICATION_DATE}} {{PRODUCTS}} {{END_PRODUCTS}}" } }],
       } }] } });
     }
+    if (url.pathname === "/drive/v3/files/folder-1" && options.malformedFolderBody) return new Response("PRIVATE-SENTINEL {", { headers: { "content-type": "application/json" } });
     if (url.pathname === "/drive/v3/files/folder-1") return Response.json({
       id: "folder-1", mimeType: options.folderMimeType ?? "application/vnd.google-apps.folder", ...(driveId ? { driveId } : {}),
-      ...(options.capabilities === null ? {} : { capabilities: options.capabilities ?? { canAddChildren: true, canDeleteChildren: true } }),
+      ...(options.capabilities === null ? {} : { capabilities: options.capabilities ?? { canAddChildren: true } }),
     });
     if (url.pathname === "/drive/v3/files/template-1") return Response.json({
       id: "template-1", mimeType: options.templateMimeType ?? "application/vnd.google-apps.document", parents: options.templateParents ?? ["folder-1"],
@@ -314,6 +356,7 @@ function googleFetch(options: { driveId?: string; folderMimeType?: string; capab
       return Response.json({ id: "copied-doc" });
     }
     if (url.pathname === "/drive/v3/files" && (!init?.method || init.method === "GET")) return Response.json({ files: [{ id: "copied-doc" }] });
+    if (url.pathname === "/drive/v3/files/copied-doc" && init?.method === "DELETE" && options.copyDeleteFails) return new Response("PRIVATE-SENTINEL", { status: 500 });
     if (url.pathname === "/drive/v3/files/copied-doc" && (init?.method === "PATCH" || init?.method === "DELETE")) return new Response(null, { status: 200 });
     throw new Error(`Unexpected Google request ${url}`);
   });

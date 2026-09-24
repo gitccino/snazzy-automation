@@ -25,9 +25,9 @@ const DriveFileSchema = z.object({
   mimeType: z.string().min(1),
   parents: z.array(z.string()).optional(),
   driveId: z.string().min(1).optional(),
-  capabilities: z.object({ canAddChildren: z.boolean().optional(), canDeleteChildren: z.boolean().optional() }).optional(),
+  capabilities: z.object({ canAddChildren: z.boolean().optional() }).optional(),
 });
-const DriveCopySchema = z.object({ id: z.string().min(1) });
+const DriveCopySchema = z.object({ id: z.string().regex(/^[A-Za-z0-9_-]+$/) });
 const DriveFilesSchema = z.object({ files: z.array(DriveCopySchema).default([]), nextPageToken: z.string().min(1).optional() });
 const GoogleDocumentSchema = z.object({
   body: z.object({ content: z.array(z.object({ paragraph: z.object({ elements: z.array(z.object({
@@ -81,7 +81,9 @@ async function check(name: string, fn: () => Promise<string>): Promise<SetupChec
   try {
     return { name, ok: true, detail: await fn() };
   } catch (error) {
-    return { name, ok: false, detail: error instanceof Error ? error.message : String(error) };
+    return { name, ok: false, detail: error instanceof SyntaxError || error instanceof z.ZodError
+      ? "Invalid provider response"
+      : error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -168,7 +170,7 @@ export function createSetupExternalProbes(env: Env, fetcher: Fetcher, clock: Clo
   }
   async function driveFile(id: string) {
     const url = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}`);
-    url.searchParams.set("fields", "id,mimeType,parents,driveId,capabilities(canAddChildren,canDeleteChildren)");
+    url.searchParams.set("fields", "id,mimeType,parents,driveId,capabilities(canAddChildren)");
     return DriveFileSchema.parse(await (await googleFetch(url.toString())).json());
   }
   async function deleteSetupCopies(folderId: string, probeId: string): Promise<void> {
@@ -202,7 +204,7 @@ export function createSetupExternalProbes(env: Env, fetcher: Fetcher, clock: Clo
       const folder = await driveFile(config.googleDriveFolderId);
       if (folder.mimeType !== "application/vnd.google-apps.folder") throw new Error("Configured Google folder is not a Drive folder");
       if (folder.driveId) throw new Error("Configured Google folder must be in My Drive");
-      if (!folder.capabilities?.canAddChildren || !folder.capabilities.canDeleteChildren) {
+      if (!folder.capabilities?.canAddChildren) {
         throw new Error("Authorized account lacks required My Drive folder capabilities");
       }
       const template = await driveFile(config.googleTemplateDocId);
@@ -226,15 +228,25 @@ export function createSetupExternalProbes(env: Env, fetcher: Fetcher, clock: Clo
           method: "POST", headers: { "content-type": "application/json" },
           body: JSON.stringify({ requests: [{ insertText: { location: { index: 1 }, text: "setup check" } }] }),
         });
+        const copiedDocument = GoogleDocumentSchema.parse(await (await googleFetch(
+          `https://docs.googleapis.com/v1/documents/${encodeURIComponent(copyId)}`,
+        )).json());
+        const copiedText = copiedDocument.body.content.flatMap((block) => block.paragraph?.elements ?? [])
+          .map((element) => element.textRun?.content ?? "").join("");
+        if (!copiedText.includes("setup check")) throw new Error("Disposable Google Doc edit missing setup check text");
         const renameUrl = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(copyId)}`);
         await googleFetch(renameUrl.toString(), {
           method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: `setup-checked-${crypto.randomUUID()}` }),
         });
       } finally {
-        if (copyId) {
-          await googleFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(copyId)}`, { method: "DELETE" });
-        } else {
-          await deleteSetupCopies(folder.id, probeId);
+        try {
+          if (copyId) {
+            await googleFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(copyId)}`, { method: "DELETE" });
+          } else {
+            await deleteSetupCopies(folder.id, probeId);
+          }
+        } catch {
+          throw new Error(`Disposable Google Doc cleanup failed; ${copyId ? `copyId=${copyId}` : `probeId=${probeId}`}`);
         }
       }
     },

@@ -79,8 +79,8 @@ Retain the `google_template_access` readiness check, but replace Shared Drive-sp
 
 1. The configured folder is an accessible Drive folder. A missing `driveId` is expected for My Drive and is not an error.
 2. The configured template is an accessible Google Doc located in the configured folder and contains the required publication markers.
-3. The authorized account has the effective capability to create and delete children in the folder.
-4. A disposable template copy can be created in the folder, read and edited through Docs API, renamed, and permanently deleted. If cleanup after a partial setup probe fails, the check reports the probe's safe ID for manual cleanup without including credentials or raw Google response bodies.
+3. The authorized account has `canAddChildren` for the My Drive folder; the disposable rehearsal proves deletion without relying on a Shared Drive-only capability field.
+4. A disposable template copy can be created in the folder, edited and read back through Docs API to verify the edit, renamed, and permanently deleted. If cleanup after a partial setup probe fails, the check reports a safe copy or probe ID for manual cleanup without including credentials or raw Google response bodies.
 5. The check performs all required operations using the same `drive.file` grant used by publication; a successful OAuth token exchange alone is not sufficient.
 
 Remove organizer-membership checks, service-account email checks, and requirements that the folder have a `driveId`. Remove Shared Drive-only membership lookups and list flags; all create, lookup, update, and delete operations must work using the selected My Drive files and the narrow OAuth grant.
@@ -91,8 +91,8 @@ Remove organizer-membership checks, service-account email checks, and requiremen
 - A Google OAuth project left in **Testing** issues refresh tokens that expire after seven days for this non-basic Drive scope. Testing status is not acceptable for unattended ongoing publication. The OAuth consent project must be moved to the appropriate production status before the production handoff; the operator must complete whatever verification Google requires for this single-account personal-use app.
 - `drive.file` is the selected least-privilege scope. Do not silently fall back to `drive` or add `documents` if Picker-based access fails. Stop and review a scope change before proceeding.
 - Google documents a personal-use exception to some scope-verification requirements. Eligibility is not assumed from this spec; the operator must check the current Cloud Console status and Google policy for the deployed app. See [OAuth app policies](https://developers.google.com/identity/protocols/oauth2/policies) and [restricted-scope verification exceptions](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification).
-- If the refresh token expires, is revoked, or is rotated, setup reports the Google authorization check as failed and publication remains disabled until the owner reauthorizes and replaces the Worker secret.
-- Credential rotation must allow validation with the new authorization before revoking an old credential, where one exists. Once the new path is verified, remove the obsolete `GOOGLE_SERVICE_ACCOUNT_JSON` secret and revoke any no-longer-needed service-account key.
+- If the refresh token expires or is revoked, setup reports the Google authorization check as failed and publication remains disabled until the owner reauthorizes and replaces the Worker secret. A normal refresh-token secret replacement is verified with `/setup` and a controlled publication.
+- Replacing one environment's `GOOGLE_REFRESH_TOKEN` does not call for revoking the old OAuth grant: Google grant revocation invalidates project-granted scopes and tokens across clients and can interrupt other environments. If grant revocation is intentional or required, pause Google publication in every affected environment, revoke the grant, reauthorize each environment, update each refresh-token secret, verify each `/setup` and controlled publication, then resume. After the new path is verified, remove the obsolete `GOOGLE_SERVICE_ACCOUNT_JSON` secret and revoke any no-longer-needed service-account key.
 
 ## 7. Security and operational ownership
 

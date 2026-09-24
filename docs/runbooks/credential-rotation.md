@@ -1,6 +1,6 @@
 # Credential Rotation Runbook
 
-Rotate customer-owned production secrets without a code change. Obtain the replacement from its issuing service, update one binding, verify it, and only then revoke the old credential. Keep values in the customer secret store; never put them in tickets, logs, or this file. Use [deployment](deployment.md) for the production URL and [publication setup](publication-setup.md) for Google access requirements.
+Rotate customer-owned production secrets without a code change. Obtain the replacement from its issuing service, update one binding, and verify it. Retire old provider credentials after verification, except Google OAuth grants: revoking a grant can invalidate project-granted scopes and tokens across clients. Keep values in the customer secret store; never put them in tickets, logs, or this file. Use [deployment](deployment.md) for the production URL and [publication setup](publication-setup.md) for Google access requirements.
 
 ## Procedure
 
@@ -33,7 +33,9 @@ Rotate customer-owned production secrets without a code change. Obtain the repla
    npm run smoke
    ```
 
-5. Confirm the affected live operation separately where smoke cannot prove it (for example, a real signed LINE event or a scheduled import/publication). Revoke the old provider credential only after verification. If the replacement fails, restore the old value with the same `wrangler secret put` command, verify service recovery, and investigate before retrying.
+5. Confirm the affected live operation separately where smoke cannot prove it (for example, a real signed LINE event or a scheduled import/publication). Retire old provider credentials other than Google OAuth grants only after verification. If the replacement fails, restore the old value with the same `wrangler secret put` command, verify service recovery, and investigate before retrying.
+
+If revoking the Google OAuth grant is intentional or required, first pause Google publication in every environment using the project. Revoke the grant, reauthorize the owner for each affected environment and its selected My Drive folder/template, replace each `GOOGLE_REFRESH_TOKEN` through Wrangler's prompt, verify `/setup` and a controlled publication in each environment, then resume publication. Treat all tokens and clients in that project as affected; replacing a single environment's secret does not require grant revocation.
 
 ## Credential notes
 
@@ -43,7 +45,7 @@ Rotate customer-owned production secrets without a code change. Obtain the repla
 | `LINE_CHANNEL_SECRET` | Regenerate in the same LINE Messaging API channel. Test a real signed webhook; setup checks only presence. |
 | `LINE_CHANNEL_ACCESS_TOKEN` | Issue for the same LINE channel; verify admin-group delivery as well as setup group access. |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | Rotate the Web OAuth client secret in Google Cloud, update the Worker secret, and confirm `google_template_access` before retiring the old secret. Keep `GOOGLE_OAUTH_CLIENT_ID` as the matching non-secret environment variable. |
-| `GOOGLE_REFRESH_TOKEN` | The owner reruns `npm run google:drive-setup -- --expected-owner <owner-email>` in an interactive terminal and reselects that environment's My Drive folder/template through Picker. Enter the new token through Wrangler's prompt, verify `google_template_access` and a controlled publication, then revoke the old grant if it still works. For an invalid, expired, or revoked token, pause Google publication until reconnect succeeds; a rollback to the old token cannot restore access. The OAuth consent screen must be **In production** for unattended use; Testing tokens may expire after seven days. |
+| `GOOGLE_REFRESH_TOKEN` | The owner reruns `npm run google:drive-setup -- --expected-owner <owner-email>` in an interactive terminal and reselects that environment's My Drive folder/template through Picker. Enter the new token through Wrangler's prompt, then verify `google_template_access` and a controlled publication. Do not revoke the OAuth grant as part of one environment's secret replacement. For an invalid, expired, or revoked token, pause Google publication until reconnect succeeds; a rollback to the old token cannot restore access. The OAuth consent screen must be **In production** for unattended use; Testing tokens may expire after seven days. |
 | `ANTHROPIC_API_KEY` | Create a key in the same Anthropic workspace and verify `claude_credential`. |
 | `ICLOUD_SHARED_ALBUM_TOKEN` | Use [album rotation](album-rotation.md) for a new album and its cutoff. A new token for the same album changes its source ID and risks duplicate imports. |
 | `ASSET_URL_SIGNING_SECRET` | Changing it invalidates outstanding signed asset URLs immediately; there is no dual-key grace period. Allow at least 15 minutes after the last old URL was issued before rotation, or schedule a window when old links may expire. The longest current signed URL TTL is 900 seconds. |

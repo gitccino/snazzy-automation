@@ -17,6 +17,7 @@
 - Do not use a service account, Workspace Shared Drive, domain-wide delegation, or impersonation.
 - The only Drive/Docs data scope is `https://www.googleapis.com/auth/drive.file`; basic `openid` and `email` may be requested only to confirm the owner.
 - Scheduled jobs use OAuth offline access; refresh tokens are Cloudflare secrets and access tokens stay in Worker memory only.
+- Replace refresh-token secrets per environment without revoking the OAuth grant. If grant revocation is intentional, coordinate pause, reauthorization, secret updates, and verification for every environment using that Google project.
 - Never put OAuth credentials in source control, `APP_CONFIG_JSON`, D1, R2, Airtable, logs, or deployed Worker responses.
 - Do not fall back to full-Drive `drive` or Docs `documents` scopes if Picker access fails; stop for scope review.
 - A production deployment must not rely on an OAuth consent project left in Testing; complete Google's applicable production/verification requirements first.
@@ -27,7 +28,7 @@
 - Invalid, missing, revoked, or malformed OAuth refresh credentials must fail non-retryably and expose no credential or raw upstream body. Test in `test/publication/google-auth.test.ts`.
 - OAuth transport, 429, and 5xx failures must be retryable; ordinary 4xx and `invalid_grant` must not. Test in `test/publication/google-auth.test.ts`.
 - A Picker selection with the wrong file type, a template outside the selected folder, or a Shared Drive folder must be rejected before IDs are accepted. Test in `test/scripts/google-drive-oauth-setup.test.ts`.
-- A My Drive folder with no `driveId` must pass only when it has the required capabilities; a Shared Drive, wrong template, or missing markers must fail. Test in `test/routes/setup.test.ts`.
+- A My Drive folder with no `driveId` and `canAddChildren: true` must pass the folder precheck; the disposable delete proves deletion. A Shared Drive, wrong template, missing markers, or failed copy readback must fail. Test in `test/routes/setup.test.ts`.
 - A copy whose response is lost must still be found and cleaned up using its setup-probe property; token revocation must never cause a different folder/account to be used. Test in `test/routes/setup.test.ts` and `test/publication/google-auth.test.ts`.
 
 ## File Map and Module Seams
@@ -217,7 +218,7 @@ git commit -m "refactor(google): target personal My Drive"
 
 - [ ] **Step 1: Change setup fixtures to return a My Drive folder**
 
-Update `googleEnv()` and `googleFetch()` so OAuth token requests use the refresh-token grant and the folder response has no `driveId`, but has `canAddChildren: true` and `canDeleteChildren: true`.
+Update `googleEnv()` and `googleFetch()` so OAuth token requests use the refresh-token grant and the My Drive folder response has no `driveId`, but has `canAddChildren: true`. Do not fabricate `canDeleteChildren`; Google only populates it for Shared Drive items.
 
 - [ ] **Step 2: Add failing My Drive and Shared Drive assertions**
 
@@ -231,11 +232,11 @@ Expected: FAIL because setup currently rejects My Drive and requires organizer m
 
 - [ ] **Step 4: Remove service-account and organizer checks**
 
-Use the OAuth bindings to construct the auth provider. Remove `parseServiceAccountJson`, `DrivePermissionsSchema`, and `isSharedDriveOrganizer`. Require a folder MIME type of `application/vnd.google-apps.folder`, no `driveId`, required child capabilities, and a Google Docs template whose parent is the configured folder. Keep marker validation and the disposable copy/edit/rename/permanent-delete rehearsal. Remove Shared Drive-only list flags from setup and cleanup.
+Use the OAuth bindings to construct the auth provider. Remove `parseServiceAccountJson`, `DrivePermissionsSchema`, and `isSharedDriveOrganizer`. Require a folder MIME type of `application/vnd.google-apps.folder`, no `driveId`, `canAddChildren`, and a Google Docs template whose parent is the configured folder. Keep marker validation and the disposable copy/edit/readback/rename/permanent-delete rehearsal. Report a safe copy or probe ID if cleanup fails. Remove Shared Drive-only list flags from setup and cleanup.
 
 ```ts
 if (folder.driveId) throw new Error("Configured Google folder must be in My Drive");
-if (!folder.capabilities?.canAddChildren || !folder.capabilities.canDeleteChildren) {
+if (!folder.capabilities?.canAddChildren) {
   throw new Error("Authorized account lacks required My Drive folder capabilities");
 }
 ```
@@ -452,7 +453,7 @@ Run `npm run google:drive-setup -- --expected-owner <owner-email>`, select the s
 
 - [ ] **Step 5: Run staging readiness and publication rehearsal**
 
-Run the existing Wrangler dry-run, deploy only to staging after the code review gate, and call the authorized `/setup` endpoint. Require all checks to pass, then run one disposable staging publication. Confirm the document is owned by the selected account and a folder collaborator can open it. Revoke no credential until the replacement path is verified.
+Run the existing Wrangler dry-run, deploy only to staging after the code review gate, and call the authorized `/setup` endpoint. Require all checks to pass, then run one disposable staging publication. Confirm the document is owned by the selected account and a folder collaborator can open it. Replacing a staging refresh-token secret must not revoke the OAuth grant: project-wide grant revocation can invalidate production and other clients. If revocation is required, pause every affected environment, revoke, reauthorize and update each environment, verify each `/setup` and controlled publication, then resume.
 
 - [ ] **Step 6: Prepare production without deploying it**
 
