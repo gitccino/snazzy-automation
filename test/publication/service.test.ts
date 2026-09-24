@@ -403,7 +403,7 @@ describe("publication stages", () => {
       .mockResolvedValueOnce(new Response(null, { status: 204 })).mockResolvedValueOnce(json({}));
     const deps = baseDeps({ fetcher });
     await failPublicationAfterExhaustion(deps, "rec-run-1", "Document preparation failed", null);
-    expect(String(fetcher.mock.calls[2]![0])).toBe("https://www.googleapis.com/drive/v3/files/orphan-doc?supportsAllDrives=true");
+    expect(String(fetcher.mock.calls[2]![0])).toBe("https://www.googleapis.com/drive/v3/files/orphan-doc");
     expect(fetcher.mock.calls[2]![1]?.method).toBe("DELETE");
     expect(await job()).toMatchObject({ state: "failed", temp_doc_id: null });
     expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining("ไม่สามารถอ่านวันที่รายการได้"));

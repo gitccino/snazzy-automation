@@ -491,7 +491,7 @@ describe("publication acceptance", () => {
         job: { state: "generating", temp_doc_id: "temp-doc-1", google_doc_id: null, google_doc_url: null, correlation_id: "publication-rec-run-1" },
         docs: 1, status: "Generating",
       })));
-      expect(fixture.calls.filter(c => c.method === "DELETE").map(c => c.url)).toEqual(["https://www.googleapis.com/drive/v3/files/temp-doc-1?supportsAllDrives=true"]);
+      expect(fixture.calls.filter(c => c.method === "DELETE").map(c => c.url)).toEqual(["https://www.googleapis.com/drive/v3/files/temp-doc-1"]);
       const batchIndices = fixture.calls.flatMap((call, index) => call.url.endsWith(":batchUpdate") ? [index] : []);
       expect(fixture.calls.findIndex(c => c.method === "DELETE")).toBeGreaterThan(batchIndices.at(-1)!);
       expect(await job()).toMatchObject({ state: "failed", temp_doc_id: null, google_doc_id: null, google_doc_url: null });
