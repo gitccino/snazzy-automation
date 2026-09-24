@@ -169,6 +169,7 @@ git commit -m "refactor(google): wire OAuth credentials into publication"
 
 - Modify: `src/publication/google-docs.ts`
 - Test: `test/publication/google-docs.test.ts`
+- Update stale Shared Drive request expectations in `test/publication/service.test.ts` and `test/acceptance/publication.test.ts`.
 
 **Interfaces:**
 
@@ -177,7 +178,7 @@ git commit -m "refactor(google): wire OAuth credentials into publication"
 
 - [ ] **Step 1: Add assertions for My Drive request parameters**
 
-Update the Drive request tests to assert `supportsAllDrives` and `includeItemsFromAllDrives` are absent from lookup, copy, rename, and delete requests. Keep assertions for parent folder and `appProperties.publicationRunId`.
+Update the Drive request tests to assert `supportsAllDrives` and `includeItemsFromAllDrives` are absent from lookup, copy, rename, and delete requests. Keep assertions for parent folder and `appProperties.publicationRunId`. Update the existing cleanup URL expectations in the service and acceptance tests to omit `supportsAllDrives` too.
 
 - [ ] **Step 2: Run Google Docs tests and confirm the Shared Drive assertions fail**
 
@@ -191,7 +192,7 @@ Remove `supportsAllDrives` and `includeItemsFromAllDrives` from Drive list/copy/
 
 - [ ] **Step 4: Run Google Docs tests**
 
-Run: `npx vitest run test/publication/google-docs.test.ts`
+Run: `npx vitest run test/publication/google-docs.test.ts test/publication/service.test.ts test/acceptance/publication.test.ts`
 
 Expected: PASS, including duplicate-recovery and response-loss cases.
 
