@@ -122,10 +122,14 @@ export function createSelectionCompletion(
   };
 }
 
+export function hasSessionCookie(cookieHeader: string | undefined, expectedSessionCookie: string): boolean {
+  return cookieHeader?.split(";").some((part) => part.trim() === `setup=${expectedSessionCookie}`) ?? false;
+}
+
 export function pickerPage(projectNumber: string, apiKey: string): string {
   const literal = (value: string) => JSON.stringify(value).replaceAll("<", "\\u003c");
   return `<!doctype html>
-<html lang="en"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>Choose Google Drive template</title>
+<html lang="en"><meta charset="utf-8"><meta name="referrer" content="origin"><title>Choose Google Drive template</title>
 <main><h1>Choose your Google Drive template</h1><p>Pick a folder in My Drive, then a Google Doc inside it.</p>
 <p><button id="folder" disabled>Choose folder</button> <span id="folder-id"></span></p>
 <p><button id="template" disabled>Choose template</button> <span id="template-id"></span></p>
@@ -175,7 +179,7 @@ document.getElementById('confirm').onclick = async () => {
 }
 
 function send(response: ServerResponse, status: number, body: string, contentType = "text/plain; charset=utf-8") {
-  response.writeHead(status, { "content-type": contentType, "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff" });
+  response.writeHead(status, { "content-type": contentType, "cache-control": "no-store", "referrer-policy": "origin", "x-content-type-options": "nosniff" });
   response.end(body);
 }
 
@@ -221,7 +225,7 @@ async function main() {
         response.setHeader("set-cookie", `setup=${sessionCookie}; HttpOnly; SameSite=Strict; Path=/`);
         return send(response, 200, pickerPage(projectNumber, apiKey), "text/html; charset=utf-8");
       }
-      if (!tokens || request.headers.cookie !== `setup=${sessionCookie}`) return send(response, 403, "Authorize first");
+      if (!tokens || !hasSessionCookie(request.headers.cookie, sessionCookie)) return send(response, 403, "Authorize first");
       if (request.method === "GET" && url.pathname === "/session-token") {
         return send(response, 200, JSON.stringify({ accessToken: tokens.accessToken }), "application/json; charset=utf-8");
       }

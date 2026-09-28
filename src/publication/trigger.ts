@@ -21,7 +21,7 @@ async function lookupWorkflow(env: Env, id: string): Promise<{
     return { instance, state: await instance.status() };
   } catch (error) {
     // Missing and expired instances reject get() instead of returning a handle.
-    if (error instanceof Error && error.message === "instance.not_found") return null;
+    if (error instanceof Error && error.message.includes("instance.not_found")) return null;
     throw error;
   }
 }

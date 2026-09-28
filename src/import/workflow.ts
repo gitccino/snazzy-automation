@@ -194,11 +194,12 @@ export class ImportWorkflow extends WorkflowEntrypoint<
     const config = parseConfig(this.env.APP_CONFIG_JSON);
     const clock = { now: () => new Date() };
     const ids = { next: () => newCorrelationId() };
+    const fetcher = fetch.bind(globalThis);
     const repo = createImportRepository(this.env.DB, ids, clock);
     const deps: ProcessGroupDeps = {
       imageSource: createICloudClient(
         this.env.ICLOUD_SHARED_ALBUM_TOKEN,
-        fetch,
+        fetcher,
       ),
       marker: createMarkerDetector(this.env.IMAGES),
       repo,
@@ -221,14 +222,14 @@ export class ImportWorkflow extends WorkflowEntrypoint<
         baseId: config.airtableBaseId,
         tableId: config.airtableProductsTableId,
         token: this.env.AIRTABLE_TOKEN,
-        fetch,
+        fetch: fetcher,
       }),
       productIdPrefix: config.productIdPrefix,
       assetUrlTtlSeconds: 300,
     };
     const line: LineClient = createLineClient({
       channelAccessToken: this.env.LINE_CHANNEL_ACCESS_TOKEN,
-      fetch,
+      fetch: fetcher,
     });
 
     return runImportWorkflow(deps, event.payload, step as unknown as WorkflowStepLike, {

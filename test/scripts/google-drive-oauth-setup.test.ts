@@ -14,6 +14,21 @@ const callback = "http://127.0.0.1:8765/oauth/callback?code=code-value&state=exp
 const tokenResponse = { access_token: "access-value", refresh_token: "refresh-value", token_type: "Bearer", expires_in: 3600 };
 
 describe("local Google Drive OAuth setup", () => {
+  it("matches its session cookie when unrelated cookies are also present", async () => {
+    const setup = await import("../../scripts/google-drive-oauth-setup") as unknown as {
+      hasSessionCookie?: (cookieHeader: string | undefined, expected: string) => boolean;
+    };
+    expect(setup.hasSessionCookie).toBeTypeOf("function");
+    if (!setup.hasSessionCookie) return;
+    expect(setup.hasSessionCookie("_ga=analytics; setup=session-value", "session-value")).toBe(true);
+    expect(setup.hasSessionCookie("setup=other; _ga=analytics", "session-value")).toBe(false);
+    expect(setup.hasSessionCookie(undefined, "session-value")).toBe(false);
+  });
+
+  it("sends only the setup page origin as its referrer for Picker key validation", () => {
+    expect(pickerPage("123456789", "api-key-value")).toContain('<meta name="referrer" content="origin">');
+  });
+
   it("builds an offline drive.file authorization with a random state and S256 PKCE", () => {
     const first = buildAuthorization(credentials.clientId, credentials.redirectUri);
     const second = buildAuthorization(credentials.clientId, credentials.redirectUri);

@@ -33,6 +33,9 @@
   "env": {
     "staging": {
       "name": "snazzy-automation-staging",
+      "vars": {
+        "GOOGLE_OAUTH_CLIENT_ID": "891460059017-fg9acj1nhbtjb133d6vgoj7ljh8ng5n4.apps.googleusercontent.com"
+      },
       "triggers": {
         "crons": ["45 22 * * *", "0 23 * * *", "30 23 * * *"]
       },
@@ -40,6 +43,7 @@
         {
           "binding": "DB",
           "database_name": "snazzy-automation-staging",
+          "database_id": "a755745f-c9a9-4015-8f79-08ee6bf9eba0",
           "migrations_dir": "migrations"
         }
       ],

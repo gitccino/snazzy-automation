@@ -44,8 +44,6 @@ const CAPTIONS_TOOL_SCHEMA = {
             drafts: {
               type: "array" as const,
               items: { type: "string" as const },
-              minItems: 3,
-              maxItems: 3,
             },
           },
           required: ["productId", "drafts"],
@@ -135,6 +133,28 @@ function rethrowPermanentAnthropicError(
   action: "count_tokens" | "create_message",
 ): void {
   const status = apiStatus(error);
+  const details = typeof error === "object" && error !== null
+    ? error as { type?: unknown; requestID?: unknown }
+    : {};
+  const errorType = typeof details.type === "string"
+    && /^[a-z][a-z0-9_]{0,63}$/.test(details.type)
+    ? details.type
+    : null;
+  const requestId = typeof details.requestID === "string"
+    && /^[A-Za-z0-9_-]{1,128}$/.test(details.requestID)
+    ? details.requestID
+    : null;
+  const errorName = error instanceof Error
+    && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.name)
+    ? error.name
+    : null;
+  console.error("Anthropic request failed", {
+    operation: action,
+    status,
+    errorType,
+    errorName,
+    requestId,
+  });
   if (status !== null && status >= 400 && status < 500 && status !== 429) {
     throw new OperationalError(
       `anthropic_${action}_failed`,

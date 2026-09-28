@@ -6,8 +6,8 @@ export { ImportWorkflow } from "./import/workflow";
 export { PublicationWorkflow } from "./publication/workflow";
 
 export default {
-  fetch(request, env) {
-    return routeRequest(request, env);
+  fetch(request, env, ctx) {
+    return routeRequest(request, env, ctx);
   },
   scheduled(controller, env, ctx) {
     ctx.waitUntil(handleScheduled(

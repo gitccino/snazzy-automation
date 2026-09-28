@@ -83,6 +83,34 @@ describe("planCaptionBatches", () => {
     expect(batches).toEqual([products.sort((a, b) => a.productId.localeCompare(b.productId))]);
   });
 
+  it("sends strict tool arrays without unsupported length constraints", async () => {
+    const countTokens = vi.fn().mockResolvedValue({ input_tokens: 500 });
+    await planCaptionBatches(
+      sdkClient({ countTokens }),
+      "claude-opus-5",
+      [toCaptionRequestProducts([product("A-1001")])[0]!],
+      1_000,
+    );
+
+    const params = countTokens.mock.calls[0]?.[0] as CountTokensParams | undefined;
+    const tool = params?.tools?.[0] as unknown as { input_schema?: {
+      properties?: {
+        captions?: {
+          items?: {
+            properties?: {
+              drafts?: { type?: string; items?: { type?: string }; minItems?: number; maxItems?: number };
+            };
+          };
+        };
+      };
+    } } | undefined;
+
+    expect(tool?.input_schema?.properties?.captions?.items?.properties?.drafts).toEqual({
+      type: "array",
+      items: { type: "string" },
+    });
+  });
+
   it("splits deterministically by sorted Product ID when over the limit", async () => {
     const client = sdkClient({
       countTokens: vi.fn().mockImplementation(
@@ -165,6 +193,38 @@ describe("planCaptionBatches", () => {
       code: "anthropic_count_tokens_failed",
       retryable: false,
     });
+  });
+
+  it("logs safe Anthropic diagnostics for a retryable count-tokens failure", async () => {
+    const error = Object.assign(new Error("secret response text"), {
+      status: 429,
+      type: "rate_limit_error",
+      requestID: "req_test123",
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const client = sdkClient({
+      countTokens: vi.fn().mockRejectedValue(error),
+    });
+
+    try {
+      await expect(planCaptionBatches(
+        client,
+        "claude-opus-5",
+        [toCaptionRequestProducts([product("A-1001")])[0]!],
+        1_000,
+      )).rejects.toBe(error);
+
+      expect(log).toHaveBeenCalledWith("Anthropic request failed", {
+        operation: "count_tokens",
+        status: 429,
+        errorType: "rate_limit_error",
+        errorName: "Error",
+        requestId: "req_test123",
+      });
+      expect(JSON.stringify(log.mock.calls)).not.toContain("secret response text");
+    } finally {
+      log.mockRestore();
+    }
   });
 });
 

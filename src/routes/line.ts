@@ -40,6 +40,7 @@ export interface LineRouteOverride {
 export async function handleLineRoute(
   request: Request,
   env: Env,
+  ctx: ExecutionContext,
   override?: LineRouteOverride,
 ): Promise<Response> {
   const rawBody = await request.arrayBuffer();
@@ -56,18 +57,19 @@ export async function handleLineRoute(
   }
 
   if (override !== undefined) {
-    await override.process(events);
+    ctx.waitUntil(override.process(events));
     return new Response("ok");
   }
 
   const config = parseConfig(env.APP_CONFIG_JSON);
   const clock = { now: () => new Date() };
   const ids = { next: () => crypto.randomUUID() };
+  const fetcher = fetch.bind(globalThis);
   const line = createLineClient({
     channelAccessToken: env.LINE_CHANNEL_ACCESS_TOKEN,
-    fetch,
+    fetch: fetcher,
   });
-  await processLineEvents(events, {
+  ctx.waitUntil(processLineEvents(events, {
     allowedGroupId: config.lineAllowedGroupId,
     confirmationEnabled: config.soldoutConfirmationEnabled,
     line,
@@ -79,7 +81,7 @@ export async function handleLineRoute(
       baseId: config.airtableBaseId,
       tableId: config.airtableProductsTableId,
       token: env.AIRTABLE_TOKEN,
-      fetch,
+      fetch: fetcher,
       now: clock.now,
     }),
     async triggerUpload() {
@@ -89,6 +91,6 @@ export async function handleLineRoute(
     triggerDocs() {
       return handleDocsTrigger(env, "line", clock);
     },
-  });
+  }));
   return new Response("ok");
 }

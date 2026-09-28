@@ -1,5 +1,7 @@
 # Personal Google Drive OAuth Implementation Plan
 
+> **Picker key restriction correction:** Google's current Picker guidance requires website referrers `http://127.0.0.1:8765/*` and `https://docs.google.com/*`, and API restrictions for both Google Picker API and Google Drive API. This supersedes any shorter restriction list in the setup steps below.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` to implement this plan task-by-task with a fresh reviewer between tasks. The user selected this execution method previously. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace service-account Google Drive access with least-privilege OAuth for one personal Google account that owns the publication folders and shares them with collaborators.

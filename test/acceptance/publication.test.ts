@@ -473,7 +473,7 @@ describe("publication acceptance", () => {
     expect(fixture.state.docs.size).toBe(1);
     const queries = fixture.calls.filter(c => new URL(c.url).pathname.endsWith("/tblRuns"));
     expect(queries).toHaveLength(3);
-    for (const call of queries) expect(new URL(call.url).searchParams.get("filterByFormula")).toBe("{Publication Date}='2026-09-02'");
+    for (const call of queries) expect(new URL(call.url).searchParams.get("filterByFormula")).toBe("DATESTR({Publication Date})='2026-09-02'");
   });
 
   it.each([[503, "errored", "restarted"], [429, "unknown", "started"]] as const)

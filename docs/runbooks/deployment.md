@@ -102,55 +102,13 @@ Deploy staging completely before creating or changing production. This runbook u
    export FIRST_IMPORT_CUTOFF_DATE
    ```
 
-6. Generate the complete `APP_CONFIG_JSON`, install it as a secret, and redeploy:
+6. Generate `APP_CONFIG_JSON` from the exported values, upload it as a staging secret, and redeploy staging:
 
    ```bash
-   APP_CONFIG_JSON="$(node <<'NODE'
-   const required = [
-     "AIRTABLE_BASE_ID",
-     "AIRTABLE_PRODUCTS_TABLE_ID",
-     "AIRTABLE_PUBLICATION_RUNS_TABLE_ID",
-     "LINE_ALLOWED_GROUP_ID",
-     "GOOGLE_DRIVE_FOLDER_ID",
-     "GOOGLE_TEMPLATE_DOC_ID",
-     "WORKER_BASE_URL",
-     "FIRST_IMPORT_CUTOFF_DATE",
-   ];
-   for (const name of required) {
-     if (!process.env[name]) throw new Error(`${name} missing`);
-   }
-   process.stdout.write(JSON.stringify({
-     AIRTABLE_BASE_ID: process.env.AIRTABLE_BASE_ID,
-     AIRTABLE_PRODUCTS_TABLE_ID: process.env.AIRTABLE_PRODUCTS_TABLE_ID,
-     AIRTABLE_PUBLICATION_RUNS_TABLE_ID: process.env.AIRTABLE_PUBLICATION_RUNS_TABLE_ID,
-     LINE_ALLOWED_GROUP_ID: process.env.LINE_ALLOWED_GROUP_ID,
-     GOOGLE_DRIVE_FOLDER_ID: process.env.GOOGLE_DRIVE_FOLDER_ID,
-     GOOGLE_TEMPLATE_DOC_ID: process.env.GOOGLE_TEMPLATE_DOC_ID,
-     PUBLIC_BASE_URL: process.env.WORKER_BASE_URL,
-     TIME_ZONE: "Asia/Bangkok",
-     IMPORT_CRON: "0 23 * * *",
-     PUBLICATION_CRON: "30 23 * * *",
-     UPLOAD_CUTOFF_MINUTES: 30,
-     IMPORT_RETRY_LIMIT: 5,
-     PUBLICATION_RETRY_LIMIT: 5,
-     PRODUCT_ID_PREFIX: "A",
-     PRODUCT_ID_INITIAL_NUMBER: 1,
-     CLAUDE_MODEL: "claude-opus-5",
-     CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150000,
-     SOLDOUT_CONFIRMATION_ENABLED: true,
-     FIRST_IMPORT_CUTOFF_DATE: process.env.FIRST_IMPORT_CUTOFF_DATE,
-     MONTHLY_BUDGET_THB: 1000,
-     USD_TO_THB_RATE: 36,
-     CLAUDE_INPUT_PRICE_USD_PER_MTOK: 5,
-     CLAUDE_OUTPUT_PRICE_USD_PER_MTOK: 25,
-     R2_PRICE_USD_PER_GB_MONTH: 0.015,
-   }));
-   NODE
-   )"
-   printf '%s' "$APP_CONFIG_JSON" |
-     npx wrangler secret put APP_CONFIG_JSON --env staging
-   npm run deploy:staging
+   npm run configure:staging
    ```
+
+   The helper validates the required values, pipes the config directly to Wrangler without printing it, and redeploys only if the secret upload succeeds.
 
 7. Bootstrap the Product ID sequence once. Pause staff imports while this scans Airtable:
 
@@ -166,21 +124,10 @@ Deploy staging completely before creating or changing production. This runbook u
 8. Run the authenticated setup validator:
 
    ```bash
-   set -euo pipefail
-   test "$(curl -sS -o /dev/null -w '%{http_code}' "$WORKER_BASE_URL/setup")" = 401
-   test "$(curl -sS -o /dev/null -w '%{http_code}' \
-     -H 'Authorization: Bearer wrong-token' \
-     "$WORKER_BASE_URL/setup")" = 401
-   setup_report="$(curl --fail-with-body \
-     -H "Authorization: Bearer $ADMIN_ROUTE_TOKEN" \
-     "$WORKER_BASE_URL/setup")"
-   printf '%s' "$setup_report" | node -e '
-   const report = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
-   if (report.ok !== true || !Array.isArray(report.checks) || report.checks.length !== 11 || report.checks.some((check) => check.ok !== true)) process.exit(1);
-   '
+   env ADMIN_ROUTE_TOKEN="$ADMIN_ROUTE_TOKEN" npm run staging:check
    ```
 
-   Each assertion exits nonzero unless the missing and wrong bearer probes return exactly HTTP 401, the authorized request succeeds, and all eleven checks are `ok: true`: `d1_migrations`, `r2_access`, `asset_delivery`, `images_binding`, `airtable_schema`, `sequence_consistency`, `line_webhook_config`, `google_template_access`, `claude_credential`, `icloud_phase_zero`, and `cron_timezone`. `r2_access` remotely verifies the private `assets/collage-base-1080.jpg` asset as a 1080×1080 JPEG. `images_binding` is a hard publication gate: it runs a real Cloudflare Images JPEG transform of that remote base asset and validates the resulting JPEG. `google_template_access` performs the My Drive folder/template and disposable copy/read/edit/rename/delete rehearsal using the owner's `drive.file` grant. The authorized endpoint returns HTTP 503 when any one of the eleven checks is false. Stop on any failed check; separately confirm `docs/feasibility/icloud-phase-0-report.md` says `PASS` before enabling publication traffic.
+   This forwards the shell-only token to the helper without echoing or saving it. `WORKER_BASE_URL` is exported in step 4. The helper verifies missing and wrong bearer tokens are rejected with HTTP 401, then checks all eleven setup checks pass: `d1_migrations`, `r2_access`, `asset_delivery`, `images_binding`, `airtable_schema`, `sequence_consistency`, `line_webhook_config`, `google_template_access`, `claude_credential`, `icloud_phase_zero`, and `cron_timezone`. The R2/Images checks test the private collage base asset and transform; the Google check creates and removes a disposable template copy. Stop on any failure, and confirm `docs/feasibility/icloud-phase-0-report.md` says `PASS` before enabling publication traffic.
 
 9. Register `$WORKER_BASE_URL/line/webhook` in the LINE Developers console for the staging channel.
 
@@ -214,7 +161,16 @@ Deploy staging completely before creating or changing production. This runbook u
     npx wrangler deploy --dry-run --env production
     ```
 
-    Then repeat staging steps 2–10 with each `--env staging` changed to `--env production`, `npm run db:migrate:staging` changed to `npm run db:migrate:production`, and `npm run deploy:staging` changed to `npm run deploy:production`. At step 3, rerun owner authorization for the separate production folder and template, and set `GOOGLE_OAUTH_CLIENT_ID` in `env.production.vars` before deployment. At step 4, set `WORKER_BASE_URL` to the exact production Worker origin. Use production customer IDs and secrets. Commit both real D1 IDs in `wrangler.jsonc` after their dry-run validations. Those customer-owned resource IDs are not secrets.
+Repeat staging steps 2–5 using production IDs and secrets. At step 3, rerun owner authorization for the separate production folder and template, and set `GOOGLE_OAUTH_CLIENT_ID` in `env.production.vars` before deployment. At step 4, set `WORKER_BASE_URL` to the exact production Worker origin. After exporting the production values, apply migrations and configure/deploy:
+
+```bash
+npm run db:migrate:production
+npm run configure:production
+```
+
+Then continue with staging steps 7–10 using production values: bootstrap, setup validation, LINE webhook configuration, and smoke test.
+
+`configure:production` uploads `APP_CONFIG_JSON` to the production Worker and deploys only production. Do not use `configure:staging` for this step. Commit both real D1 IDs in `wrangler.jsonc` after their dry-run validations. Those customer-owned resource IDs are not secrets.
 
 ## Rollback
 

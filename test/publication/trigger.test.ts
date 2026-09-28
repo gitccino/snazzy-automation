@@ -55,7 +55,7 @@ describe("handleDocsTrigger", () => {
       params: { publicationRunId: "rec-run-1", trigger },
     });
     const url = new URL(String(fetcher.mock.calls[0]?.[0]));
-    expect(url.searchParams.get("filterByFormula")).toBe("{Publication Date}='2026-09-02'");
+    expect(url.searchParams.get("filterByFormula")).toBe("DATESTR({Publication Date})='2026-09-02'");
     expect(fixture.restart).not.toHaveBeenCalled();
     expect(fixture.resume).not.toHaveBeenCalled();
   });
@@ -69,6 +69,19 @@ describe("handleDocsTrigger", () => {
       status: "started", publicationRunId: "rec-run-1",
     });
 
+    expect(fixture.create).toHaveBeenCalledExactlyOnceWith({
+      id: "publication-rec-run-1",
+      params: { publicationRunId: "rec-run-1", trigger: "admin" },
+    });
+  });
+
+  it("recognizes Cloudflare's wrapped instance-not-found error", async () => {
+    mockRun();
+    const fixture = makeTriggerEnv("unknown");
+    fixture.get.mockRejectedValueOnce(new Error("(instance.not_found) Instance not found"));
+    await expect(handleDocsTrigger(fixture.env, "admin", clock)).resolves.toEqual({
+      status: "started", publicationRunId: "rec-run-1",
+    });
     expect(fixture.create).toHaveBeenCalledExactlyOnceWith({
       id: "publication-rec-run-1",
       params: { publicationRunId: "rec-run-1", trigger: "admin" },
