@@ -1,7 +1,5 @@
-import { generateKeyPairSync } from "node:crypto";
 import type { WorkflowStep } from "cloudflare:workers";
-import { NonRetryableError } from "cloudflare:workflows";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseConfig } from "../../src/config";
 import type { Env } from "../../src/env";
 import {
@@ -18,6 +16,7 @@ import { runPublicationWorkflow } from "../../src/publication/workflow";
 import { handleDocsRoute } from "../../src/routes/docs";
 import { createTestEnv, testEnv } from "../helpers/env";
 import { fakeFetch, fixedClock } from "../helpers/fakes";
+import { retryingStep } from "../helpers/workflow-step";
 
 const env = testEnv();
 const clock = fixedClock("2026-09-01T17:30:00.000Z");
@@ -26,15 +25,6 @@ const configEnv = createTestEnv();
 const config = parseConfig(configEnv.APP_CONFIG_JSON);
 const suffix = "\nสนใจทักแชต\n#Snazzy\n";
 const template = `หัวกระดาษ {{PUBLICATION_DATE}}\n{{PRODUCTS}}${suffix}{{END_PRODUCTS}}\nท้ายกระดาษ\n`;
-let privateKey = "";
-
-beforeAll(() => {
-  privateKey = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-    publicKeyEncoding: { type: "spki", format: "pem" },
-  }).privateKey;
-});
 
 function product(productId: string): PublicationProduct {
   return {
@@ -75,24 +65,6 @@ async function seedCollages(products: PublicationProduct[]) {
     await putProductCollage(env.DB, clock, runId, item.productId,
       `products/${item.productId}/collage/1080x1080.jpg`, await collageInputFingerprint(item.orderedImageKeys));
   }
-}
-
-// Only the durable scheduler is replaced; every callback runs the real stages.
-// Honor the retry options emitted by production, without wall-clock delays.
-function retryingStep() {
-  const attempts: string[] = [];
-  const step = {
-    do: async (name: string, options: { retries: { limit: number } }, callback: () => Promise<unknown>) => {
-      for (let attempt = 0; ; attempt += 1) {
-        attempts.push(name);
-        try { return await callback(); }
-        catch (error) {
-          if (error instanceof NonRetryableError || attempt === options.retries.limit) throw error;
-        }
-      }
-    },
-  } as unknown as WorkflowStep;
-  return { step, attempts };
 }
 
 function imageBoundary() {
@@ -236,14 +208,22 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
     db: env.DB, bucket: image.bucket, images: image.images,
     assets: createAssetStore(image.bucket, { signingSecret: "test-secret", publicBaseUrl: config.publicBaseUrl }, clock),
     fetcher, clock, config, airtableToken: "airtable-token",
-    googleServiceAccountJson: JSON.stringify({ client_email: "svc@example.com", private_key: privateKey }),
+    googleOAuthCredentials: {
+      clientId: "test-oauth-client-id",
+      clientSecret: "test-oauth-client-secret",
+      refreshToken: "test-refresh-token",
+    },
     anthropic: { messages: { countTokens, create } } as unknown as PublicationServiceDeps["anthropic"],
     notify,
   };
   const scheduler = retryingStep();
   return {
     products, state, calls, batches, failureSnapshots, image, countTokens, create, notify, deps, scheduler,
-    run: () => runPublicationWorkflow({ publicationRunId: fixtureRunId, trigger: "admin" }, scheduler.step, deps),
+    run: () => runPublicationWorkflow(
+      { publicationRunId: fixtureRunId, trigger: "admin" },
+      scheduler as unknown as WorkflowStep,
+      deps,
+    ),
   };
 }
 
@@ -493,7 +473,7 @@ describe("publication acceptance", () => {
     expect(fixture.state.docs.size).toBe(1);
     const queries = fixture.calls.filter(c => new URL(c.url).pathname.endsWith("/tblRuns"));
     expect(queries).toHaveLength(3);
-    for (const call of queries) expect(new URL(call.url).searchParams.get("filterByFormula")).toBe("{Publication Date}='2026-09-02'");
+    for (const call of queries) expect(new URL(call.url).searchParams.get("filterByFormula")).toBe("DATESTR({Publication Date})='2026-09-02'");
   });
 
   it.each([[503, "errored", "restarted"], [429, "unknown", "started"]] as const)
@@ -502,12 +482,16 @@ describe("publication acceptance", () => {
       fixture.state.batchFailureStatus = httpStatus;
       await expect(fixture.run()).rejects.toThrow("Unable to fill or verify the Google document.");
       expect(fixture.batches).toHaveLength(6);
-      expect(fixture.scheduler.attempts.filter(name => name === "fill and verify document")).toHaveLength(6);
+      expect(fixture.scheduler.calls).toContainEqual({
+        name: "fill and verify document",
+        retryLimit: 5,
+        attempts: 6,
+      });
       expect(fixture.failureSnapshots).toEqual(Array.from({ length: 6 }, () => ({
         job: { state: "generating", temp_doc_id: "temp-doc-1", google_doc_id: null, google_doc_url: null, correlation_id: "publication-rec-run-1" },
         docs: 1, status: "Generating",
       })));
-      expect(fixture.calls.filter(c => c.method === "DELETE").map(c => c.url)).toEqual(["https://www.googleapis.com/drive/v3/files/temp-doc-1?supportsAllDrives=true"]);
+      expect(fixture.calls.filter(c => c.method === "DELETE").map(c => c.url)).toEqual(["https://www.googleapis.com/drive/v3/files/temp-doc-1"]);
       const batchIndices = fixture.calls.flatMap((call, index) => call.url.endsWith(":batchUpdate") ? [index] : []);
       expect(fixture.calls.findIndex(c => c.method === "DELETE")).toBeGreaterThan(batchIndices.at(-1)!);
       expect(await job()).toMatchObject({ state: "failed", temp_doc_id: null, google_doc_id: null, google_doc_url: null });

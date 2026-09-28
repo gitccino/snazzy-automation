@@ -1,5 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it, vi } from "vitest";
+import { getMonthlyUsage } from "../../src/db/usage-repository";
+import { testEnv } from "../helpers/env";
 import {
   generateCaptionsForRun,
   planCaptionBatches,
@@ -24,7 +26,10 @@ function product(productId: string): PublicationProduct {
   };
 }
 
-function toolResponse(captions: Array<{ productId: string; drafts: string[] }>) {
+function toolResponse(
+  captions: Array<{ productId: string; drafts: string[] }>,
+  usage = { input_tokens: 0, output_tokens: 0 },
+) {
   return {
     content: [
       {
@@ -33,6 +38,7 @@ function toolResponse(captions: Array<{ productId: string; drafts: string[] }>) 
         input: { captions },
       },
     ],
+    usage,
   };
 }
 
@@ -75,6 +81,34 @@ describe("planCaptionBatches", () => {
     const products = [toCaptionRequestProducts([product("A-1001")])[0]!, toCaptionRequestProducts([product("A-1002")])[0]!];
     const batches = await planCaptionBatches(client, "claude-opus-5", products, 1000);
     expect(batches).toEqual([products.sort((a, b) => a.productId.localeCompare(b.productId))]);
+  });
+
+  it("sends strict tool arrays without unsupported length constraints", async () => {
+    const countTokens = vi.fn().mockResolvedValue({ input_tokens: 500 });
+    await planCaptionBatches(
+      sdkClient({ countTokens }),
+      "claude-opus-5",
+      [toCaptionRequestProducts([product("A-1001")])[0]!],
+      1_000,
+    );
+
+    const params = countTokens.mock.calls[0]?.[0] as CountTokensParams | undefined;
+    const tool = params?.tools?.[0] as unknown as { input_schema?: {
+      properties?: {
+        captions?: {
+          items?: {
+            properties?: {
+              drafts?: { type?: string; items?: { type?: string }; minItems?: number; maxItems?: number };
+            };
+          };
+        };
+      };
+    } } | undefined;
+
+    expect(tool?.input_schema?.properties?.captions?.items?.properties?.drafts).toEqual({
+      type: "array",
+      items: { type: "string" },
+    });
   });
 
   it("splits deterministically by sorted Product ID when over the limit", async () => {
@@ -160,6 +194,38 @@ describe("planCaptionBatches", () => {
       retryable: false,
     });
   });
+
+  it("logs safe Anthropic diagnostics for a retryable count-tokens failure", async () => {
+    const error = Object.assign(new Error("secret response text"), {
+      status: 429,
+      type: "rate_limit_error",
+      requestID: "req_test123",
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const client = sdkClient({
+      countTokens: vi.fn().mockRejectedValue(error),
+    });
+
+    try {
+      await expect(planCaptionBatches(
+        client,
+        "claude-opus-5",
+        [toCaptionRequestProducts([product("A-1001")])[0]!],
+        1_000,
+      )).rejects.toBe(error);
+
+      expect(log).toHaveBeenCalledWith("Anthropic request failed", {
+        operation: "count_tokens",
+        status: 429,
+        errorType: "rate_limit_error",
+        errorName: "Error",
+        requestId: "req_test123",
+      });
+      expect(JSON.stringify(log.mock.calls)).not.toContain("secret response text");
+    } finally {
+      log.mockRestore();
+    }
+  });
 });
 
 describe("requestCaptionBatch", () => {
@@ -210,7 +276,7 @@ describe("requestCaptionBatch", () => {
 
   it("marks every requested Product ID for retry when the response cannot be parsed", async () => {
     const client = sdkClient({
-      create: vi.fn().mockResolvedValue({ content: [] }),
+      create: vi.fn().mockResolvedValue({ content: [], usage: { input_tokens: 0, output_tokens: 0 } }),
     });
     const requested = [toCaptionRequestProducts([product("A-1001")])[0]!, toCaptionRequestProducts([product("A-1002")])[0]!];
     const outcome = await requestCaptionBatch(client, "claude-opus-5", requested);
@@ -271,6 +337,61 @@ describe("requestCaptionBatch", () => {
 });
 
 describe("generateCaptionsForRun", () => {
+  it("returns captions when output-token persistence fails after input tokens", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const client = sdkClient({
+      countTokens: vi.fn().mockResolvedValue({ input_tokens: 500 }),
+      create: vi.fn().mockResolvedValue(toolResponse(
+        [{ productId: "A-1001", drafts: ["หนึ่ง", "สอง", "สาม"] }],
+        { input_tokens: 500, output_tokens: 300 },
+      )),
+    });
+    const failingDb = {
+      prepare: vi.fn()
+        .mockReturnValueOnce({ bind: () => ({ run: async () => undefined }) })
+        .mockImplementationOnce(() => { throw new Error("D1 unavailable"); }),
+    } as unknown as D1Database;
+
+    try {
+      await expect(generateCaptionsForRun(
+        client,
+        "claude-opus-5",
+        1_000,
+        toCaptionRequestProducts([product("A-1001")]),
+        { db: failingDb, clock: { now: () => new Date("2026-09-01T10:00:00+07:00") } },
+      )).resolves.toEqual({
+        captions: [{ productId: "A-1001", drafts: ["หนึ่ง", "สอง", "สาม"] }],
+        missingProductIds: [],
+      });
+      expect(warning).toHaveBeenCalledWith("Usage metric recording failed");
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("records Claude input output token usage in D1", async () => {
+    const client = sdkClient({
+      countTokens: vi.fn().mockResolvedValue({ input_tokens: 500 }),
+      create: vi.fn().mockResolvedValue(toolResponse(
+        [{ productId: "A-1001", drafts: ["หนึ่ง", "สอง", "สาม"] }],
+        { input_tokens: 500, output_tokens: 300 },
+      )),
+    });
+    const products = toCaptionRequestProducts([product("A-1001")]);
+
+    await generateCaptionsForRun(
+      client,
+      "claude-opus-5",
+      1_000,
+      products,
+      { db: testEnv().DB, clock: { now: () => new Date("2026-09-01T10:00:00+07:00") } },
+    );
+
+    const usage = await getMonthlyUsage(testEnv().DB, "2026-09");
+    expect(usage.claude_input_tokens).toBe(500);
+    expect(usage.claude_output_tokens).toBe(300);
+  });
+
   it("preserves earlier captions when a later split batch has a malformed envelope", async () => {
     const client = sdkClient({
       countTokens: vi.fn().mockImplementation(

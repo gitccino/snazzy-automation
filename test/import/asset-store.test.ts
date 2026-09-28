@@ -1,9 +1,48 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { getUsageTotal } from "../../src/db/usage-repository";
 import { testEnv } from "../helpers/env";
 import { createAssetStore, verifyAssetToken } from "../../src/import/asset-store";
 import { fixedClock } from "../helpers/fakes";
 
 describe("asset-store", () => {
+  it("returns a created R2 object when byte metric persistence fails", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const store = createAssetStore(
+      testEnv().IMAGES_BUCKET,
+      { signingSecret: "test-signing-secret", publicBaseUrl: "https://worker.example" },
+      fixedClock("2026-09-01T10:00:00+07:00"),
+      { prepare: () => { throw new Error("D1 unavailable"); } } as unknown as D1Database,
+    );
+    const hash = `metric-failure-${crypto.randomUUID()}`;
+    const body = new Uint8Array(10).buffer;
+
+    try {
+      await expect(store.putIfAbsent(hash, "jpg", body, "image/jpeg")).resolves.toEqual({
+        r2Key: `assets/${hash}.jpg`,
+        created: true,
+      });
+      expect((await store.putIfAbsent(hash, "jpg", body, "image/jpeg")).created).toBe(false);
+      expect(warning).toHaveBeenCalledWith("Usage metric recording failed");
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("records only bytes added by newly created R2 object", async () => {
+    const clock = { now: () => new Date("2026-09-01T10:00:00+07:00") };
+    const store = createAssetStore(
+      testEnv().IMAGES_BUCKET,
+      { signingSecret: "test-signing-secret", publicBaseUrl: "https://worker.example" },
+      clock,
+      testEnv().DB,
+    );
+    const body = new Uint8Array(2_500_000).buffer;
+
+    expect((await store.putIfAbsent("sha256-fixture", "jpg", body, "image/jpeg")).created).toBe(true);
+    expect((await store.putIfAbsent("sha256-fixture", "jpg", body, "image/jpeg")).created).toBe(false);
+    expect(await getUsageTotal(testEnv().DB, "r2_bytes_added")).toBe(2_500_000);
+  });
+
   it("stores a new object once and reports created=true", async () => {
     const store = createAssetStore(testEnv().IMAGES_BUCKET, { signingSecret: "test-secret", publicBaseUrl: "https://example.workers.dev" }, fixedClock("2026-09-01T09:00:00.000Z"));
     const hash = `hash-${crypto.randomUUID()}`;

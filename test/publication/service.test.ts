@@ -1,5 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { generateKeyPairSync } from "node:crypto";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { testEnv } from "../helpers/env";
 import {
   ensureTemporaryDocument, failPublicationAfterExhaustion, fillAndVerifyDocument,
@@ -14,14 +13,6 @@ import { collageInputFingerprint } from "../../src/publication/collage";
 import { captionInputFingerprint } from "../../src/publication/captions";
 
 const env = testEnv();
-let privateKey = "";
-beforeAll(() => {
-  privateKey = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-    publicKeyEncoding: { type: "spki", format: "pem" },
-  }).privateKey;
-});
 const clock = { now: () => new Date("2026-09-01T17:30:00.000Z") };
 const drafts: [string, string, string] = ["หนึ่ง", "สอง", "สาม"];
 const product: PublicationProduct = {
@@ -53,7 +44,11 @@ function baseDeps(overrides: Partial<PublicationServiceDeps> = {}): PublicationS
       claudeRequestInputTokenLimit: 150_000, publicBaseUrl: "https://worker.example", timeZone: "Asia/Bangkok",
     } as PublicationServiceDeps["config"],
     airtableToken: "airtable-token",
-    googleServiceAccountJson: JSON.stringify({ client_email: "svc@example.com", private_key: privateKey }),
+    googleOAuthCredentials: {
+      clientId: "test-oauth-client-id",
+      clientSecret: "test-oauth-client-secret",
+      refreshToken: "test-refresh-token",
+    },
     notify: vi.fn().mockResolvedValue(undefined), ...overrides,
   };
 }
@@ -408,7 +403,7 @@ describe("publication stages", () => {
       .mockResolvedValueOnce(new Response(null, { status: 204 })).mockResolvedValueOnce(json({}));
     const deps = baseDeps({ fetcher });
     await failPublicationAfterExhaustion(deps, "rec-run-1", "Document preparation failed", null);
-    expect(String(fetcher.mock.calls[2]![0])).toBe("https://www.googleapis.com/drive/v3/files/orphan-doc?supportsAllDrives=true");
+    expect(String(fetcher.mock.calls[2]![0])).toBe("https://www.googleapis.com/drive/v3/files/orphan-doc");
     expect(fetcher.mock.calls[2]![1]?.method).toBe("DELETE");
     expect(await job()).toMatchObject({ state: "failed", temp_doc_id: null });
     expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining("ไม่สามารถอ่านวันที่รายการได้"));

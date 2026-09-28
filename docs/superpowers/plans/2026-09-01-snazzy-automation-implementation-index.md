@@ -157,9 +157,11 @@ export type Fetcher = typeof fetch;
 ├── wrangler.jsonc
 ├── migrations/
 │   ├── 0001_initial.sql
-│   ├── 0002_publication.sql
+│   ├── 0002_import_run_terminal_details.sql
 │   ├── 0003_line_inventory.sql
-│   └── 0004_usage_metrics.sql
+│   ├── 0003_publication.sql
+│   ├── 0004_line_recovery.sql
+│   └── 0005_usage_metrics.sql
 ├── src/
 │   ├── index.ts
 │   ├── env.ts
@@ -498,6 +500,8 @@ This matrix is the final coverage check against `docs/superpowers/specs/2026-09-
 | §20 Final decisions | Fixed Low-Level Decisions and Cross-Plan Interfaces in this index | Exact migration order, IDs, marker payload, Bangkok-time helpers, workflow states, signed assets, model, and parser contracts are repeated in task interfaces and tests. |
 
 ## Plan Completion Definition
+
+Public `/health` reads D1 import/sequence state on every request. Its Airtable drift probe uses one filtered request capped at one record, with a 30-second single-flight cache (including unavailable results) per Worker isolate. Sequence/configuration/credential changes invalidate the cache. Airtable edits or recovery can take up to 30 seconds to appear; cold or distinct isolates each make their own bounded request, so this is not a global rate limiter. Authenticated setup/bootstrap retain the complete Product ID scan.
 
 Suite is complete only when:
 

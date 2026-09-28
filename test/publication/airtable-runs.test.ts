@@ -123,7 +123,7 @@ describe("findRunnableRunForDate", () => {
     expect(firstCallUrl).toContain("tblRuns");
     expect(firstCallUrl).toContain(encodeURIComponent("2026-09-01"));
     const query = new URL(firstCallUrl).searchParams;
-    expect(query.get("filterByFormula")).toBe("{Publication Date}='2026-09-01'");
+    expect(query.get("filterByFormula")).toBe("DATESTR({Publication Date})='2026-09-01'");
     expect(query.get("maxRecords")).toBe("2");
     expect(query.get("pageSize")).toBe("2");
   });

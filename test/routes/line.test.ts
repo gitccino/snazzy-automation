@@ -6,6 +6,8 @@ import {
   toLineDocsTriggerResult,
 } from "../../src/routes/line";
 
+const immediateContext = { waitUntil() {} } as unknown as ExecutionContext;
+
 async function sign(body: Uint8Array, secret: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
@@ -28,6 +30,7 @@ it("returns 401 before parsing an invalidly signed body", async () => {
       body: "not-json",
     }),
     { ...testEnv(), LINE_CHANNEL_SECRET: "secret" },
+    immediateContext,
     { process },
   );
 
@@ -57,6 +60,7 @@ it("passes only schema-validated supported events", async () => {
       body,
     }),
     { ...testEnv(), LINE_CHANNEL_SECRET: "secret" },
+    immediateContext,
     { process },
   );
 
@@ -64,6 +68,50 @@ it("passes only schema-validated supported events", async () => {
   expect(process).toHaveBeenCalledWith([
     expect.objectContaining({ webhookEventId: "evt-1" }),
   ]);
+});
+
+it("acknowledges an upload before command processing finishes", async () => {
+  const body = new TextEncoder().encode(JSON.stringify({
+    events: [{
+      type: "message",
+      webhookEventId: "evt-slow-upload",
+      replyToken: "reply-slow-upload",
+      source: { type: "group", groupId: "C1", userId: "U1" },
+      message: { type: "text", id: "msg-slow-upload", text: "/upload" },
+    }],
+  }));
+  let finishProcessing!: () => void;
+  const processing = new Promise<void>((resolve) => { finishProcessing = resolve; });
+  let processed = false;
+  const backgroundTasks: Promise<unknown>[] = [];
+  const ctx = {
+    waitUntil(task: Promise<unknown>) { backgroundTasks.push(task); },
+  } as ExecutionContext;
+  const responsePromise = handleLineRoute(
+    new Request("https://worker/line/webhook", {
+      method: "POST",
+      headers: { "x-line-signature": await sign(body, "secret") },
+      body,
+    }),
+    { ...testEnv(), LINE_CHANNEL_SECRET: "secret" },
+    ctx,
+    { async process() { await processing; processed = true; } },
+  );
+
+  try {
+    const outcome = await Promise.race([
+      responsePromise.then(() => "acknowledged"),
+      new Promise((resolve) => setTimeout(() => resolve("blocked"), 100)),
+    ]);
+    expect(outcome).toBe("acknowledged");
+    expect((await responsePromise).status).toBe(200);
+    expect(processed).toBe(false);
+  } finally {
+    finishProcessing();
+    await responsePromise;
+    await Promise.all(backgroundTasks);
+  }
+  expect(processed).toBe(true);
 });
 
 it("returns 400 for a signed malformed top-level payload", async () => {
@@ -76,6 +124,7 @@ it("returns 400 for a signed malformed top-level payload", async () => {
       body,
     }),
     { ...testEnv(), LINE_CHANNEL_SECRET: "secret" },
+    immediateContext,
     { process: vi.fn() },
   );
 

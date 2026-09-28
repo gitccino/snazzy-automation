@@ -1,4 +1,5 @@
 import { OperationalError } from "./errors";
+import { redactText } from "./logger";
 
 export type Fetcher = typeof fetch;
 
@@ -12,7 +13,7 @@ function redactUrl(url: string, patterns: RegExp[] = []): string {
   for (const pattern of patterns) {
     safe = safe.replace(pattern, "[REDACTED]");
   }
-  return safe;
+  return redactText(safe);
 }
 
 export async function safeFetch(
@@ -21,7 +22,12 @@ export async function safeFetch(
   options: SafeFetchOptions
 ): Promise<Response> {
   const { fetcher, redactUrlPatterns = [] } = options;
-  const response = await fetcher(input, init);
+  let response: Response;
+  try {
+    response = await fetcher(input, init);
+  } catch {
+    throw new OperationalError("HTTP_NETWORK", `network error fetching ${redactUrl(input, redactUrlPatterns)}`, true);
+  }
 
   if (response.status === 429) {
     throw new OperationalError(

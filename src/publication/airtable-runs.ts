@@ -130,7 +130,7 @@ export async function findRunnableRunForDate(
   isoDate: string,
 ): Promise<PublicationRun | null> {
   // Inspect all statuses: a Ready row must not hide another row already Generated.
-  const formula = `{Publication Date}='${isoDate}'`;
+  const formula = `DATESTR({Publication Date})='${isoDate}'`;
   const url = `${airtableUrl(config, config.airtablePublicationRunsTableId)}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=2&pageSize=2`;
   const response = await fetcher(url, { headers: authHeaders(token) });
   if (!response.ok) {

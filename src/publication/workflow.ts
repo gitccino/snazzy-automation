@@ -29,7 +29,7 @@ function depsFor(env: Env, clock: Clock): PublicationServiceDeps {
     assets: createAssetStore(env.IMAGES_BUCKET, {
       signingSecret: env.ASSET_URL_SIGNING_SECRET,
       publicBaseUrl: config.publicBaseUrl,
-    }, clock),
+    }, clock, env.DB),
     bucket: env.IMAGES_BUCKET,
     images: env.IMAGES,
     fetcher,
@@ -37,7 +37,11 @@ function depsFor(env: Env, clock: Clock): PublicationServiceDeps {
     clock,
     config,
     airtableToken: env.AIRTABLE_TOKEN,
-    googleServiceAccountJson: env.GOOGLE_SERVICE_ACCOUNT_JSON,
+    googleOAuthCredentials: {
+      clientId: env.GOOGLE_OAUTH_CLIENT_ID,
+      clientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
+      refreshToken: env.GOOGLE_REFRESH_TOKEN,
+    },
     notify: (text) => line.pushMessage(config.lineAllowedGroupId, text),
   };
 }

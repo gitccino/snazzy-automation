@@ -14,7 +14,7 @@ import {
 } from "./airtable-runs";
 import { generateCollage, collageR2Key, collageInputFingerprint, type ImagesBinding } from "./collage";
 import { captionInputFingerprint, planCaptionBatches, requestCaptionBatch, toCaptionRequestProducts } from "./captions";
-import { createGoogleAuthClient } from "./google-auth";
+import { createGoogleAuthClient, type GoogleOAuthCredentials } from "./google-auth";
 import {
   copyTemplate, deleteDocument, fillTemplate, finalizeDocument,
   findTemporaryDocument, verifyDocumentContainsProducts, type DocProductContent,
@@ -36,7 +36,7 @@ export interface PublicationServiceDeps {
   clock: Clock;
   config: AppConfig;
   airtableToken: string;
-  googleServiceAccountJson: string;
+  googleOAuthCredentials: GoogleOAuthCredentials;
   notify(text: string): Promise<void>;
 }
 
@@ -180,7 +180,12 @@ async function captionsForProducts(deps: PublicationServiceDeps, runId: string, 
   const batches = await planCaptionBatches(deps.anthropic, deps.config.claudeModel, toCaptionRequestProducts(missing), deps.config.claudeRequestInputTokenLimit);
   const unresolved: string[] = [];
   for (const batch of batches) {
-    const generated = await requestCaptionBatch(deps.anthropic, deps.config.claudeModel, batch);
+    const generated = await requestCaptionBatch(
+      deps.anthropic,
+      deps.config.claudeModel,
+      batch,
+      { db: deps.db, clock: deps.clock },
+    );
     // Commit valid work before another batch can throw or return incomplete data.
     for (const item of generated.captions) {
       await putProductCaptions(deps.db, deps.clock, runId, item.productId, JSON.stringify(item.drafts), fingerprints.get(item.productId)!);
@@ -212,7 +217,7 @@ export async function ensureTemporaryDocument(deps: PublicationServiceDeps, prep
   const job = await readJob(deps, runId);
   requireActiveJob(job);
   if (job.tempDocId) return job.tempDocId;
-  const tokens = createGoogleAuthClient(deps.googleServiceAccountJson, deps.clock, deps.fetcher);
+  const tokens = createGoogleAuthClient(deps.googleOAuthCredentials, deps.clock, deps.fetcher);
   const discovered = await findTemporaryDocument(deps.fetcher, tokens, deps.config.googleDriveFolderId, runId);
   const docId = discovered ?? await copyTemplate(deps.fetcher, tokens, deps.config.googleTemplateDocId, deps.config.googleDriveFolderId, runId, `Publication ${prepared.run.publicationDate} (in progress)`);
   await setTempDocId(deps.db, deps.clock, runId, docId);
@@ -221,7 +226,7 @@ export async function ensureTemporaryDocument(deps: PublicationServiceDeps, prep
 
 export async function fillAndVerifyDocument(deps: PublicationServiceDeps, prepared: PreparedPublication, tempDocId: string): Promise<void> {
   requireActiveJob(await readJob(deps, prepared.run.airtableRunId));
-  const tokens = createGoogleAuthClient(deps.googleServiceAccountJson, deps.clock, deps.fetcher);
+  const tokens = createGoogleAuthClient(deps.googleOAuthCredentials, deps.clock, deps.fetcher);
   const products: DocProductContent[] = [];
   for (const output of prepared.outputs) {
     const signedUrl = await deps.assets.signUrl(output.collageR2Key, 900);
@@ -243,7 +248,7 @@ export async function finalizePublication(deps: PublicationServiceDeps, prepared
   const productIds = prepared.outputs.map(o => o.product.productId);
   if (job.state === "succeeded") return publicationResult(runId, job, productIds);
   requireActiveJob(job);
-  const tokens = createGoogleAuthClient(deps.googleServiceAccountJson, deps.clock, deps.fetcher);
+  const tokens = createGoogleAuthClient(deps.googleOAuthCredentials, deps.clock, deps.fetcher);
   const url = await finalizeDocument(deps.fetcher, tokens, tempDocId, `Publication ${prepared.run.publicationDate}`);
   await markRunGenerated(deps.fetcher, deps.config, deps.airtableToken, runId, url, deps.clock.now().toISOString());
   await setJobState(deps.db, deps.clock, runId, "succeeded", { googleDocId: tempDocId, googleDocUrl: url, tempDocId });
@@ -266,7 +271,7 @@ export async function failPublicationAfterExhaustion(
   // Only a generating job could have created a copy. Validation failures must
   // not initiate Google discovery; a failed row already completed its cleanup.
   if (job.state !== "failed" && (job.tempDocId || job.state === "generating")) {
-    const tokens = createGoogleAuthClient(deps.googleServiceAccountJson, deps.clock, deps.fetcher);
+    const tokens = createGoogleAuthClient(deps.googleOAuthCredentials, deps.clock, deps.fetcher);
     const docId = job.tempDocId ?? await findTemporaryDocument(deps.fetcher, tokens, deps.config.googleDriveFolderId, publicationRunId);
     if (docId) {
       await deleteDocument(deps.fetcher, tokens, docId);

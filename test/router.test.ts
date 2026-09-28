@@ -12,6 +12,8 @@ import { routeRequest } from "../src/router";
 import worker, { ImportWorkflow, PublicationWorkflow } from "../src/index";
 import { createTestEnv, testEnv } from "./helpers/env";
 
+const ctx = { waitUntil() {} } as unknown as ExecutionContext;
+
 function routerEnv() {
   const create = vi.fn().mockResolvedValue({ id: "admin-instance" });
   const env = { ...testEnv(), ...createTestEnv() };
@@ -33,7 +35,7 @@ describe("routeRequest", () => {
     for (const authorization of [undefined, "Basic test-admin-route-token", "Bearer", "Bearer ", "bearer test-admin-route-token", "Bearer  test-admin-route-token", "Bearer\ttest-admin-route-token", "Bearer wrong", "Bearer test-admin-route-token extra"]) {
       const response = await routeRequest(new Request("https://worker.example/upload", {
         method: "POST", headers: authorization === undefined ? {} : { authorization },
-      }), env);
+      }), env, ctx);
       expect(response.status).toBe(401);
       expect(await response.json()).toEqual({ error: "unauthorized" });
     }
@@ -46,7 +48,7 @@ describe("routeRequest", () => {
     await createSequenceRepository(env.DB).bootstrap("product_id", 1);
     const response = await routeRequest(new Request("https://worker.example/upload", {
       method: "POST", headers: { authorization: "Bearer test-admin-route-token" },
-    }), env);
+    }), env, ctx);
     expect(response.status).toBe(202);
     expect(create.mock.calls[0]?.[0].params.trigger).toBe("admin");
   });
@@ -55,13 +57,13 @@ describe("routeRequest", () => {
     const { env, create } = routerEnv();
     const get = vi.fn();
     env.IMAGES_BUCKET = { get } as unknown as typeof env.IMAGES_BUCKET;
-    const forbidden = await routeRequest(new Request("https://worker.example/assets/photo.jpg"), env);
+    const forbidden = await routeRequest(new Request("https://worker.example/assets/photo.jpg"), env, ctx);
     expect(forbidden.status).toBe(403);
     expect(await forbidden.text()).toBe("forbidden");
     for (const [method, path] of [["POST", "/assets/photo.jpg"], ["GET", "/assets"], ["GET", "/upload"], ["PUT", "/upload"], ["POST", "/upload/"], ["POST", "/uploads"]]) {
       const response = await routeRequest(new Request(`https://worker.example${path}`, {
         method, headers: { authorization: "Bearer test-admin-route-token" },
-      }), env);
+      }), env, ctx);
       expect(response.status).toBe(404);
       expect(await response.json()).toEqual({ error: "not_found" });
     }
@@ -86,7 +88,7 @@ describe("routeRequest", () => {
     const handled = Response.json({ status: "started", publicationRunId: "rec-run-1" }, { status: 202 });
     docsRoute.handleDocsRoute.mockResolvedValue(handled);
 
-    expect(await routeRequest(request, env)).toBe(handled);
+    expect(await routeRequest(request, env, ctx)).toBe(handled);
     expect(docsRoute.handleDocsRoute).toHaveBeenCalledExactlyOnceWith(request, env);
     expect(create).not.toHaveBeenCalled();
   });
@@ -94,7 +96,7 @@ describe("routeRequest", () => {
   it("keeps other docs methods and paths outside the native route", async () => {
     const { env } = routerEnv();
     for (const [method, path] of [["GET", "/docs"], ["PUT", "/docs"], ["POST", "/docs/"], ["POST", "/documents"]]) {
-      const response = await routeRequest(new Request(`https://worker.example${path}`, { method }), env);
+      const response = await routeRequest(new Request(`https://worker.example${path}`, { method }), env, ctx);
       expect(response.status).toBe(404);
     }
     expect(docsRoute.handleDocsRoute).not.toHaveBeenCalled();

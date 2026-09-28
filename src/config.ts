@@ -20,6 +20,11 @@ const RawAppConfigSchema = z.object({
   LINE_ALLOWED_GROUP_ID: z.string().min(1),
   SOLDOUT_CONFIRMATION_ENABLED: z.boolean().default(true),
   PUBLIC_BASE_URL: z.string().url(),
+  MONTHLY_BUDGET_THB: z.coerce.number().positive().default(1000),
+  USD_TO_THB_RATE: z.coerce.number().positive().default(36),
+  CLAUDE_INPUT_PRICE_USD_PER_MTOK: z.coerce.number().nonnegative().default(5),
+  CLAUDE_OUTPUT_PRICE_USD_PER_MTOK: z.coerce.number().nonnegative().default(25),
+  R2_PRICE_USD_PER_GB_MONTH: z.coerce.number().nonnegative().default(0.015),
 });
 
 export interface AppConfig {
@@ -42,6 +47,11 @@ export interface AppConfig {
   lineAllowedGroupId: string;
   soldoutConfirmationEnabled: boolean;
   publicBaseUrl: string;
+  monthlyBudgetThb: number;
+  usdToThbRate: number;
+  claudeInputPriceUsdPerMtok: number;
+  claudeOutputPriceUsdPerMtok: number;
+  r2PriceUsdPerGbMonth: number;
 }
 
 export function parseConfig(raw: unknown): AppConfig {
@@ -67,5 +77,10 @@ export function parseConfig(raw: unknown): AppConfig {
     lineAllowedGroupId: parsed.LINE_ALLOWED_GROUP_ID,
     soldoutConfirmationEnabled: parsed.SOLDOUT_CONFIRMATION_ENABLED,
     publicBaseUrl: parsed.PUBLIC_BASE_URL,
+    monthlyBudgetThb: parsed.MONTHLY_BUDGET_THB,
+    usdToThbRate: parsed.USD_TO_THB_RATE,
+    claudeInputPriceUsdPerMtok: parsed.CLAUDE_INPUT_PRICE_USD_PER_MTOK,
+    claudeOutputPriceUsdPerMtok: parsed.CLAUDE_OUTPUT_PRICE_USD_PER_MTOK,
+    r2PriceUsdPerGbMonth: parsed.R2_PRICE_USD_PER_GB_MONTH,
   };
 }

@@ -44,7 +44,7 @@ The import plan (`docs/superpowers/plans/2026-09-01-snazzy-import-pipeline.md`) 
 - `src/line/client.ts` exporting `createLineClient({ channelAccessToken, fetch }): LineClient`; `LineClient.pushMessage(toGroupId, text)` sends Thai import/publication notifications.
 - Import notifications live in `src/import/notify.ts`; no `src/line/messages.ts` exists yet. Task 8 creates that file for publication-specific Thai message builders without moving or renaming Import behavior.
 - `src/import/airtable-products.ts` exporting an Airtable REST helper pattern (auth header, base/table path construction, retry-free single-call semantics) that `publication/airtable-runs.ts` mirrors for consistency.
-- Migrations `migrations/0001_initial.sql` and `migrations/0002_import_run_terminal_details.sql` are already applied. This plan owns `migrations/0003_publication.sql`; the later LINE and hardening plans must use `0004_line_inventory.sql` and `0005_usage_metrics.sql` respectively.
+- Migrations `migrations/0001_initial.sql` and `migrations/0002_import_run_terminal_details.sql` are already applied. This plan owns `migrations/0003_publication.sql`; the LINE plan also shipped `0003_line_inventory.sql` plus `0004_line_recovery.sql`, so hardening must use `0005_usage_metrics.sql`.
 
 Reconciled baseline: `main` at squash-merge commit `aa5edba` (`feat: add durable Snazzy import pipeline (#2)`), with TypeScript clean and 34 test files / 197 tests. Executors must preserve the existing `/assets` and `/upload` router branches, Import cron behavior, `IMPORT_WORKFLOW` binding/export, and both Import migrations while extending them with Publication behavior.
 

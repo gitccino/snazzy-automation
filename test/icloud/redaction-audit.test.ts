@@ -26,4 +26,23 @@ describe("iCloud client logging never leaks the token or derivative URLs", () =>
     expect(caught!.message).not.toContain(token);
     spy.mockRestore();
   });
+
+  it("redacts derivative signed URLs embedded in logged error", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logger = createLogger({ correlationId: "corr-embedded" });
+    const albumToken = "A1b2C3d4Token";
+    const signature = "abcdef123456";
+
+    logger.error("download failed", {
+      reason:
+        `https://p1-sharedstreams.icloud.com/${albumToken}/asset.jpg ` +
+        `https://worker.example/assets/x.jpg?X-Amz-Signature=${signature}`,
+    });
+
+    const line = String(spy.mock.calls[0]![0]);
+    expect(line).not.toContain(albumToken);
+    expect(line).not.toContain(signature);
+    expect(line).toContain("[REDACTED]");
+    spy.mockRestore();
+  });
 });

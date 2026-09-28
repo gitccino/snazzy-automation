@@ -7,6 +7,17 @@ function fakeFetcher(status: number, body = "{}") {
 }
 
 describe("safeFetch", () => {
+  it.each([429, 500, 404, "network"] as const)("redacts iCloud URLs from %s errors without caller patterns", async (failure) => {
+    const url = "https://cvws.icloud-content.com/B/private-photo?o=download&s=secret-signature&k=secret-key";
+    const fetcher = failure === "network"
+      ? vi.fn(async () => { throw new Error(`failed fetching ${url}`); })
+      : fakeFetcher(failure);
+    await expect(safeFetch(url, undefined, { fetcher })).rejects.toThrow(/\[REDACTED\]/);
+    try { await safeFetch(url, undefined, { fetcher }); } catch (error) {
+      expect(String(error)).not.toContain("secret-");
+      expect(String(error)).not.toContain("private-photo");
+    }
+  });
   it("returns the response unchanged on 2xx", async () => {
     const fetcher = fakeFetcher(200, '{"ok":true}');
     const res = await safeFetch("https://example.com/a", undefined, { fetcher });

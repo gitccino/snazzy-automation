@@ -1,11 +1,29 @@
 export type LogFields = Record<string, string | number | boolean | null>;
 
 const SECRET_KEY_PATTERN = /token|secret|signedurl|signed_url|derivativeurl|password|authorization/i;
+const SECRET_TEXT_PATTERNS = [
+  /https?:\/\/(?:[a-z0-9-]+\.)*icloud-content\.com\/[^\s"'<>]+/gi,
+  /https?:\/\/(?:www\.)?icloud\.com\/sharedalbum\/[^\s"'<>]+/gi,
+  /sharedstreams\.icloud\.com\/[A-Za-z0-9_-]{10,}/gi,
+  /X-Amz-Signature=[^&\s]+/gi,
+  /[?&]sig=[^&\s]+/gi,
+  /Bearer\s+[A-Za-z0-9._-]{16,}/g,
+  /LINE_CHANNEL_ACCESS_TOKEN_VALUE_[A-Za-z0-9_-]+/g,
+  /pat[A-Za-z0-9]{14,}\.[A-Za-z0-9]+/g,
+];
+
+export function redactText(value: string): string {
+  return SECRET_TEXT_PATTERNS.reduce((output, pattern) => output.replace(pattern, "[REDACTED]"), value);
+}
 
 export function redact(fields: LogFields): LogFields {
   const out: LogFields = {};
   for (const [key, value] of Object.entries(fields)) {
-    out[key] = SECRET_KEY_PATTERN.test(key) ? "[REDACTED]" : value;
+    out[key] = SECRET_KEY_PATTERN.test(key)
+      ? "[REDACTED]"
+      : typeof value === "string"
+        ? redactText(value)
+        : value;
   }
   return out;
 }
@@ -13,7 +31,7 @@ export function redact(fields: LogFields): LogFields {
 function write(level: "info" | "warn" | "error", base: LogFields, message: string, fields: LogFields) {
   const line = JSON.stringify({
     level,
-    message,
+    message: redactText(message),
     ...redact(base),
     ...redact(fields),
   });

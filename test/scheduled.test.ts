@@ -8,7 +8,9 @@ const publicationTrigger = vi.hoisted(() => {
 vi.mock("../src/publication/trigger", () => publicationTrigger);
 
 import { createSequenceRepository } from "../src/db/sequence-repository";
-import { handleScheduled } from "../src/scheduled";
+import { recordUsage } from "../src/db/usage-repository";
+import type { LineClient } from "../src/line/client";
+import { handleScheduled, runBudgetAlarmCheck } from "../src/scheduled";
 import worker from "../src/index";
 import { createTestEnv, testEnv } from "./helpers/env";
 
@@ -22,6 +24,7 @@ function scheduledEnv() {
 describe("handleScheduled", () => {
   beforeEach(async () => {
     publicationTrigger.handleDocsTrigger.mockReset();
+    await testEnv().DB.prepare("DELETE FROM usage_metrics").run();
     await testEnv().DB.prepare("DELETE FROM import_runs WHERE source_album_id = ?")
       .bind("eaf00f6811d7e301eff601ca3dc1e8c72202e63e7ebc28df6270d639cb491058").run();
     await testEnv().DB.prepare("DELETE FROM sequences WHERE name = ?").bind("product_id").run();
@@ -114,5 +117,67 @@ describe("handleScheduled", () => {
     expect(actualEnv).toBe(env);
     expect(actualTrigger).toBe("cron");
     expect(clock.now().toISOString()).toBe("2026-09-01T17:30:00.000Z");
+  });
+
+  it("pushes a Thai budget alert to the configured group only when over budget", async () => {
+    const { env } = scheduledEnv();
+    const pushed: Array<{ groupId: string; text: string }> = [];
+    const lineClient: LineClient = {
+      pushMessage: async (groupId, text) => { pushed.push({ groupId, text }); },
+      replyText: vi.fn(),
+      replyButtons: vi.fn(),
+      getGroupMemberProfile: vi.fn(),
+    };
+    const alarmEnv = { ...env, __lineClientOverride: lineClient };
+    await recordUsage(alarmEnv.DB, "claude_input_tokens", 50_000_000, "2026-09-01");
+
+    const result = await runBudgetAlarmCheck(alarmEnv, { now: () => new Date("2026-09-01T22:45:00.000Z") });
+
+    expect(result.sent).toBe(true);
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]?.groupId).toBe("CtestGroup");
+    expect(pushed[0]?.text).toContain("บาท");
+    expect(pushed[0]?.text).toContain("เกินงบประมาณ");
+  });
+
+  it("does not push a budget alert when usage is under budget", async () => {
+    const { env } = scheduledEnv();
+    const pushMessage = vi.fn();
+    const alarmEnv = {
+      ...env,
+      __lineClientOverride: {
+        pushMessage,
+        replyText: vi.fn(),
+        replyButtons: vi.fn(),
+        getGroupMemberProfile: vi.fn(),
+      } satisfies LineClient,
+    };
+
+    const result = await runBudgetAlarmCheck(alarmEnv, { now: () => new Date("2026-09-01T22:45:00.000Z") });
+
+    expect(result.sent).toBe(false);
+    expect(pushMessage).not.toHaveBeenCalled();
+  });
+
+  it("routes only the exact daily budget-alarm cron", async () => {
+    const { env } = scheduledEnv();
+    const pushMessage = vi.fn();
+    const alarmEnv = {
+      ...env,
+      __lineClientOverride: {
+        pushMessage,
+        replyText: vi.fn(),
+        replyButtons: vi.fn(),
+        getGroupMemberProfile: vi.fn(),
+      } satisfies LineClient,
+    };
+    await recordUsage(alarmEnv.DB, "claude_input_tokens", 50_000_000, "2026-09-01");
+    const clock = { now: () => new Date("2026-09-01T22:45:00.000Z") };
+
+    await handleScheduled(alarmEnv, "44 22 * * *", clock);
+    expect(pushMessage).not.toHaveBeenCalled();
+    await handleScheduled(alarmEnv, "45 22 * * *", clock);
+
+    expect(pushMessage).toHaveBeenCalledOnce();
   });
 });

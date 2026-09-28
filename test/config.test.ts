@@ -46,6 +46,11 @@ describe("parseConfig", () => {
       lineAllowedGroupId: "Cgroup",
       soldoutConfirmationEnabled: true,
       publicBaseUrl: "https://snazzy-staging.example.workers.dev",
+      monthlyBudgetThb: 1000,
+      usdToThbRate: 36,
+      claudeInputPriceUsdPerMtok: 5,
+      claudeOutputPriceUsdPerMtok: 25,
+      r2PriceUsdPerGbMonth: 0.015,
     });
   });
 
@@ -94,6 +99,25 @@ describe("parseConfig", () => {
     });
     expect(config.lineAllowedGroupId).toBe("Cgroup");
     expect(config.soldoutConfirmationEnabled).toBe(false);
+  });
+
+  it("maps approved cost settings from environment names", () => {
+    const config = parseConfig(JSON.stringify({
+      ...validRawConfig,
+      MONTHLY_BUDGET_THB: "2000",
+      USD_TO_THB_RATE: "35.5",
+      CLAUDE_INPUT_PRICE_USD_PER_MTOK: "4",
+      CLAUDE_OUTPUT_PRICE_USD_PER_MTOK: "20",
+      R2_PRICE_USD_PER_GB_MONTH: "0.01",
+    }));
+
+    expect(config).toMatchObject({
+      monthlyBudgetThb: 2000,
+      usdToThbRate: 35.5,
+      claudeInputPriceUsdPerMtok: 4,
+      claudeOutputPriceUsdPerMtok: 20,
+      r2PriceUsdPerGbMonth: 0.01,
+    });
   });
 
   it.each([

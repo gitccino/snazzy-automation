@@ -1,7 +1,9 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { recordUsage } from "../db/usage-repository";
 import { OperationalError } from "../shared/errors";
 import { sha256Hex } from "../shared/ids";
+import { todayBangkokDate, type Clock } from "../shared/time";
 import type { CaptionSet, PublicationProduct } from "./types";
 
 export interface CaptionRequestProduct {
@@ -16,6 +18,11 @@ export interface CaptionRequestProduct {
 export interface CaptionGenerationOutcome {
   captions: CaptionSet[];
   missingProductIds: string[];
+}
+
+interface CaptionUsageContext {
+  db: D1Database;
+  clock: Clock;
 }
 
 // Bump whenever the prompt, tool schema, or draft validation contract changes.
@@ -37,8 +44,6 @@ const CAPTIONS_TOOL_SCHEMA = {
             drafts: {
               type: "array" as const,
               items: { type: "string" as const },
-              minItems: 3,
-              maxItems: 3,
             },
           },
           required: ["productId", "drafts"],
@@ -128,6 +133,28 @@ function rethrowPermanentAnthropicError(
   action: "count_tokens" | "create_message",
 ): void {
   const status = apiStatus(error);
+  const details = typeof error === "object" && error !== null
+    ? error as { type?: unknown; requestID?: unknown }
+    : {};
+  const errorType = typeof details.type === "string"
+    && /^[a-z][a-z0-9_]{0,63}$/.test(details.type)
+    ? details.type
+    : null;
+  const requestId = typeof details.requestID === "string"
+    && /^[A-Za-z0-9_-]{1,128}$/.test(details.requestID)
+    ? details.requestID
+    : null;
+  const errorName = error instanceof Error
+    && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.name)
+    ? error.name
+    : null;
+  console.error("Anthropic request failed", {
+    operation: action,
+    status,
+    errorType,
+    errorName,
+    requestId,
+  });
   if (status !== null && status >= 400 && status < 500 && status !== 429) {
     throw new OperationalError(
       `anthropic_${action}_failed`,
@@ -217,15 +244,26 @@ export async function requestCaptionBatch(
   client: Pick<Anthropic, "messages">,
   model: string,
   products: CaptionRequestProduct[],
+  usageContext?: CaptionUsageContext,
 ): Promise<CaptionGenerationOutcome> {
   const requestedIds = products.map((product) => product.productId);
   const requestedIdSet = new Set(requestedIds);
-  let response: unknown;
+  let response: Anthropic.Messages.Message;
   try {
     response = await client.messages.create(buildRequestParams(model, products));
   } catch (error) {
     rethrowPermanentAnthropicError(error, "create_message");
     return { captions: [], missingProductIds: requestedIds };
+  }
+  if (usageContext && response.usage) {
+    // ponytail: best-effort metrics; add a durable outbox when billing-grade accuracy is required.
+    try {
+      const metricDate = todayBangkokDate(usageContext.clock);
+      await recordUsage(usageContext.db, "claude_input_tokens", response.usage.input_tokens, metricDate);
+      await recordUsage(usageContext.db, "claude_output_tokens", response.usage.output_tokens, metricDate);
+    } catch {
+      console.warn("Usage metric recording failed");
+    }
   }
 
   if (
@@ -281,6 +319,7 @@ export async function generateCaptionsForRun(
   model: string,
   inputTokenLimit: number,
   products: CaptionRequestProduct[],
+  usageContext?: CaptionUsageContext,
 ): Promise<CaptionGenerationOutcome> {
   if (products.length === 0) return { captions: [], missingProductIds: [] };
 
@@ -293,7 +332,7 @@ export async function generateCaptionsForRun(
   const captions: CaptionSet[] = [];
   const missingProductIds: string[] = [];
   for (const batch of batches) {
-    const outcome = await requestCaptionBatch(client, model, batch);
+    const outcome = await requestCaptionBatch(client, model, batch, usageContext);
     captions.push(...outcome.captions);
     missingProductIds.push(...outcome.missingProductIds);
   }
