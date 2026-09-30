@@ -4,6 +4,7 @@ import type { AlbumSnapshot, ImageSource, SourcePhoto } from "./types";
 import { OperationalError } from "../shared/errors";
 import { safeFetch, type Fetcher } from "../shared/http";
 import { sha256Hex } from "../shared/ids";
+import { createCloudKitClient } from "./cloudkit";
 
 const DerivativesSchema = z.record(
   z.string(),
@@ -50,13 +51,34 @@ function pickBestDerivativeChecksum(photo: WebstreamPhoto): string {
   return photo.derivatives[bestKey]!.checksum;
 }
 
-export function deriveSourceAlbumId(token: string): Promise<string> {
-  return sha256Hex(new TextEncoder().encode(token));
+function parseAlbumSource(input: string): { key: string; cloudKit: boolean } {
+  const value = input.trim();
+  if (/^[A-Za-z0-9_-]+$/.test(value)) return { key: value, cloudKit: false };
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password || url.port || url.search) throw new Error();
+    if (["photos.icloud.com", "photos.icloud.com.cn"].includes(url.hostname) && !url.hash) {
+      const match = /^\/shared\/album\/([A-Za-z0-9_-]+)\/?$/.exec(url.pathname);
+      if (match) return { key: match[1]!, cloudKit: true };
+    }
+    if (["www.icloud.com", "icloud.com"].includes(url.hostname) && /^\/sharedalbum\/?$/.test(url.pathname)) {
+      const key = url.hash.slice(1);
+      if (/^[A-Za-z0-9_-]+$/.test(key)) return { key, cloudKit: false };
+    }
+  } catch { /* Report a redacted configuration error below. */ }
+  throw new OperationalError("icloud_invalid_album_source", "Use a legacy album token or a supported iCloud shared album URL", false);
 }
 
-export function createICloudClient(token: string, fetcher: Fetcher): ImageSource {
+export async function deriveSourceAlbumId(input: string): Promise<string> {
+  const { key, cloudKit } = parseAlbumSource(input);
+  return sha256Hex(new TextEncoder().encode(cloudKit ? `icloud27:${key}` : key));
+}
+
+export function createICloudClient(input: string, fetcher: Fetcher): ImageSource {
+  const { key: token, cloudKit } = parseAlbumSource(input);
+  const sourceAlbumIdPromise = deriveSourceAlbumId(input);
+  if (cloudKit) return createCloudKitClient(token, fetcher, sourceAlbumIdPromise);
   const redact = [new RegExp(token, "g")];
-  const sourceAlbumIdPromise = deriveSourceAlbumId(token);
 
   async function getSnapshot(): Promise<AlbumSnapshot> {
     const sourceAlbumId = await sourceAlbumIdPromise;

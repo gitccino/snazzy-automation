@@ -17,7 +17,7 @@ export interface Env {
   ANTHROPIC_API_KEY: string;
   LINE_CHANNEL_ACCESS_TOKEN: string;
   LINE_CHANNEL_SECRET: string;
-  ICLOUD_SHARED_ALBUM_TOKEN: string;
+  ICLOUD_SHARED_ALBUM_TOKEN: string; // Legacy raw token or full legacy/iOS 27 shared album URL.
   ASSET_URL_SIGNING_SECRET: string;
   ADMIN_ROUTE_TOKEN: string;
   APP_CONFIG_JSON: string;

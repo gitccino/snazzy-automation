@@ -4,6 +4,8 @@ const SECRET_KEY_PATTERN = /token|secret|signedurl|signed_url|derivativeurl|pass
 const SECRET_TEXT_PATTERNS = [
   /https?:\/\/(?:[a-z0-9-]+\.)*icloud-content\.com\/[^\s"'<>]+/gi,
   /https?:\/\/(?:www\.)?icloud\.com\/sharedalbum\/[^\s"'<>]+/gi,
+  /https?:\/\/photos\.icloud\.com(?:\.cn)?\/shared\/album\/[^\s"'<>]+/gi,
+  /([?&](?:sharing_url_key|publicAccessAuthToken)=)[^&\s"'<>]+/gi,
   /sharedstreams\.icloud\.com\/[A-Za-z0-9_-]{10,}/gi,
   /X-Amz-Signature=[^&\s]+/gi,
   /[?&]sig=[^&\s]+/gi,
