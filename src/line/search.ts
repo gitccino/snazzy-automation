@@ -1,4 +1,5 @@
 import type { InventoryClient } from "./airtable-inventory";
+import { OperationalError } from "../shared/errors";
 import { helpText, notFoundText, searchText } from "./messages";
 import type { ParsedCommand } from "./types";
 
@@ -67,5 +68,10 @@ export async function handleReadOnlyCommand(
     return product ? searchText(product) : notFoundText(command.productId);
   }
   if (command.type === "upload") return uploadResultText(await deps.triggerUpload());
-  return docsResultText(await deps.triggerDocs());
+  try {
+    return docsResultText(await deps.triggerDocs());
+  } catch (error) {
+    if (!(error instanceof OperationalError) || error.code !== "airtable_duplicate_publication_date") throw error;
+    return "พบวันที่ซ้ำใน Publication Runs กรุณาแก้ให้มีเพียง 1 รอบต่อวัน แล้วลอง /docs อีกครั้ง";
+  }
 }
