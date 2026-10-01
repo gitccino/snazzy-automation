@@ -52,6 +52,9 @@ describe("template population", () => {
           const text = "text" in insertion ? insertion.text : "\ufffc";
           const offset = insertion.location.index - 1;
           documentText = documentText.slice(0, offset) + text + documentText.slice(offset);
+        } else if ("insertPageBreak" in request) {
+          const offset = request.insertPageBreak.location.index - 1;
+          documentText = documentText.slice(0, offset) + "\f\n" + documentText.slice(offset);
         } else {
           documentText = documentText.replaceAll(request.replaceAllText.containsText.text, request.replaceAllText.replaceText);
         }
@@ -61,7 +64,7 @@ describe("template population", () => {
 
     await fillTemplate(fetcher, tokenProvider(), "doc-1", "Today", [product]);
     expect(await verifyDocumentContainsProducts(fetcher, tokenProvider(), "doc-1", [product.productId])).toEqual({ ok: true });
-    expect(documentText).toContain("Listings: \ufffc\nรหัสสินค้า A-1001\nUsed\n\nGood condition\n\n");
+    expect(documentText).toContain("Listings: \f\n\ufffc\nรหัสสินค้า A-1001\nUsed\n\nGood condition\n\n");
     expect(documentText).not.toContain("{{PRODUCTS}}");
     const batch = JSON.parse(String(fetcher.mock.calls[1]![1]?.body)) as { requests: GoogleDocsRequest[] };
     expect(batch.requests.find(request => "insertInlineImage" in request)).toMatchObject({
@@ -87,9 +90,12 @@ describe("template population", () => {
         expect(request.insertInlineImage.uri).toBe(product.collageImageUrl);
         expect(request.insertInlineImage.objectSize).toEqual({ width: { magnitude: 552, unit: "PT" }, height: { magnitude: 552, unit: "PT" } });
         rendered = "[image]" + rendered;
+      } else if ("insertPageBreak" in request) {
+        expect(request.insertPageBreak.location.index).toBe(32);
+        rendered = "[page break]\n" + rendered;
       }
     }
-    expect(rendered).toBe("[image]\nรหัสสินค้า A-1001\nUsed\n\nGood condition\n\nCaption 1: draft1\nCaption 2: draft2\nCaption 3: draft3\nsuffix\n\n[image]\nรหัสสินค้า A-1002\nUsed\n\nGood condition\n\nCaption 1: draft1\nCaption 2: draft2\nCaption 3: draft3\nsuffix\n\n");
+    expect(rendered).toBe("[page break]\n[image]\nรหัสสินค้า A-1001\nUsed\n\nGood condition\n\nCaption 1: draft1\nCaption 2: draft2\nCaption 3: draft3\nsuffix\n\n[page break]\n[image]\nรหัสสินค้า A-1002\nUsed\n\nGood condition\n\nCaption 1: draft1\nCaption 2: draft2\nCaption 3: draft3\nsuffix\n\n");
     expect(requests.at(-1)).toEqual({ replaceAllText: { containsText: { text: "{{PUBLICATION_DATE}}", matchCase: true }, replaceText: "1 กันยายน 2569" } });
   });
 

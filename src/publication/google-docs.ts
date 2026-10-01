@@ -46,6 +46,7 @@ export interface DocProductContent {
 export type GoogleDocsRequest =
   | { deleteContentRange: { range: { startIndex: number; endIndex: number } } }
   | { insertText: { location: { index: number }; text: string } }
+  | { insertPageBreak: { location: { index: number } } }
   | { insertInlineImage: {
     location: { index: number };
     uri: string;
@@ -176,6 +177,7 @@ export function buildBatchUpdateRequests(
         width: { magnitude: imageWidth, unit: "PT" },
         height: { magnitude: imageWidth, unit: "PT" },
       } } },
+      { insertPageBreak: { location } },
     );
   }
   requests.push({ replaceAllText: {
