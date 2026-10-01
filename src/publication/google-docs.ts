@@ -166,7 +166,9 @@ export function buildBatchUpdateRequests(
         `รหัสสินค้า ${product.productId}`,
         product.conditionType,
         "",
-        product.description,
+        product.description.split(/\r?\n/)
+          .filter(line => !/^\s*(?:ขนาด|ไซส์|อุปกรณ์|สภาพ)\s*[:：]/u.test(line))
+          .join("\n").trim(),
         "",
         `Caption 1: ${product.captionDrafts[0]}`,
         `Caption 2: ${product.captionDrafts[1]}`,

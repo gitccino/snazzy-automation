@@ -14,7 +14,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 const product: DocProductContent = {
   productId: "A-1001",
   conditionType: "Used",
-  description: "Good condition",
+  description: "Good condition\nขนาด: 50[]16 140\nไซส์: EU 38\nอุปกรณ์: กล่องด้านนอก\nสภาพ: สภาพเหมือนใหม่ (Used like new)",
   lineSquarePrice: 1290,
   igPrice: 1390,
   captionDrafts: ["draft1", "draft2", "draft3"],
