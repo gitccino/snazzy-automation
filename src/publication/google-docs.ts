@@ -10,7 +10,16 @@ const DriveFilesSchema = z.object({
   files: z.array(DriveFileSchema).optional(),
   nextPageToken: z.string().min(1).optional(),
 });
+const PointDimensionSchema = z.object({
+  magnitude: z.number().nonnegative().default(0),
+  unit: z.literal("PT"),
+});
 const GoogleDocSchema = z.object({
+  documentStyle: z.object({
+    pageSize: z.object({ width: PointDimensionSchema }),
+    marginLeft: PointDimensionSchema,
+    marginRight: PointDimensionSchema,
+  }).optional(),
   body: z.object({
     content: z.array(z.object({
       paragraph: z.object({
@@ -138,7 +147,11 @@ export function buildBatchUpdateRequests(
   suffixText: string,
   insertionIndex: number,
   deletionEndIndex: number,
+  imageWidth: number,
 ): GoogleDocsRequest[] {
+  if (!Number.isFinite(imageWidth) || imageWidth <= 0) {
+    throw new Error("template must have a positive usable page width");
+  }
   const location = { index: insertionIndex };
   const requests: GoogleDocsRequest[] = [{
     deleteContentRange: { range: { startIndex: insertionIndex, endIndex: deletionEndIndex } },
@@ -149,19 +162,19 @@ export function buildBatchUpdateRequests(
       { insertText: { location, text: `${suffixText}\n\n` } },
       { insertText: { location, text: [
         "", // Keep Product ID on its own line even when template text precedes the image.
-        `Product ID: ${product.productId}`,
-        `Condition: ${product.conditionType}`,
-        `Description: ${product.description}`,
-        `LINE Square Price: ${product.lineSquarePrice}`,
-        `IG Price: ${product.igPrice}`,
+        `รหัสสินค้า ${product.productId}`,
+        product.conditionType,
+        "",
+        product.description,
+        "",
         `Caption 1: ${product.captionDrafts[0]}`,
         `Caption 2: ${product.captionDrafts[1]}`,
         `Caption 3: ${product.captionDrafts[2]}`,
         "",
       ].join("\n") } },
       { insertInlineImage: { location, uri: product.collageImageUrl, objectSize: {
-        width: { magnitude: 200, unit: "PT" },
-        height: { magnitude: 200, unit: "PT" },
+        width: { magnitude: imageWidth, unit: "PT" },
+        height: { magnitude: imageWidth, unit: "PT" },
       } } },
     );
   }
@@ -179,7 +192,8 @@ function textRuns(doc: GoogleDoc) {
 
 function missingProducts(fullText: string, expectedProductIds: string[]): string[] {
   const lines = new Set(fullText.split(/\r?\n/));
-  return expectedProductIds.filter((id) => !lines.has(`Product ID: ${id}`));
+  // Keep completed documents from the previous format verifiable during recovery.
+  return expectedProductIds.filter((id) => !lines.has(`รหัสสินค้า ${id}`) && !lines.has(`Product ID: ${id}`));
 }
 
 async function getDocument(fetcher: Fetcher, tokenProvider: AccessTokenProvider, docId: string): Promise<GoogleDoc> {
@@ -229,7 +243,10 @@ export async function fillTemplate(
     return;
   }
   const region = findTemplateRegion(doc);
-  const requests = buildBatchUpdateRequests(publicationDateText, products, region.suffixText, region.insertionIndex, region.deletionEndIndex);
+  const style = doc.documentStyle;
+  if (!style) throw new Error("template page size and margins are missing");
+  const imageWidth = style.pageSize.width.magnitude - style.marginLeft.magnitude - style.marginRight.magnitude;
+  const requests = buildBatchUpdateRequests(publicationDateText, products, region.suffixText, region.insertionIndex, region.deletionEndIndex, imageWidth);
   await request(fetcher, tokenProvider, `${DOCS_BASE}/documents/${encodeURIComponent(docId)}:batchUpdate`, "docs batch update", {
     method: "POST",
     body: JSON.stringify({ requests }),

@@ -22,7 +22,14 @@ const product: DocProductContent = {
 };
 
 function documentWithRuns(runs: { content: string; startIndex?: number }[]) {
-  return { body: { content: [{ paragraph: { elements: runs.map(({ content, startIndex }) => ({ startIndex, textRun: { content } })) } }] } };
+  return {
+    documentStyle: {
+      pageSize: { width: { magnitude: 612, unit: "PT" } },
+      marginLeft: { magnitude: 36, unit: "PT" },
+      marginRight: { magnitude: 24, unit: "PT" },
+    },
+    body: { content: [{ paragraph: { elements: runs.map(({ content, startIndex }) => ({ startIndex, textRun: { content } })) } }] },
+  };
 }
 
 describe("template population", () => {
@@ -54,8 +61,12 @@ describe("template population", () => {
 
     await fillTemplate(fetcher, tokenProvider(), "doc-1", "Today", [product]);
     expect(await verifyDocumentContainsProducts(fetcher, tokenProvider(), "doc-1", [product.productId])).toEqual({ ok: true });
-    expect(documentText).toContain("Listings: \ufffc\nProduct ID: A-1001\n");
+    expect(documentText).toContain("Listings: \ufffc\nรหัสสินค้า A-1001\nUsed\n\nGood condition\n\n");
     expect(documentText).not.toContain("{{PRODUCTS}}");
+    const batch = JSON.parse(String(fetcher.mock.calls[1]![1]?.body)) as { requests: GoogleDocsRequest[] };
+    expect(batch.requests.find(request => "insertInlineImage" in request)).toMatchObject({
+      insertInlineImage: { objectSize: { width: { magnitude: 552, unit: "PT" }, height: { magnitude: 552, unit: "PT" } } },
+    });
 
     const filledDocument = documentText;
     await expect(fillTemplate(fetcher, tokenProvider(), "doc-1", "Today", [product])).resolves.toBeUndefined();
@@ -64,7 +75,7 @@ describe("template population", () => {
   });
 
   it("builds one deletion and reverse inserts that render products and suffixes in input order", () => {
-    const requests = buildBatchUpdateRequests("1 กันยายน 2569", [product, { ...product, productId: "A-1002" }], "suffix", 32, 63);
+    const requests = buildBatchUpdateRequests("1 กันยายน 2569", [product, { ...product, productId: "A-1002" }], "suffix", 32, 63, 552);
     expect(requests[0]).toEqual({ deleteContentRange: { range: { startIndex: 32, endIndex: 63 } } });
     let rendered = "";
     for (const request of requests) {
@@ -74,11 +85,11 @@ describe("template population", () => {
       } else if ("insertInlineImage" in request) {
         expect(request.insertInlineImage.location.index).toBe(32);
         expect(request.insertInlineImage.uri).toBe(product.collageImageUrl);
-        expect(request.insertInlineImage.objectSize).toEqual({ width: { magnitude: 200, unit: "PT" }, height: { magnitude: 200, unit: "PT" } });
+        expect(request.insertInlineImage.objectSize).toEqual({ width: { magnitude: 552, unit: "PT" }, height: { magnitude: 552, unit: "PT" } });
         rendered = "[image]" + rendered;
       }
     }
-    expect(rendered).toBe("[image]\nProduct ID: A-1001\nCondition: Used\nDescription: Good condition\nLINE Square Price: 1290\nIG Price: 1390\nCaption 1: draft1\nCaption 2: draft2\nCaption 3: draft3\nsuffix\n\n[image]\nProduct ID: A-1002\nCondition: Used\nDescription: Good condition\nLINE Square Price: 1290\nIG Price: 1390\nCaption 1: draft1\nCaption 2: draft2\nCaption 3: draft3\nsuffix\n\n");
+    expect(rendered).toBe("[image]\nรหัสสินค้า A-1001\nUsed\n\nGood condition\n\nCaption 1: draft1\nCaption 2: draft2\nCaption 3: draft3\nsuffix\n\n[image]\nรหัสสินค้า A-1002\nUsed\n\nGood condition\n\nCaption 1: draft1\nCaption 2: draft2\nCaption 3: draft3\nsuffix\n\n");
     expect(requests.at(-1)).toEqual({ replaceAllText: { containsText: { text: "{{PUBLICATION_DATE}}", matchCase: true }, replaceText: "1 กันยายน 2569" } });
   });
 
