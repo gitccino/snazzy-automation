@@ -355,10 +355,10 @@ describe("publication acceptance", () => {
       width: 540, height: 540, fit: "cover", background: "#FFFFFF",
     } })));
     expect(fixture.image.draws).toEqual([
-      { base: "assets/collage-base-1080.jpg", key: expectedKeys[0], options: { top: 24, left: 24 } },
-      { base: "assets/collage-base-1080.jpg", key: expectedKeys[1], options: { top: 24, left: 552 } },
-      { base: "assets/collage-base-1080.jpg", key: expectedKeys[2], options: { top: 552, left: 24 } },
-      { base: "assets/collage-base-1080.jpg", key: expectedKeys[3], options: { top: 552, left: 552 } },
+      { base: "assets/collage-base-1080.jpg", key: expectedKeys[0], options: { top: 0, left: 0 } },
+      { base: "assets/collage-base-1080.jpg", key: expectedKeys[1], options: { top: 0, left: 540 } },
+      { base: "assets/collage-base-1080.jpg", key: expectedKeys[2], options: { top: 540, left: 0 } },
+      { base: "assets/collage-base-1080.jpg", key: expectedKeys[3], options: { top: 540, left: 540 } },
     ]);
     expect(fixture.image.output).toHaveBeenCalledExactlyOnceWith({ format: "image/jpeg", quality: 90 });
     expect(fixture.image.put).toHaveBeenCalledExactlyOnceWith("products/A-1001/collage/1080x1080.jpg", new Uint8Array([1, 2, 3]), { httpMetadata: { contentType: "image/jpeg" } });
