@@ -1,6 +1,11 @@
 export interface PublicationWorkflowParams {
   publicationRunId: string;
   trigger: "cron" | "line" | "admin";
+  generation?: number;
+}
+
+export function publicationWorkflowId(runId: string, generation: number): string {
+  return generation === 1 ? `publication-${runId}` : `publication-${runId}-v${generation}`;
 }
 
 export interface PublicationProduct {
@@ -26,6 +31,17 @@ export interface PublicationResult {
   googleDocId: string;
   googleDocUrl: string;
   productIds: string[];
+}
+
+export interface PublicationFinalizationIntent {
+  generation: number;
+  publicationDate: string;
+  thaiDate: string;
+  docId: string;
+  docUrl: string;
+  title: string;
+  productIds: string[];
+  generatedAt: string;
 }
 
 export type PublicationRunStatus = "Draft" | "Ready" | "Generating" | "Generated" | "Failed";

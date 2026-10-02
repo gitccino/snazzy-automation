@@ -37,6 +37,7 @@ it.each(uploadCases)("maps upload result %j to its Thai reply", async (result, e
 });
 
 const docsCases: Array<[DocsTriggerResult, string]> = [
+  [{ status: "regenerating", publicationRunId: "run-1", generation: 2 }, "เริ่มสร้างเอกสารเวอร์ชัน v2 แล้ว run-1"],
   [{ status: "started", publicationRunId: "run-1" }, "เริ่มสร้างเอกสารแล้ว run-1"],
   [{ status: "restarted", publicationRunId: "run-1" }, "เริ่มสร้างเอกสารใหม่แล้ว run-1"],
   [{ status: "resumed", publicationRunId: "run-1" }, "ทำงานสร้างเอกสารต่อแล้ว run-1"],

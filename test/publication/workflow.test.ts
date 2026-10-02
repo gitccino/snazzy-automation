@@ -8,6 +8,7 @@ const stages = vi.hoisted(() => {
   vi.resetModules();
   return {
     validatePublication: vi.fn(),
+    recoverPublicationFinalization: vi.fn(),
     notifyPublicationValidationFailure: vi.fn(),
     preparePublicationOutputs: vi.fn(),
     ensureTemporaryDocument: vi.fn(),
@@ -69,9 +70,10 @@ function retryingStep(serializeErrors = false) {
 }
 
 describe("runPublicationWorkflow", () => {
-  beforeEach(() => {
+beforeEach(() => {
     vi.resetAllMocks();
-    stages.validatePublication.mockResolvedValue({ kind: "valid", value: validated });
+  stages.validatePublication.mockResolvedValue({ kind: "valid", value: validated });
+  stages.recoverPublicationFinalization.mockResolvedValue(null);
     stages.notifyPublicationValidationFailure.mockResolvedValue(undefined);
     stages.preparePublicationOutputs.mockResolvedValue(prepared);
     stages.ensureTemporaryDocument.mockResolvedValue("temp-doc-1");
@@ -81,12 +83,13 @@ describe("runPublicationWorkflow", () => {
     stages.failPublicationAfterExhaustion.mockResolvedValue(undefined);
   });
 
-  it("runs six named durable stages with five exponential retries after the initial call", async () => {
+  it("runs seven named durable stages with five exponential retries after the initial call", async () => {
     const step = retryingStep();
 
     await expect(runPublicationWorkflow(params, step as unknown as WorkflowStep, deps)).resolves.toEqual(result);
 
     expect(step.do.mock.calls.map(([name]) => name)).toEqual([
+      "recover finalization",
       "validate publication",
       "prepare outputs",
       "ensure temporary document",
@@ -171,7 +174,7 @@ describe("runPublicationWorkflow", () => {
 
     await expect(runPublicationWorkflow(params, step as unknown as WorkflowStep, deps)).resolves.toEqual(result);
 
-    expect(step.do.mock.calls.map(([name]) => name)).toEqual(["validate publication"]);
+    expect(step.do.mock.calls.map(([name]) => name)).toEqual(["recover finalization", "validate publication"]);
     expect(stages.preparePublicationOutputs).not.toHaveBeenCalled();
   });
 
@@ -230,4 +233,14 @@ describe("runPublicationWorkflow", () => {
     expect(actualDeps.db).toBe(env.DB);
     expect(actualDeps.clock.now()).toBeInstanceOf(Date);
   });
+
+it("resumes saved finalization without rereading changed products or refilling", async () => {
+  const recovered = { result, thaiDate: "2 กันยายน 2569", generation: 2 };
+  stages.recoverPublicationFinalization.mockResolvedValue(recovered);
+  await expect(runPublicationWorkflow({ ...params, trigger: "line", generation: 2 }, retryingStep() as unknown as WorkflowStep, deps)).resolves.toEqual(result);
+  expect(stages.validatePublication).not.toHaveBeenCalled();
+  expect(stages.fillAndVerifyDocument).not.toHaveBeenCalled();
+  expect(stages.notifyPublicationSuccess).toHaveBeenCalledWith(deps, recovered, result);
+});
+
 });

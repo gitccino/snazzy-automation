@@ -4,11 +4,12 @@ import {
   ensureTemporaryDocument, failPublicationAfterExhaustion, fillAndVerifyDocument,
   finalizePublication, notifyPublicationSuccess, notifyPublicationValidationFailure,
   preparePublicationOutputs, validatePublication,
+  finalizeStoredPublication,
   type PublicationServiceDeps, type PreparedPublication, type ValidatedPublication,
 } from "../../src/publication/service";
 import type { Fetcher } from "../../src/shared/http";
 import type { PublicationProduct } from "../../src/publication/types";
-import { getProductCache } from "../../src/db/publication-repository";
+import { getProductCache, reopenFailedJobForRestart } from "../../src/db/publication-repository";
 import { collageInputFingerprint } from "../../src/publication/collage";
 import { captionInputFingerprint } from "../../src/publication/captions";
 
@@ -105,6 +106,74 @@ function generationDeps(): PublicationServiceDeps {
 }
 
 describe("publication stages", () => {
+  it.each(["rename", "before publish", "lost response", "D1"])("retains a candidate after %s failure and retries the saved version", async (failure) => {
+    await seedJob("generating", "candidate-v2", "publication-rec-run-1-v2");
+    await env.DB.prepare("UPDATE publication_jobs SET generation=2,successful_generation=1,google_doc_id='old-doc',google_doc_url='old-url'").run();
+    const candidateUrl = "https://docs.google.com/document/d/candidate-v2/edit";
+    let fields: Record<string, unknown> = { Status: "Ready", "Google Doc URL": "old-url" };
+    let loseResponse = true;
+    const deletes: string[] = [];
+    const titles: string[] = [];
+    const fetcher = vi.fn<Fetcher>().mockImplementation(async (url, init) => {
+      const parsed = new URL(String(url));
+      if (parsed.hostname === "oauth2.googleapis.com") return token();
+      if (parsed.hostname === "www.googleapis.com") {
+        if (init?.method === "DELETE") deletes.push(parsed.pathname);
+        if (init?.method === "PATCH") {
+          titles.push(JSON.parse(String(init.body)).name);
+          if (failure === "rename" && loseResponse) { loseResponse = false; throw new Error("rename failed"); }
+        }
+        return json({ id: "candidate-v2" });
+      }
+      if (init?.method === "PATCH") {
+        const patch = JSON.parse(String(init.body)).fields;
+        if (patch.Status === "Generated" && failure === "before publish" && loseResponse) { loseResponse = false; throw new Error("publish failed"); }
+        fields = { ...fields, ...patch };
+        if (patch.Status === "Generated" && failure === "lost response" && loseResponse) { loseResponse = false; throw new Error("response lost"); }
+      }
+      return json({ id: "rec-run-1", fields });
+    });
+    const deps = baseDeps({ fetcher });
+    if (failure === "D1") {
+      deps.db = { prepare(sql: string) {
+        if (sql.includes("successful_generation=generation") && loseResponse) { loseResponse = false; throw new Error("D1 unavailable"); }
+        return env.DB.prepare(sql);
+      } } as D1Database;
+    }
+    await expect(finalizePublication(deps, { ...prepared, generation: 2 }, "candidate-v2")).rejects.toThrow();
+    expect(fields["Google Doc URL"]).toBe(failure === "rename" || failure === "before publish" ? "old-url" : candidateUrl);
+    await failPublicationAfterExhaustion(deps, "rec-run-1", "Unable to finalize the publication.", prepared.thaiDate, 2);
+    expect(deletes).toEqual([]);
+    expect(await job()).toMatchObject({ state: "failed", google_doc_id: "old-doc", temp_doc_id: "candidate-v2" });
+    expect((await env.DB.prepare("SELECT finalization_json FROM publication_jobs").first<{ finalization_json: string }>())?.finalization_json).toContain('"generation":2');
+    await reopenFailedJobForRestart(env.DB, clock, "rec-run-1", "publication-rec-run-1-v2", 2);
+    await expect(finalizeStoredPublication(deps, "rec-run-1", 2)).resolves.toMatchObject({ googleDocId: "candidate-v2", productIds: ["A-1001"] });
+    expect(titles).toEqual(["Publication 2026-09-02 (v2)", "Publication 2026-09-02 (v2)"]);
+    expect(fields.Status).toBe("Generated");
+    expect(await job()).toMatchObject({ state: "succeeded", google_doc_id: "candidate-v2" });
+  });
+  it("copies a distinct versioned Doc for replacement generation 2", async () => {
+    await seedJob("generating", null, "publication-rec-run-1-v2");
+    await env.DB.prepare("UPDATE publication_jobs SET generation=2,successful_generation=1,google_doc_id='old-doc',google_doc_url='old-url'").run();
+    const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(token()).mockResolvedValueOnce(json({ files: [] })).mockResolvedValueOnce(json({ id: "new-v2" }));
+    await expect(ensureTemporaryDocument(baseDeps({ fetcher }), { ...prepared, generation: 2 })).resolves.toBe("new-v2");
+    expect(new URL(String(fetcher.mock.calls[1]![0])).searchParams.get("q")).toContain("value='publication-rec-run-1-v2'");
+    expect(JSON.parse(String(fetcher.mock.calls[2]![1]?.body))).toMatchObject({
+      name: "Publication 2026-09-02 (v2) (in progress)", appProperties: { publicationRunId: "publication-rec-run-1-v2" },
+    });
+    expect(await job()).toMatchObject({ google_doc_id: "old-doc", temp_doc_id: "new-v2" });
+  });
+
+  it("rejects stale generation stages before external mutation or cleanup", async () => {
+    await seedJob("generating", "new-v2", "publication-rec-run-1-v2");
+    await env.DB.prepare("UPDATE publication_jobs SET generation=2,successful_generation=1,google_doc_id='old-doc',google_doc_url='old-url'").run();
+    const deps = baseDeps();
+    await expect(preparePublicationOutputs(deps, validated)).rejects.toMatchObject({ code: "publication_generation_stale" });
+    await expect(ensureTemporaryDocument(deps, prepared)).rejects.toMatchObject({ code: "publication_generation_stale" });
+    await expect(finalizePublication(deps, prepared, "old-temp")).rejects.toMatchObject({ code: "publication_generation_stale" });
+    await expect(failPublicationAfterExhaustion(deps, "rec-run-1", "failed", null)).rejects.toMatchObject({ code: "publication_generation_stale" });
+    expect(deps.fetcher).not.toHaveBeenCalled();
+  });
   beforeEach(async () => {
     await env.DB.exec("DELETE FROM publication_product_cache");
     await env.DB.exec("DELETE FROM publication_jobs");
@@ -378,19 +447,19 @@ describe("publication stages", () => {
 
   it("finalizes and records success once, with notification as a separate stage", async () => {
     await seedJob("generating", "temp-doc");
-    const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(token()).mockResolvedValueOnce(json({ id: "temp-doc" })).mockResolvedValueOnce(json({ id: "rec-run-1" }));
+    const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(token()).mockResolvedValueOnce(json({ id: "temp-doc" })).mockResolvedValueOnce(json({ fields: { Status: "Generating" } })).mockResolvedValueOnce(json({ id: "rec-run-1" }));
     const deps = baseDeps({ fetcher });
     const result = await finalizePublication(deps, prepared, "temp-doc");
     expect(result).toEqual({ publicationRunId: "rec-run-1", googleDocId: "temp-doc", googleDocUrl: "https://docs.google.com/document/d/temp-doc/edit", productIds: ["A-1001"] });
-    expect(JSON.parse(String(fetcher.mock.calls[2]![1]?.body)).fields).toEqual({ Status: "Generated", "Google Doc URL": result.googleDocUrl, "Generated At": "2026-09-01T17:30:00.000Z", "Error Summary": null });
+    expect(JSON.parse(String(fetcher.mock.calls[3]![1]?.body)).fields).toEqual({ Status: "Generated", "Google Doc URL": result.googleDocUrl, "Generated At": "2026-09-01T17:30:00.000Z", "Error Summary": null });
     expect(await job()).toMatchObject({ state: "succeeded", google_doc_id: "temp-doc", google_doc_url: result.googleDocUrl });
     expect(await finalizePublication(deps, prepared, "temp-doc")).toEqual(result);
-    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher).toHaveBeenCalledTimes(4);
     expect(deps.notify).not.toHaveBeenCalled();
     await notifyPublicationSuccess(deps, prepared, result);
     expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining(result.googleDocUrl));
     await failPublicationAfterExhaustion(deps, "rec-run-1", "Google unavailable", prepared.thaiDate);
-    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher).toHaveBeenCalledTimes(4);
   });
 
   it("cleans up only at exhaustion, clears D1, marks Airtable Failed and sends a safe reason", async () => {

@@ -2,6 +2,8 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { testEnv } from "../helpers/env";
 import {
   acquireOrResumeJob,
+  persistFinalizationIntent,
+  completePublicationGeneration,
   claimPublicationDate,
   reopenFailedJobForRestart,
   setJobState,
@@ -10,6 +12,7 @@ import {
   getProductCache,
   putProductCollage,
   putProductCaptions,
+  reopenSuccessfulJobForRegeneration,
 } from "../../src/db/publication-repository";
 
 const clock = { now: () => new Date("2026-09-01T05:00:00.000Z") };
@@ -27,6 +30,46 @@ describe("publication-repository", () => {
     expect(job.attemptCount).toBe(0);
     expect(job.publicationDate).toBeNull();
     expect(alreadySucceeded).toBe(false);
+  });
+
+  it("allocates one replacement while retaining the successful Doc and date", async () => {
+    await acquireOrResumeJob(env.DB, clock, "run-revision", "publication-run-revision");
+    await claimPublicationDate(env.DB, clock, "run-revision", "2026-09-02");
+    await setJobState(env.DB, clock, "run-revision", "succeeded", {
+      googleDocId: "old-doc", googleDocUrl: "https://docs.google.com/document/d/old-doc/edit", tempDocId: "old-doc",
+    });
+    const results = await Promise.all([
+      reopenSuccessfulJobForRegeneration(env.DB, clock, "run-revision", 1),
+      reopenSuccessfulJobForRegeneration(env.DB, clock, "run-revision", 1),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(results.find(Boolean)).toMatchObject({
+      generation: 2, successfulGeneration: 1, state: "locked", googleDocId: "old-doc",
+      tempDocId: null, publicationDate: "2026-09-02", correlationId: "publication-run-revision-v2",
+    });
+    expect(await reopenSuccessfulJobForRegeneration(env.DB, clock, "run-revision", 2)).toBeNull();
+  });
+
+  it("fences old-generation state and cache writes", async () => {
+    await acquireOrResumeJob(env.DB, clock, "run-fenced", "publication-run-fenced");
+    await setJobState(env.DB, clock, "run-fenced", "succeeded", { googleDocId: "old", googleDocUrl: "old-url" });
+    await reopenSuccessfulJobForRegeneration(env.DB, clock, "run-fenced", 1);
+    await expect(setJobState(env.DB, clock, "run-fenced", "failed", undefined, 1)).rejects.toMatchObject({ code: "publication_generation_stale" });
+    await expect(putProductCaptions(env.DB, clock, "run-fenced", "A-1", '["old"]', "fp", 1)).rejects.toMatchObject({ code: "publication_generation_stale" });
+    expect((await acquireOrResumeJob(env.DB, clock, "run-fenced", "other")).job).toMatchObject({ state: "locked", generation: 2 });
+    expect((await getProductCache(env.DB, "run-fenced", "A-1")).captionsJson).toBeNull();
+  });
+
+  it("rejects conflicting finalization intent and completes the saved result idempotently", async () => {
+    await acquireOrResumeJob(env.DB, clock, "run-intent", "publication-run-intent");
+    const intent = { generation: 1, publicationDate: "2026-09-01", thaiDate: "1 กันยายน 2569", docId: "candidate", docUrl: "https://docs.google.com/document/d/candidate/edit", title: "Publication 2026-09-01", productIds: ["A-1"], generatedAt: clock.now().toISOString() };
+    await persistFinalizationIntent(env.DB, clock, "run-intent", 1, intent);
+    await persistFinalizationIntent(env.DB, clock, "run-intent", 1, intent);
+    await expect(persistFinalizationIntent(env.DB, clock, "run-intent", 1, { ...intent, docId: "other" })).rejects.toMatchObject({ code: "publication_finalization_conflict" });
+    await expect(completePublicationGeneration(env.DB, clock, "run-intent", 1, { ...intent, docId: "other" })).rejects.toMatchObject({ code: "publication_finalization_conflict" });
+    await completePublicationGeneration(env.DB, clock, "run-intent", 1, intent);
+    await completePublicationGeneration(env.DB, clock, "run-intent", 1, intent);
+    expect((await acquireOrResumeJob(env.DB, clock, "run-intent", "other")).job).toMatchObject({ state: "succeeded", successfulGeneration: 1, googleDocId: "candidate", finalizationJson: null });
   });
 
   it("resumes the same job row on a second acquire without duplicating it", async () => {
