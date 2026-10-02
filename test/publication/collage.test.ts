@@ -110,7 +110,7 @@ describe("generateCollage", () => {
     ).rejects.toThrow(/source image/i);
   });
 
-  it("applies deterministic contain-fit transform and draw offsets in ordered-image order", async () => {
+  it("applies deterministic cover-fit transform and draw offsets in ordered-image order", async () => {
     const calls: ImageCall[] = [];
     const images: ImagesBinding = { input: () => fakeTransformer(calls) };
     const keys: [string, string, string, string] = ["assets/a.jpg", "assets/b.jpg", "assets/c.jpg", "assets/d.jpg"];
@@ -126,7 +126,7 @@ describe("generateCollage", () => {
       expect(call.options).toEqual({
         width: COLLAGE_CELL_SIZE,
         height: COLLAGE_CELL_SIZE,
-        fit: "contain",
+        fit: "cover",
         background: "#FFFFFF",
       });
     }

@@ -162,7 +162,13 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
       const id = url.pathname.split("/").at(-1)!.replace(":batchUpdate", "");
       const doc = state.docs.get(id);
       if (doc && url.hostname === "docs.googleapis.com") {
-        if (request.method === "GET") return Response.json({ body: { content: [{ paragraph: {
+      if (request.method === "GET") return Response.json({
+        documentStyle: {
+          pageSize: { width: { magnitude: 612, unit: "PT" } },
+          marginLeft: { magnitude: 72, unit: "PT" },
+          marginRight: { magnitude: 72, unit: "PT" },
+        },
+        body: { content: [{ paragraph: {
           elements: [{ startIndex: 1, textRun: { content: doc.text } }],
         } }] } });
         if (url.pathname.endsWith(":batchUpdate")) {
@@ -181,9 +187,12 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
             } else if ("insertText" in operation) {
               const { location, text: inserted } = operation.insertText;
               text = text.slice(0, location.index - 1) + inserted + text.slice(location.index - 1);
-            } else if ("insertInlineImage" in operation) {
-              const index = operation.insertInlineImage.location.index - 1;
-              text = text.slice(0, index) + "\uFFFC" + text.slice(index);
+          } else if ("insertInlineImage" in operation) {
+            const index = operation.insertInlineImage.location.index - 1;
+            text = text.slice(0, index) + "\uFFFC" + text.slice(index);
+          } else if ("insertPageBreak" in operation) {
+            const index = operation.insertPageBreak.location.index - 1;
+            text = text.slice(0, index) + "\f\n" + text.slice(index);
             } else {
               text = text.replaceAll(operation.replaceAllText.containsText.text, operation.replaceAllText.replaceText);
             }
@@ -343,13 +352,13 @@ describe("publication acceptance", () => {
     const expectedKeys = ["third", "first", "fourth", "second"].map(name => `assets/A-1001-${name}.jpg`);
     expect(fixture.image.get.mock.calls.map(([key]) => key)).toEqual(["assets/collage-base-1080.jpg", ...expectedKeys]);
     expect(fixture.image.transforms).toEqual(expectedKeys.map(key => ({ key, options: {
-      width: 504, height: 504, fit: "contain", background: "#FFFFFF",
+      width: 540, height: 540, fit: "cover", background: "#FFFFFF",
     } })));
     expect(fixture.image.draws).toEqual([
-      { base: "assets/collage-base-1080.jpg", key: expectedKeys[0], options: { top: 24, left: 24 } },
-      { base: "assets/collage-base-1080.jpg", key: expectedKeys[1], options: { top: 24, left: 552 } },
-      { base: "assets/collage-base-1080.jpg", key: expectedKeys[2], options: { top: 552, left: 24 } },
-      { base: "assets/collage-base-1080.jpg", key: expectedKeys[3], options: { top: 552, left: 552 } },
+      { base: "assets/collage-base-1080.jpg", key: expectedKeys[0], options: { top: 0, left: 0 } },
+      { base: "assets/collage-base-1080.jpg", key: expectedKeys[1], options: { top: 0, left: 540 } },
+      { base: "assets/collage-base-1080.jpg", key: expectedKeys[2], options: { top: 540, left: 0 } },
+      { base: "assets/collage-base-1080.jpg", key: expectedKeys[3], options: { top: 540, left: 540 } },
     ]);
     expect(fixture.image.output).toHaveBeenCalledExactlyOnceWith({ format: "image/jpeg", quality: 90 });
     expect(fixture.image.put).toHaveBeenCalledExactlyOnceWith("products/A-1001/collage/1080x1080.jpg", new Uint8Array([1, 2, 3]), { httpMetadata: { contentType: "image/jpeg" } });
@@ -427,7 +436,7 @@ describe("publication acceptance", () => {
     expect(fixture.state.docs.size).toBe(1);
     const finalDoc = fixture.state.docs.get("temp-doc-1")!;
     expect(finalDoc.name).toBe("Publication 2026-09-02");
-    const expectedProductText = (id: string) => `\uFFFC\nProduct ID: ${id}\nCondition: Used\nDescription: สภาพดี\nLINE Square Price: 1290\nIG Price: 1390\nCaption 1: แคปชันหนึ่ง ${id}\nCaption 2: แคปชันสอง ${id}\nCaption 3: แคปชันสาม ${id}\n${suffix}\n\n`;
+    const expectedProductText = (id: string) => `\f\n\uFFFC\nรหัสสินค้า ${id}\nUsed\n\nสภาพดี\n\nCaption 1: แคปชันหนึ่ง ${id}\nCaption 2: แคปชันสอง ${id}\nCaption 3: แคปชันสาม ${id}\n${suffix}\n\n`;
     expect(finalDoc.text).toBe(`หัวกระดาษ 2 กันยายน 2569\n${expectedProductText("A-1002")}${expectedProductText("A-1001")}\nท้ายกระดาษ\n`);
     expect(await job()).toMatchObject({ state: "succeeded", google_doc_id: "temp-doc-1", google_doc_url: result!.googleDocUrl });
     expect(fixture.state.status).toBe("Generated");

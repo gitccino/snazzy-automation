@@ -82,7 +82,14 @@ function runFetcher(products: PublicationProduct[] = [product]) {
   });
 }
 const token = () => json({ access_token: "google-token", expires_in: 3600 });
-const document = (content: string) => json({ body: { content: [{ paragraph: { elements: [{ startIndex: 1, textRun: { content } }] } }] } });
+const document = (content: string) => json({
+  documentStyle: {
+    pageSize: { width: { magnitude: 612, unit: "PT" } },
+    marginLeft: { magnitude: 72, unit: "PT" },
+    marginRight: { magnitude: 72, unit: "PT" },
+  },
+  body: { content: [{ paragraph: { elements: [{ startIndex: 1, textRun: { content } }] } }] },
+});
 const captionResponse = (captions: unknown[]) => ({ content: [{ type: "tool_use", id: "tool-1", name: "submit_captions", input: { captions } }], usage: { input_tokens: 100, output_tokens: 50 } });
 
 function generationDeps(): PublicationServiceDeps {

@@ -33,6 +33,12 @@
   "env": {
     "staging": {
       "name": "snazzy-automation-staging",
+      "observability": {
+        "logs": {
+          "enabled": true,
+          "invocation_logs": true
+        }
+      },
       "vars": {
         "GOOGLE_OAUTH_CLIENT_ID": "891460059017-fg9acj1nhbtjb133d6vgoj7ljh8ng5n4.apps.googleusercontent.com"
       },

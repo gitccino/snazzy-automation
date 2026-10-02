@@ -3,23 +3,19 @@ import { sha256Hex } from "../shared/ids";
 
 export const COLLAGE_BASE_R2_KEY = "assets/collage-base-1080.jpg";
 export const COLLAGE_CANVAS_SIZE = 1080;
-export const COLLAGE_CELL_SIZE = 504;
-export const COLLAGE_GUTTER = 24;
+export const COLLAGE_CELL_SIZE = COLLAGE_CANVAS_SIZE / 2;
 // Bump when the base asset or composition/output parameters change.
-const COLLAGE_BASE_TRANSFORM_VERSION = "white-1080-contain-v1";
+const COLLAGE_BASE_TRANSFORM_VERSION = "edge-to-edge-1080-cover-v2";
 
 export const COLLAGE_CELL_POSITIONS: Array<{ top: number; left: number }> = [
-  { top: COLLAGE_GUTTER, left: COLLAGE_GUTTER },
-  { top: COLLAGE_GUTTER, left: COLLAGE_GUTTER + COLLAGE_CELL_SIZE + COLLAGE_GUTTER },
-  { top: COLLAGE_GUTTER + COLLAGE_CELL_SIZE + COLLAGE_GUTTER, left: COLLAGE_GUTTER },
-  {
-    top: COLLAGE_GUTTER + COLLAGE_CELL_SIZE + COLLAGE_GUTTER,
-    left: COLLAGE_GUTTER + COLLAGE_CELL_SIZE + COLLAGE_GUTTER,
-  },
+  { top: 0, left: 0 },
+  { top: 0, left: COLLAGE_CELL_SIZE },
+  { top: COLLAGE_CELL_SIZE, left: 0 },
+  { top: COLLAGE_CELL_SIZE, left: COLLAGE_CELL_SIZE },
 ];
 
 export interface ImageTransformer {
-  transform(options: { width: number; height: number; fit: "contain"; background: string }): ImageTransformer;
+  transform(options: { width: number; height: number; fit: "cover"; background: string }): ImageTransformer;
   draw(
     overlay: ReadableStream<Uint8Array> | ImageTransformer,
     options?: { top?: number; left?: number },
@@ -67,7 +63,7 @@ export async function generateCollage(
     const cell = images.input(object.body).transform({
       width: COLLAGE_CELL_SIZE,
       height: COLLAGE_CELL_SIZE,
-      fit: "contain",
+      fit: "cover",
       background: "#FFFFFF",
     });
     pipeline = pipeline.draw(cell, {
