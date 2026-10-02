@@ -19,6 +19,7 @@ import {
   type PublicationServiceDeps,
 } from "./service";
 import type { PublicationResult, PublicationWorkflowParams } from "./types";
+import { publicationWorkflowId } from "./types";
 
 function depsFor(env: Env, clock: Clock): PublicationServiceDeps {
   const config = parseConfig(env.APP_CONFIG_JSON);
@@ -63,7 +64,7 @@ function isContenderRejection(error: unknown): boolean {
   const code = error instanceof OperationalError
     ? error.code
     : error instanceof Error ? error.name : null;
-  return code === "publication_job_locked" || code === "publication_job_terminal";
+  return code === "publication_job_locked" || code === "publication_job_terminal" || code === "publication_generation_stale";
 }
 
 export async function runPublicationWorkflow(
@@ -80,17 +81,19 @@ export async function runPublicationWorkflow(
     timeout: "5 minutes" as const,
   };
   const runId = params.publicationRunId;
+  const generation = params.generation ?? 1;
+  const generationArgs: [number?] = generation === 1 ? [] : [generation];
   let validation: Awaited<ReturnType<typeof validatePublication>>;
   try {
     validation = await step.do("validate publication", retries, () =>
       workflowCall("Unable to read or validate publication data.", () =>
-        validatePublication(deps, runId, `publication-${runId}`)),
+        validatePublication(deps, runId, publicationWorkflowId(runId, generation), ...generationArgs)),
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
     await step.do("record exhausted publication failure", retries, () =>
       workflowCall("Unable to record the publication failure.", () =>
-        failPublicationAfterExhaustion(deps, runId, "Unable to read or validate publication data.", null)),
+        failPublicationAfterExhaustion(deps, runId, "Unable to read or validate publication data.", null, ...generationArgs)),
     );
     throw error;
   }
@@ -127,7 +130,7 @@ export async function runPublicationWorkflow(
     if (isContenderRejection(error)) throw error;
     await step.do("record exhausted publication failure", retries, () =>
       workflowCall("Unable to record the publication failure.", () =>
-        failPublicationAfterExhaustion(deps, runId, failureReason, validation.value.thaiDate)),
+        failPublicationAfterExhaustion(deps, runId, failureReason, validation.value.thaiDate, ...generationArgs)),
     );
     throw error;
   }
@@ -144,6 +147,11 @@ export class PublicationWorkflow extends WorkflowEntrypoint<Env, PublicationWork
     event: WorkflowEvent<PublicationWorkflowParams>,
     step: WorkflowStep,
   ): Promise<PublicationResult | null> {
+    const generation = event.payload.generation ?? 1;
+    if (!Number.isSafeInteger(generation) || generation < 1 ||
+      (generation > 1 && event.instanceId !== publicationWorkflowId(event.payload.publicationRunId, generation))) {
+      throw new NonRetryableError("Invalid publication generation owner", "publication_generation_stale");
+    }
     return runPublicationWorkflow(event.payload, step, depsFor(this.env, { now: () => new Date() }));
   }
 }

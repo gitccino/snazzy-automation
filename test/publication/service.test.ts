@@ -105,6 +105,28 @@ function generationDeps(): PublicationServiceDeps {
 }
 
 describe("publication stages", () => {
+  it("copies a distinct versioned Doc for replacement generation 2", async () => {
+    await seedJob("generating", null, "publication-rec-run-1-v2");
+    await env.DB.prepare("UPDATE publication_jobs SET generation=2,successful_generation=1,google_doc_id='old-doc',google_doc_url='old-url'").run();
+    const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(token()).mockResolvedValueOnce(json({ files: [] })).mockResolvedValueOnce(json({ id: "new-v2" }));
+    await expect(ensureTemporaryDocument(baseDeps({ fetcher }), { ...prepared, generation: 2 })).resolves.toBe("new-v2");
+    expect(new URL(String(fetcher.mock.calls[1]![0])).searchParams.get("q")).toContain("value='publication-rec-run-1-v2'");
+    expect(JSON.parse(String(fetcher.mock.calls[2]![1]?.body))).toMatchObject({
+      name: "Publication 2026-09-02 (v2) (in progress)", appProperties: { publicationRunId: "publication-rec-run-1-v2" },
+    });
+    expect(await job()).toMatchObject({ google_doc_id: "old-doc", temp_doc_id: "new-v2" });
+  });
+
+  it("rejects stale generation stages before external mutation or cleanup", async () => {
+    await seedJob("generating", "new-v2", "publication-rec-run-1-v2");
+    await env.DB.prepare("UPDATE publication_jobs SET generation=2,successful_generation=1,google_doc_id='old-doc',google_doc_url='old-url'").run();
+    const deps = baseDeps();
+    await expect(preparePublicationOutputs(deps, validated)).rejects.toMatchObject({ code: "publication_generation_stale" });
+    await expect(ensureTemporaryDocument(deps, prepared)).rejects.toMatchObject({ code: "publication_generation_stale" });
+    await expect(finalizePublication(deps, prepared, "old-temp")).rejects.toMatchObject({ code: "publication_generation_stale" });
+    await expect(failPublicationAfterExhaustion(deps, "rec-run-1", "failed", null)).rejects.toMatchObject({ code: "publication_generation_stale" });
+    expect(deps.fetcher).not.toHaveBeenCalled();
+  });
   beforeEach(async () => {
     await env.DB.exec("DELETE FROM publication_product_cache");
     await env.DB.exec("DELETE FROM publication_jobs");
