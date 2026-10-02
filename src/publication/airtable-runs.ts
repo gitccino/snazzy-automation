@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { AppConfig } from "../config";
 import { OperationalError } from "../shared/errors";
 import type { Fetcher } from "../shared/http";
-import type { PublicationProduct, PublicationRun } from "./types";
+import type { PublicationProduct, PublicationRun, PublicationRunStatus } from "./types";
 
 export type AirtablePublicationConfig = Pick<
   AppConfig,
@@ -123,12 +123,19 @@ async function fetchLinkedProducts(
   });
 }
 
-export async function findRunnableRunForDate(
+export interface PublicationRunSelection {
+  airtableRunId: string;
+  publicationDate: string;
+  status: PublicationRunStatus;
+  productRecordIds: string[];
+}
+
+export async function findPublicationRunForDate(
   fetcher: Fetcher,
   config: AirtablePublicationConfig,
   token: string,
   isoDate: string,
-): Promise<PublicationRun | null> {
+): Promise<PublicationRunSelection | null> {
   // Inspect all statuses: a Ready row must not hide another row already Generated.
   const formula = `DATESTR({Publication Date})='${isoDate}'`;
   const url = `${airtableUrl(config, config.airtablePublicationRunsTableId)}?filterByFormula=${encodeURIComponent(formula)}&maxRecords=2&pageSize=2`;
@@ -148,15 +155,22 @@ export async function findRunnableRunForDate(
     throw new OperationalError("airtable_duplicate_publication_date", "Airtable has multiple publication runs for this date", false);
   }
   const record = body.records[0];
-  if (!record || (record.fields.Status !== "Ready" && record.fields.Status !== "Failed")) return null;
-
-  const products = await fetchLinkedProducts(fetcher, config, token, record.fields.Products ?? []);
+  if (!record) return null;
   return {
     airtableRunId: record.id,
     publicationDate: record.fields["Publication Date"],
     status: record.fields.Status,
-    products,
+    productRecordIds: record.fields.Products ?? [],
   };
+}
+
+export async function findRunnableRunForDate(
+  fetcher: Fetcher, config: AirtablePublicationConfig, token: string, isoDate: string,
+): Promise<PublicationRun | null> {
+  const run = await findPublicationRunForDate(fetcher, config, token, isoDate);
+  if (!run || (run.status !== "Ready" && run.status !== "Failed")) return null;
+  return { airtableRunId: run.airtableRunId, publicationDate: run.publicationDate, status: run.status,
+    products: await fetchLinkedProducts(fetcher, config, token, run.productRecordIds) };
 }
 
 export async function loadRunById(

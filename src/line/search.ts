@@ -15,6 +15,7 @@ export type UploadTriggerResult =
 
 export type DocsTriggerResult =
   | { status: "no_runnable_run" }
+  | { status: "regenerating"; publicationRunId: string; generation: number }
   | {
       status: "started" | "restarted" | "resumed" | "already_running" | "already_generated";
       publicationRunId: string;
@@ -43,6 +44,8 @@ function uploadResultText(result: UploadTriggerResult): string {
 
 function docsResultText(result: DocsTriggerResult): string {
   switch (result.status) {
+    case "regenerating":
+      return `เริ่มสร้างเอกสารเวอร์ชัน v${result.generation} แล้ว ${result.publicationRunId}`;
     case "started":
       return `เริ่มสร้างเอกสารแล้ว ${result.publicationRunId}`;
     case "restarted":

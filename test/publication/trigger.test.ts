@@ -5,6 +5,7 @@ import { handleDocsTrigger } from "../../src/publication/trigger";
 import {
   acquireOrResumeJob, getProductCache, putProductCaptions, putProductCollage,
   reopenFailedJobForRestart, setJobState,
+  reopenSuccessfulJobForRegeneration,
 } from "../../src/db/publication-repository";
 import { createTestEnv, testEnv } from "../helpers/env";
 
@@ -38,6 +39,61 @@ describe("handleDocsTrigger", () => {
     vi.restoreAllMocks();
     await testEnv().DB.exec("DELETE FROM publication_product_cache");
     await testEnv().DB.exec("DELETE FROM publication_jobs");
+  });
+
+  async function completed(fixture: ReturnType<typeof makeTriggerEnv>) {
+    await acquireOrResumeJob(fixture.env.DB, clock, "rec-run-1", "publication-rec-run-1");
+    await setJobState(fixture.env.DB, clock, "rec-run-1", "succeeded", { googleDocId: "old-doc", googleDocUrl: "old-url" });
+  }
+
+  it("starts a new deterministic version for LINE + Ready", async () => {
+    mockRun("Ready");
+    const fixture = makeTriggerEnv("complete");
+    await completed(fixture);
+    fixture.get.mockImplementation(async (id: string) => {
+      if (id.endsWith("-v2")) throw new Error("instance.not_found");
+      return { status: fixture.status, restart: fixture.restart, resume: fixture.resume };
+    });
+    await expect(handleDocsTrigger(fixture.env, "line", clock)).resolves.toEqual({ status: "regenerating", publicationRunId: "rec-run-1", generation: 2 });
+    expect(fixture.create).toHaveBeenCalledExactlyOnceWith({ id: "publication-rec-run-1-v2", params: { publicationRunId: "rec-run-1", trigger: "line", generation: 2 } });
+    expect(fixture.restart).not.toHaveBeenCalled();
+  });
+
+  it.each(["cron", "admin"] as const)("%s skips a replacement request", async trigger => {
+    mockRun("Ready");
+    const fixture = makeTriggerEnv("complete");
+    await completed(fixture);
+    await expect(handleDocsTrigger(fixture.env, trigger, clock)).resolves.toEqual({ status: "already_generated", publicationRunId: "rec-run-1" });
+    expect(fixture.get).not.toHaveBeenCalled();
+    expect((await acquireOrResumeJob(fixture.env.DB, clock, "rec-run-1", "other")).job.generation).toBe(1);
+  });
+
+  it("cron never retries a failed replacement", async () => {
+    mockRun("Failed");
+    const fixture = makeTriggerEnv("errored");
+    await completed(fixture);
+    await reopenSuccessfulJobForRegeneration(fixture.env.DB, clock, "rec-run-1", 1);
+    await setJobState(fixture.env.DB, clock, "rec-run-1", "failed", undefined, 2);
+    await expect(handleDocsTrigger(fixture.env, "cron", clock)).resolves.toEqual({ status: "already_generated", publicationRunId: "rec-run-1" });
+    expect(fixture.get).not.toHaveBeenCalled();
+  });
+
+  it("LINE retries the failed version without allocating v3", async () => {
+    mockRun("Failed");
+    const fixture = makeTriggerEnv("errored");
+    await completed(fixture);
+    await reopenSuccessfulJobForRegeneration(fixture.env.DB, clock, "rec-run-1", 1);
+    await setJobState(fixture.env.DB, clock, "rec-run-1", "failed", undefined, 2);
+    await expect(handleDocsTrigger(fixture.env, "line", clock)).resolves.toEqual({ status: "restarted", publicationRunId: "rec-run-1" });
+    expect(fixture.get).toHaveBeenCalledWith("publication-rec-run-1-v2");
+    expect((await acquireOrResumeJob(fixture.env.DB, clock, "rec-run-1", "other")).job).toMatchObject({ generation: 2, state: "locked" });
+  });
+
+  it("reports Generated to LINE without starting a workflow", async () => {
+    mockRun("Generated");
+    const fixture = makeTriggerEnv("complete");
+    await expect(handleDocsTrigger(fixture.env, "line", clock)).resolves.toEqual({ status: "already_generated", publicationRunId: "rec-run-1" });
+    expect(fixture.get).not.toHaveBeenCalled();
   });
 
   it.each(["admin", "line", "cron"] as const)("creates only an unknown instance with its hyphenated ID and %s trigger", async (trigger) => {
