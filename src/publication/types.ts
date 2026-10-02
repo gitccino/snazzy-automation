@@ -1,6 +1,11 @@
 export interface PublicationWorkflowParams {
   publicationRunId: string;
   trigger: "cron" | "line" | "admin";
+  generation?: number;
+}
+
+export function publicationWorkflowId(runId: string, generation: number): string {
+  return generation === 1 ? `publication-${runId}` : `publication-${runId}-v${generation}`;
 }
 
 export interface PublicationProduct {
