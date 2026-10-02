@@ -1,6 +1,7 @@
 import type { Clock } from "../shared/time";
 import { OperationalError } from "../shared/errors";
 import { publicationWorkflowId } from "../publication/types";
+import type { PublicationFinalizationIntent } from "../publication/types";
 
 export type PublicationJobState =
   | "locked"
@@ -91,6 +92,32 @@ export async function reopenSuccessfulJobForRegeneration(
     WHERE publication_run_id = ? AND state = 'succeeded' AND generation = ? AND successful_generation = generation
     RETURNING *`).bind(publicationWorkflowId(runId, expectedGeneration + 1), clock.now().toISOString(), runId, expectedGeneration).first<JobRowRaw>();
   return raw ? toRow(raw) : null;
+}
+
+export async function persistFinalizationIntent(
+  db: D1Database, clock: Clock, runId: string, generation: number, intent: PublicationFinalizationIntent,
+): Promise<void> {
+  const serialized = JSON.stringify(intent);
+  await db.prepare(`UPDATE publication_jobs SET finalization_json = ?, updated_at = ?
+    WHERE publication_run_id = ? AND generation = ? AND finalization_json IS NULL
+      AND state NOT IN ('succeeded','failed','validation_failed')`)
+    .bind(serialized, clock.now().toISOString(), runId, generation).run();
+  const job = await assertPublicationGeneration(db, runId, generation);
+  if (job.finalizationJson !== serialized) throw new OperationalError("publication_finalization_conflict", "Publication finalization intent conflicts", false);
+}
+
+export async function completePublicationGeneration(
+  db: D1Database, clock: Clock, runId: string, generation: number, intent: PublicationFinalizationIntent,
+): Promise<void> {
+  const result = await db.prepare(`UPDATE publication_jobs
+    SET state='succeeded',successful_generation=generation,google_doc_id=?,google_doc_url=?,
+        temp_doc_id=NULL,finalization_json=NULL,updated_at=?
+    WHERE publication_run_id=? AND generation=? AND finalization_json=? AND state NOT IN ('succeeded','failed','validation_failed')`)
+    .bind(intent.docId, intent.docUrl, clock.now().toISOString(), runId, generation, JSON.stringify(intent)).run();
+  const job = await assertPublicationGeneration(db, runId, generation);
+  if (result.meta.changes !== 1 && !(job.state === "succeeded" && job.googleDocId === intent.docId && job.googleDocUrl === intent.docUrl)) {
+    throw new OperationalError("publication_finalization_conflict", "Publication finalization result conflicts", false);
+  }
 }
 
 export async function acquireOrResumeJob(

@@ -33,6 +33,17 @@ export interface PublicationResult {
   productIds: string[];
 }
 
+export interface PublicationFinalizationIntent {
+  generation: number;
+  publicationDate: string;
+  thaiDate: string;
+  docId: string;
+  docUrl: string;
+  title: string;
+  productIds: string[];
+  generatedAt: string;
+}
+
 export type PublicationRunStatus = "Draft" | "Ready" | "Generating" | "Generated" | "Failed";
 
 export interface PublicationRun {

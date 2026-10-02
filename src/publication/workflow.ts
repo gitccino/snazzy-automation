@@ -15,6 +15,7 @@ import {
   notifyPublicationSuccess,
   notifyPublicationValidationFailure,
   preparePublicationOutputs,
+  recoverPublicationFinalization,
   validatePublication,
   type PublicationServiceDeps,
 } from "./service";
@@ -83,6 +84,24 @@ export async function runPublicationWorkflow(
   const runId = params.publicationRunId;
   const generation = params.generation ?? 1;
   const generationArgs: [number?] = generation === 1 ? [] : [generation];
+  let recovered: Awaited<ReturnType<typeof recoverPublicationFinalization>>;
+  try {
+    recovered = await step.do("recover finalization", retries, () =>
+      workflowCall("Unable to finalize the publication.", () => recoverPublicationFinalization(deps, runId, generation)),
+    );
+  } catch (error) {
+    if (isContenderRejection(error)) throw error;
+    await step.do("record exhausted publication failure", retries, () =>
+      workflowCall("Unable to record publication failure.", () => failPublicationAfterExhaustion(deps, runId, "Unable to finalize the publication.", null, ...generationArgs)),
+    );
+    throw error;
+  }
+  if (recovered) {
+    await step.do("notify publication success", retries, () =>
+      workflowCall("Unable to send publication success notification.", () => notifyPublicationSuccess(deps, recovered, recovered.result)),
+    );
+    return recovered.result;
+  }
   let validation: Awaited<ReturnType<typeof validatePublication>>;
   try {
     validation = await step.do("validate publication", retries, () =>

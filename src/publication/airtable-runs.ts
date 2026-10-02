@@ -198,6 +198,18 @@ export async function loadRunById(
   };
 }
 
+export async function readPublishedRun(
+  fetcher: Fetcher, config: AirtablePublicationConfig, token: string, airtableRunId: string,
+): Promise<{ status: PublicationRunStatus; docUrl: string | null; generatedAt: string | null }> {
+  const response = await fetcher(airtableUrl(config, config.airtablePublicationRunsTableId, `/${airtableRunId}`), { headers: authHeaders(token) });
+  if (!response.ok) throw airtableHttpError("airtable_run_fetch_failed", "run fetch", response.status);
+  const record = z.object({ fields: z.object({
+    Status: z.enum(["Draft", "Ready", "Generating", "Generated", "Failed"]),
+    "Google Doc URL": z.string().optional(), "Generated At": z.string().optional(),
+  }) }).parse(await response.json());
+  return { status: record.fields.Status, docUrl: record.fields["Google Doc URL"] ?? null, generatedAt: record.fields["Generated At"] ?? null };
+}
+
 async function patchRun(
   fetcher: Fetcher,
   config: AirtablePublicationConfig,

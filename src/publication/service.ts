@@ -1,4 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
+import { z } from "zod";
 import type { AppConfig } from "../config";
 import type { AssetStore } from "../import/asset-store";
 import type { Fetcher } from "../shared/http";
@@ -7,10 +8,12 @@ import { OperationalError } from "../shared/errors";
 import {
   acquireOrResumeJob, readPublicationJob, claimPublicationDate, getProductCache, putProductCaptions, putProductCollage,
   setJobState, setTempDocId, type PublicationJobRow,
+  persistFinalizationIntent, completePublicationGeneration,
 } from "../db/publication-repository";
 import {
   loadRunById, markRunFailed, markRunGenerated, markRunGenerating,
   markRunNeedsCorrection, updateProductCollage,
+  readPublishedRun,
 } from "./airtable-runs";
 import { generateCollage, collageR2Key, collageInputFingerprint, type ImagesBinding } from "./collage";
 import { captionInputFingerprint, planCaptionBatches, requestCaptionBatch, toCaptionRequestProducts } from "./captions";
@@ -19,7 +22,7 @@ import {
   copyTemplate, deleteDocument, fillTemplate, finalizeDocument,
   findTemporaryDocument, verifyDocumentContainsProducts, type DocProductContent,
 } from "./google-docs";
-import type { PublicationProduct, PublicationResult, PublicationRun } from "./types";
+import type { PublicationProduct, PublicationResult, PublicationRun, PublicationFinalizationIntent } from "./types";
 import { publicationWorkflowId } from "./types";
 import { formatValidationErrorSummary, validateRunCompleteness, type ValidationResult } from "./validator";
 import {
@@ -259,14 +262,65 @@ export async function finalizePublication(deps: PublicationServiceDeps, prepared
   const productIds = prepared.outputs.map(o => o.product.productId);
   if (job.state === "succeeded") return publicationResult(runId, job, productIds);
   requireActiveJob(job, generation);
-  const tokens = createGoogleAuthClient(deps.googleOAuthCredentials, deps.clock, deps.fetcher);
-  const url = await finalizeDocument(deps.fetcher, tokens, tempDocId, `Publication ${prepared.run.publicationDate}${generation === 1 ? "" : ` (v${generation})`}`);
-  await markRunGenerated(deps.fetcher, deps.config, deps.airtableToken, runId, url, deps.clock.now().toISOString());
-  await setJobState(deps.db, deps.clock, runId, "succeeded", { googleDocId: tempDocId, googleDocUrl: url, tempDocId }, generation);
-  return { publicationRunId: runId, googleDocId: tempDocId, googleDocUrl: url, productIds };
+  if (!job.finalizationJson) {
+    if (job.googleDocId === tempDocId) throw new OperationalError("publication_finalization_conflict", "Replacement cannot reuse the successful Doc", false);
+    await persistFinalizationIntent(deps.db, deps.clock, runId, generation, {
+      generation, publicationDate: prepared.run.publicationDate, thaiDate: prepared.thaiDate,
+      docId: tempDocId, docUrl: `https://docs.google.com/document/d/${encodeURIComponent(tempDocId)}/edit`,
+      title: `Publication ${prepared.run.publicationDate}${generation === 1 ? "" : ` (v${generation})`}`,
+      productIds, generatedAt: deps.clock.now().toISOString(),
+    });
+  }
+  return finalizeStoredPublication(deps, runId, generation);
 }
 
-export async function notifyPublicationSuccess(deps: PublicationServiceDeps, prepared: PreparedPublication, result: PublicationResult): Promise<void> {
+const FinalizationIntentSchema = z.object({
+  generation: z.number().int().positive().refine(Number.isSafeInteger),
+  publicationDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), thaiDate: z.string().min(1),
+  docId: z.string().min(1), docUrl: z.string().url(), title: z.string().min(1),
+  productIds: z.array(z.string().regex(/^A-[1-9]\d*$/)), generatedAt: z.string().datetime(),
+});
+
+function parseFinalizationIntent(job: StageJob): PublicationFinalizationIntent {
+  try {
+    const intent = FinalizationIntentSchema.parse(JSON.parse(job.finalizationJson ?? "null"));
+    if (intent.generation !== job.generation) throw new Error("generation mismatch");
+    return intent;
+  } catch {
+    throw new OperationalError("publication_finalization_invalid", "Publication finalization intent is invalid", false);
+  }
+}
+
+export async function finalizeStoredPublication(deps: PublicationServiceDeps, runId: string, generation: number): Promise<PublicationResult> {
+  const job = await readJob(deps, runId);
+  requireActiveJob(job, generation);
+  const intent = parseFinalizationIntent(job);
+  const tokens = createGoogleAuthClient(deps.googleOAuthCredentials, deps.clock, deps.fetcher);
+  await finalizeDocument(deps.fetcher, tokens, intent.docId, intent.title);
+  requireActiveJob(await readJob(deps, runId), generation);
+  const published = await readPublishedRun(deps.fetcher, deps.config, deps.airtableToken, runId);
+  if (published.docUrl !== intent.docUrl || published.status !== "Generated" || published.generatedAt !== intent.generatedAt) {
+    await markRunGenerated(deps.fetcher, deps.config, deps.airtableToken, runId, intent.docUrl, intent.generatedAt);
+  }
+  await completePublicationGeneration(deps.db, deps.clock, runId, generation, intent);
+  return { publicationRunId: runId, googleDocId: intent.docId, googleDocUrl: intent.docUrl, productIds: intent.productIds };
+}
+
+export async function recoverPublicationFinalization(deps: PublicationServiceDeps, runId: string, generation: number): Promise<{
+  result: PublicationResult; thaiDate: string; generation: number;
+} | null> {
+  const job = await readPublicationJob(deps.db, runId);
+  if (!job) return null;
+  if (job.generation !== generation) throw new OperationalError("publication_generation_stale", "Publication generation is stale", false);
+  if (!job.finalizationJson) return null;
+  const intent = parseFinalizationIntent(job);
+  const result = await finalizeStoredPublication(deps, runId, generation);
+  return { result, thaiDate: intent.thaiDate, generation };
+}
+
+export async function notifyPublicationSuccess(deps: PublicationServiceDeps, prepared: Pick<PreparedPublication, "thaiDate" | "generation">, result: PublicationResult): Promise<void> {
+  const job = await readJob(deps, result.publicationRunId);
+  if (job.generation !== (prepared.generation ?? 1)) throw new OperationalError("publication_generation_stale", "Publication generation is stale", false);
   await deps.notify(buildPublicationSuccessMessage({ thaiDate: prepared.thaiDate, productIds: result.productIds, googleDocUrl: result.googleDocUrl }));
 }
 
@@ -283,11 +337,13 @@ export async function failPublicationAfterExhaustion(
   if (job.state === "succeeded") return;
   // Only a generating job could have created a copy. Validation failures must
   // not initiate Google discovery; a failed row already completed its cleanup.
-  if (job.state !== "failed" && (job.tempDocId || job.state === "generating")) {
+  if (!job.finalizationJson && job.state !== "failed" && (job.tempDocId || job.state === "generating")) {
     const tokens = createGoogleAuthClient(deps.googleOAuthCredentials, deps.clock, deps.fetcher);
     const identity = generation === 1 ? publicationRunId : publicationWorkflowId(publicationRunId, generation);
     const docId = job.tempDocId ?? await findTemporaryDocument(deps.fetcher, tokens, deps.config.googleDriveFolderId, identity);
     if (docId) {
+      if (docId === job.googleDocId) throw new OperationalError("publication_finalization_conflict", "Cannot delete a successful Doc", false);
+      requireActiveJob(await readJob(deps, publicationRunId), generation);
       await deleteDocument(deps.fetcher, tokens, docId);
       await setTempDocId(deps.db, deps.clock, publicationRunId, null, generation);
     }
@@ -295,7 +351,7 @@ export async function failPublicationAfterExhaustion(
   await setJobState(deps.db, deps.clock, publicationRunId, "failed", undefined, generation);
   await markRunFailed(deps.fetcher, deps.config, deps.airtableToken, publicationRunId, reason);
   await deps.notify(buildPublicationWorkflowFailureMessage({
-    thaiDate: displayDate ?? "ไม่สามารถอ่านวันที่รายการได้", reason,
+    thaiDate: displayDate ?? (job.finalizationJson ? parseFinalizationIntent(job).thaiDate : "ไม่สามารถอ่านวันที่รายการได้"), reason,
     airtableRunUrl: airtableRunUrl(deps.config, publicationRunId),
   }));
 }
