@@ -2,6 +2,8 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { testEnv } from "../helpers/env";
 import {
   acquireOrResumeJob,
+  persistFinalizationIntent,
+  completePublicationGeneration,
   claimPublicationDate,
   reopenFailedJobForRestart,
   setJobState,
@@ -56,6 +58,18 @@ describe("publication-repository", () => {
     await expect(putProductCaptions(env.DB, clock, "run-fenced", "A-1", '["old"]', "fp", 1)).rejects.toMatchObject({ code: "publication_generation_stale" });
     expect((await acquireOrResumeJob(env.DB, clock, "run-fenced", "other")).job).toMatchObject({ state: "locked", generation: 2 });
     expect((await getProductCache(env.DB, "run-fenced", "A-1")).captionsJson).toBeNull();
+  });
+
+  it("rejects conflicting finalization intent and completes the saved result idempotently", async () => {
+    await acquireOrResumeJob(env.DB, clock, "run-intent", "publication-run-intent");
+    const intent = { generation: 1, publicationDate: "2026-09-01", thaiDate: "1 กันยายน 2569", docId: "candidate", docUrl: "https://docs.google.com/document/d/candidate/edit", title: "Publication 2026-09-01", productIds: ["A-1"], generatedAt: clock.now().toISOString() };
+    await persistFinalizationIntent(env.DB, clock, "run-intent", 1, intent);
+    await persistFinalizationIntent(env.DB, clock, "run-intent", 1, intent);
+    await expect(persistFinalizationIntent(env.DB, clock, "run-intent", 1, { ...intent, docId: "other" })).rejects.toMatchObject({ code: "publication_finalization_conflict" });
+    await expect(completePublicationGeneration(env.DB, clock, "run-intent", 1, { ...intent, docId: "other" })).rejects.toMatchObject({ code: "publication_finalization_conflict" });
+    await completePublicationGeneration(env.DB, clock, "run-intent", 1, intent);
+    await completePublicationGeneration(env.DB, clock, "run-intent", 1, intent);
+    expect((await acquireOrResumeJob(env.DB, clock, "run-intent", "other")).job).toMatchObject({ state: "succeeded", successfulGeneration: 1, googleDocId: "candidate", finalizationJson: null });
   });
 
   it("resumes the same job row on a second acquire without duplicating it", async () => {

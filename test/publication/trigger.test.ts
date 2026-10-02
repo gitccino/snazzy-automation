@@ -59,6 +59,21 @@ describe("handleDocsTrigger", () => {
     expect(fixture.restart).not.toHaveBeenCalled();
   });
 
+  it("keeps an allocated v2 resumable after Workflow creation fails", async () => {
+    mockRun();
+    const fixture = makeTriggerEnv("complete");
+    await completed(fixture);
+    fixture.get.mockImplementation(async (id: string) => {
+      if (id.endsWith("-v2")) throw new Error("instance.not_found");
+      return { status: fixture.status, restart: fixture.restart, resume: fixture.resume };
+    });
+    fixture.create.mockRejectedValueOnce(new Error("creation unavailable"));
+    await expect(handleDocsTrigger(fixture.env, "line", clock)).rejects.toThrow("creation unavailable");
+    expect((await acquireOrResumeJob(fixture.env.DB, clock, "rec-run-1", "other")).job).toMatchObject({ generation: 2, successfulGeneration: 1, googleDocId: "old-doc" });
+    await expect(handleDocsTrigger(fixture.env, "line", clock)).resolves.toMatchObject({ status: "started" });
+    expect(fixture.create.mock.calls.map(([value]) => value.id)).toEqual(["publication-rec-run-1-v2", "publication-rec-run-1-v2"]);
+  });
+
   it.each(["cron", "admin"] as const)("%s skips a replacement request", async trigger => {
     mockRun("Ready");
     const fixture = makeTriggerEnv("complete");

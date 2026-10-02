@@ -13,6 +13,7 @@ import {
 } from "../../src/publication/service";
 import type { PublicationProduct, PublicationRunStatus } from "../../src/publication/types";
 import { runPublicationWorkflow } from "../../src/publication/workflow";
+import { handleDocsTrigger } from "../../src/publication/trigger";
 import { handleDocsRoute } from "../../src/routes/docs";
 import { createTestEnv, testEnv } from "../helpers/env";
 import { fakeFetch, fixedClock } from "../helpers/fakes";
@@ -103,11 +104,14 @@ function imageBoundary() {
 function publicationFixture(products = [product("A-1001")], fixtureRunId = runId) {
   const state = {
     status: "Ready" as PublicationRunStatus,
-    docs: new Map<string, { text: string; name: string }>(),
+    docs: new Map<string, { text: string; name: string; owner?: string }>(),
     nextDoc: 1,
     loseCopyResponse: false,
     loseFillResponse: false,
     batchFailureStatus: 0,
+    publishFailure: false,
+    docUrl: null as string | null,
+    generatedAt: null as string | null,
     errorSummary: null as string | null,
   };
   const calls: Array<{ method: string; url: string; body: Record<string, unknown> }> = [];
@@ -116,6 +120,8 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
   const runRecord = () => ({ id: fixtureRunId, fields: {
     "Publication Date": "2026-09-02", Status: state.status,
     Products: products.map(item => item.airtableRecordId),
+    ...(state.docUrl ? { "Google Doc URL": state.docUrl } : {}),
+    ...(state.generatedAt ? { "Generated At": state.generatedAt } : {}),
   } });
   const fetcher = fakeFetch([{
     match: () => true,
@@ -126,9 +132,13 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
       calls.push({ method: request.method, url: request.url, body });
       if (url.hostname === "api.airtable.com") {
         if (url.pathname.endsWith(`/tblRuns/${fixtureRunId}`)) {
+          if (request.method === "GET" && state.publishFailure && state.docUrl?.includes("temp-doc-2")) throw new Error("published state unavailable");
           if (request.method === "PATCH") {
-            const fields = body.fields as { Status: PublicationRunStatus; "Error Summary"?: string | null };
+            const fields = body.fields as { Status: PublicationRunStatus; "Error Summary"?: string | null; "Google Doc URL"?: string; "Generated At"?: string };
+            if (fields["Google Doc URL"]) state.docUrl = fields["Google Doc URL"];
+            if (fields["Generated At"]) state.generatedAt = fields["Generated At"];
             state.status = fields.Status;
+            if (fields.Status === "Generated" && state.publishFailure) throw new Error("publish response lost");
             if ("Error Summary" in fields) state.errorSummary = fields["Error Summary"] ?? null;
           }
           return Response.json(runRecord());
@@ -151,11 +161,11 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
       }
       if (url.hostname === "oauth2.googleapis.com") return Response.json({ access_token: "google-token", expires_in: 3600 });
       if (url.pathname === "/drive/v3/files" && request.method === "GET") {
-        return Response.json({ files: [...state.docs.keys()].map(id => ({ id })) });
+        return Response.json({ files: [...state.docs].filter(([, doc]) => url.searchParams.get("q")!.includes(`value='${doc.owner}'`)).map(([id]) => ({ id })) });
       }
       if (url.pathname === "/drive/v3/files/template-1/copy" && request.method === "POST") {
         const id = `temp-doc-${state.nextDoc++}`;
-        state.docs.set(id, { text: template, name: String(body.name) });
+        state.docs.set(id, { text: template, name: String(body.name), owner: (body.appProperties as { publicationRunId: string }).publicationRunId });
         if (state.loseCopyResponse) { state.loseCopyResponse = false; throw new Error("copy response lost"); }
         return Response.json({ id });
       }
@@ -228,8 +238,8 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
   const scheduler = retryingStep();
   return {
     products, state, calls, batches, failureSnapshots, image, countTokens, create, notify, deps, scheduler,
-    run: () => runPublicationWorkflow(
-      { publicationRunId: fixtureRunId, trigger: "admin" },
+    run: (generation = 1) => runPublicationWorkflow(
+      { publicationRunId: fixtureRunId, trigger: "line", ...(generation > 1 ? { generation } : {}) },
       scheduler as unknown as WorkflowStep,
       deps,
     ),
@@ -239,8 +249,8 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
 function workflowBinding() {
   let status = "unknown";
   const restart = vi.fn(async () => { status = "running"; });
-  const create = vi.fn(async () => { status = "running"; return { id: `publication-${runId}` }; });
-  const get = vi.fn(async () => ({ status: async () => ({ status }), restart, resume: vi.fn() }));
+  const create = vi.fn(async (value: { id: string }) => { status = "running"; return { id: value.id }; });
+  const get = vi.fn(async (_id: string) => ({ status: async () => ({ status }), restart, resume: vi.fn() }));
   return { create, get, restart, setStatus: (value: string) => { status = value; } };
 }
 
@@ -257,6 +267,57 @@ describe("publication acceptance", () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network forbidden in acceptance tests"));
   });
   afterEach(() => vi.restoreAllMocks());
+
+  it.each([false, true])("preserves old Docs through replacement and saved-finalization retry (lost response: %s)", async (loseResponse) => {
+    const fixture = publicationFixture();
+    await fixture.run();
+    const original = { ...fixture.state.docs.get("temp-doc-1")! };
+    fixture.products[0]!.description = "Updated product description";
+    fixture.state.status = "Ready";
+    vi.mocked(globalThis.fetch).mockImplementation(fixture.deps.fetcher as typeof fetch);
+    const binding = workflowBinding();
+    binding.get.mockImplementation(async (id: string) => {
+      if (id.endsWith("-v2") || id.endsWith("-v3")) throw new Error("instance.not_found");
+      return { status: async () => ({ status: "complete" }), restart: binding.restart, resume: vi.fn() };
+    });
+    const triggerEnv = { ...env, ...configEnv, PUBLICATION_WORKFLOW: binding } as unknown as Env;
+    for (const source of ["cron", "admin"] as const) {
+      expect(await handleDocsTrigger(triggerEnv, source, clock)).toMatchObject({ status: "already_generated" });
+    }
+    const triggers = await Promise.all([handleDocsTrigger(triggerEnv, "line", clock), handleDocsTrigger(triggerEnv, "line", clock)]);
+    expect(triggers.some(value => value.status === "regenerating")).toBe(true);
+    expect(binding.create).toHaveBeenCalledTimes(1);
+    expect(binding.create.mock.calls.every(([value]) => value.id === "publication-rec-run-1-v2")).toBe(true);
+    fixture.state.publishFailure = loseResponse;
+    if (loseResponse) {
+      await expect(fixture.run(2)).rejects.toThrow("Unable to finalize");
+      expect(await job()).toMatchObject({ state: "failed", google_doc_id: "temp-doc-1", temp_doc_id: "temp-doc-2" });
+      expect(fixture.state.docs.size).toBe(2);
+      fixture.products.splice(0, 1);
+      fixture.state.publishFailure = false;
+      expect(await handleDocsTrigger(triggerEnv, "cron", clock)).toMatchObject({ status: "already_generated" });
+      await handleDocsTrigger(triggerEnv, "line", clock);
+    }
+    const v2 = await fixture.run(2);
+    expect(v2!.productIds).toEqual(["A-1001"]);
+    expect(fixture.state.docs.get("temp-doc-1")).toEqual(original);
+    expect(fixture.state.docs.get("temp-doc-2")!.name).toBe("Publication 2026-09-02 (v2)");
+    expect(fixture.state.docUrl).toBe(v2!.googleDocUrl);
+    expect(await handleDocsTrigger(triggerEnv, "line", clock)).toMatchObject({ status: "already_generated" });
+    fixture.products.splice(0, fixture.products.length, product("A-1002"));
+    fixture.create.mockResolvedValue(toolResponse([{ productId: "A-1002", drafts: drafts("A-1002") }]));
+    fixture.state.status = "Ready";
+    expect(await handleDocsTrigger(triggerEnv, "line", clock)).toMatchObject({ status: "regenerating", generation: 3 });
+    const v3 = await fixture.run(3);
+    expect(v3!.productIds).toEqual(["A-1002"]);
+    expect(fixture.state.docs.size).toBe(3);
+    expect(fixture.state.docs.get("temp-doc-3")!.name).toBe("Publication 2026-09-02 (v3)");
+    expect(fixture.state.docUrl).toBe(v3!.googleDocUrl);
+    expect(fixture.state.docs.get("temp-doc-3")!.text).not.toContain("A-1001");
+    await expect(fixture.run(1)).rejects.toMatchObject({ name: "publication_generation_stale" });
+    const rows = await env.DB.prepare("SELECT generation, successful_generation FROM publication_jobs WHERE publication_date='2026-09-02'").all();
+    expect(rows.results).toEqual([{ generation: 3, successful_generation: 3 }]);
+  });
 
   it("blocks the whole run for missing fields, restores Draft, and sends the complete Thai report", async () => {
     const fixture = publicationFixture([
