@@ -23,6 +23,14 @@ curl --fail-with-body -X POST -H "Authorization: Bearer $ADMIN_ROUTE_TOKEN" "$WO
 
 An import already running for the album returns HTTP 409. Check its completion before retrying.
 
+### Regenerate today's publication
+
+Edit the existing Publication Runs row's Products or product data, change `Generated` to `Ready`, then send `/docs` in LINE. Keep one row per Bangkok date. Leaving the row `Generated` keeps the current document.
+
+The original remains `Publication YYYY-MM-DD`; replacements are `(v2)`, `(v3)`, and so on. Old Docs stay available for reference. The row's Google Doc URL updates when the replacement succeeds. Cron and the HTTP admin `/docs` endpoint never regenerate a previously successful publication; use LINE explicitly.
+
+A failed replacement retries the same version. If publication had already begun, retry completes its saved Doc and product snapshot, even if Products were edited afterward. Finish that retry first, then set `Ready` and send `/docs` again to include subsequent changes. During uncertain finalization, Airtable may already link to the verified candidate while D1 still retains the previous successful result; preserve both Docs and retry rather than deleting either.
+
 ## Cost and storage alerts
 
 The Worker checks its estimated monthly cost daily and sends a LINE alert when it exceeds `MONTHLY_BUDGET_THB`. Read the current estimate with:

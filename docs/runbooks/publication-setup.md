@@ -30,3 +30,11 @@ After completeness validation, D1 atomically claims the date for that run. The c
 A Failed restart reloads Airtable and compares input fingerprints before reusing outputs. Collages depend on the first four ordered R2 keys and the base/transform version. Caption fingerprints use exactly the text sent to Claude (Product ID, brand, model, condition, size, description), the Claude model, and the prompt/schema version. Text normalization trims surrounding whitespace, normalizes line endings, and uses Unicode NFC. Prices and images beyond the first four do not affect those respective generated outputs. Successful validation clears D1 validation details, and Generating/Generated clears Airtable Error Summary.
 
 When changing the collage base asset or transformation parameters, bump `COLLAGE_BASE_TRANSFORM_VERSION` in `src/publication/collage.ts`. When changing the caption prompt, output schema, or validation rules, bump `CAPTION_PROMPT_SCHEMA_VERSION` in `src/publication/captions.ts`. Deploy the matching base asset and code together.
+
+## Regeneration rollout
+
+Review and back up the target D1 database, then apply all pending migrations, including `0006_publication_generations.sql`, **before** deploying this Worker. The migration preserves existing date ownership and backfills existing successful Doc references as generation 1. Follow the environment-specific migration and deployment steps in [deployment](deployment.md).
+
+Do not downgrade to a Worker without generation support while a replacement is active or has pending finalization. Preserve the new columns and saved intent during rollback; reconcile unfinished work first.
+
+In staging, use an existing successful row for today's Bangkok date: change Products, set `Ready`, send LINE `/docs`, and verify the new `(v2)` Doc, latest URL, and preserved original. A second `/docs` while still `Generated` must keep that Doc. See [regeneration operations](operations.md#regenerate-todays-publication) for retry behavior.
