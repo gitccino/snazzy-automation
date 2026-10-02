@@ -53,6 +53,7 @@ export function helpText(): string {
     "/search A-1234",
     "/upload",
     "/docs",
+    "/docs 3/10/2026 (วัน/เดือน/ปี ค.ศ.)",
     "/soldout A-1234 ราคา 1,290 บาท",
     "/revert",
   ].join("\n");
@@ -66,6 +67,7 @@ export function parseErrorText(code: ParseErrorCode): string {
     multiple_product_ids: "กรุณาระบุรหัสสินค้าเพียงหนึ่งรหัส",
     missing_price: "ไม่พบราคาขาย ตัวอย่าง ราคา 1,290 บาท",
     invalid_price: "ราคาต้องเป็นจำนวนเต็มบาท เช่น THB 1,290",
+    invalid_publication_date: "วันที่ไม่ถูกต้อง ใช้ /docs วัน/เดือน/ปี ค.ศ. เช่น /docs 3/10/2026",
     multiple_prices: "กรุณาระบุราคาเดียว",
   };
   return messages[code];

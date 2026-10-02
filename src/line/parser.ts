@@ -38,6 +38,16 @@ export function parseLineCommand(input: string): ParseResult {
   if (text === "/help") return { ok: true, command: { type: "help" } };
   if (text === "/upload") return { ok: true, command: { type: "upload" } };
   if (text === "/docs") return { ok: true, command: { type: "docs" } };
+  if (/^\/docs\s/.test(text)) {
+    const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(text.slice(5).trim());
+    if (!match || Number(match[3]) === 0) return { ok: false, code: "invalid_publication_date" };
+    const publicationDate = `${match[3]}-${match[2]!.padStart(2, "0")}-${match[1]!.padStart(2, "0")}`;
+    const date = new Date(`${publicationDate}T00:00:00Z`);
+    if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== publicationDate) {
+      return { ok: false, code: "invalid_publication_date" };
+    }
+    return { ok: true, command: { type: "docs", publicationDate } };
+  }
   if (text === "/revert") return { ok: true, command: { type: "revert" } };
 
   if (/^\/search(?:\s|$)/.test(text)) {

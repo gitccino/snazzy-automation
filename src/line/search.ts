@@ -24,7 +24,7 @@ export type DocsTriggerResult =
 export interface ReadOnlyDeps {
   inventory: Pick<InventoryClient, "findByProductId">;
   triggerUpload(): Promise<UploadTriggerResult>;
-  triggerDocs(): Promise<DocsTriggerResult>;
+  triggerDocs(publicationDate?: string): Promise<DocsTriggerResult>;
 }
 
 function uploadResultText(result: UploadTriggerResult): string {
@@ -42,7 +42,7 @@ function uploadResultText(result: UploadTriggerResult): string {
   }
 }
 
-function docsResultText(result: DocsTriggerResult): string {
+function docsResultText(result: DocsTriggerResult, publicationDate?: string): string {
   switch (result.status) {
     case "regenerating":
       return `เริ่มสร้างเอกสารเวอร์ชัน v${result.generation} แล้ว ${result.publicationRunId}`;
@@ -55,9 +55,11 @@ function docsResultText(result: DocsTriggerResult): string {
     case "already_running":
       return `มีงานสร้างเอกสารกำลังทำงานอยู่ ${result.publicationRunId}`;
     case "already_generated":
-      return `สร้างเอกสารของ Publication Run นี้แล้ว ${result.publicationRunId}`;
+      return `สร้างเอกสารของ Publication Run นี้แล้ว ${result.publicationRunId}\nหากต้องการสร้างเวอร์ชันใหม่ ตั้งสถานะเป็น Ready แล้วส่งคำสั่ง /docs${publicationDate ? ` ${publicationDate.split("-").reverse().join("/")}` : ""} อีกครั้ง`;
     case "no_runnable_run":
-      return "ยังไม่มี Publication Run ที่พร้อมวันนี้";
+      return publicationDate
+        ? `ยังไม่มี Publication Run ที่พร้อมสำหรับวันที่ ${publicationDate.split("-").reverse().join("/")} กรุณาตั้งสถานะเป็น Ready`
+        : "ยังไม่มี Publication Run ที่พร้อมวันนี้";
   }
 }
 
@@ -72,9 +74,12 @@ export async function handleReadOnlyCommand(
   }
   if (command.type === "upload") return uploadResultText(await deps.triggerUpload());
   try {
-    return docsResultText(await deps.triggerDocs());
+    const result = command.publicationDate
+      ? await deps.triggerDocs(command.publicationDate)
+      : await deps.triggerDocs();
+    return docsResultText(result, command.publicationDate);
   } catch (error) {
     if (!(error instanceof OperationalError) || error.code !== "airtable_duplicate_publication_date") throw error;
-    return "พบวันที่ซ้ำใน Publication Runs กรุณาแก้ให้มีเพียง 1 รอบต่อวัน แล้วลอง /docs อีกครั้ง";
+    return `พบวันที่ซ้ำใน Publication Runs กรุณาแก้ให้มีเพียง 1 รอบต่อวัน แล้วลอง /docs${command.publicationDate ? ` ${command.publicationDate.split("-").reverse().join("/")}` : ""} อีกครั้ง`;
   }
 }

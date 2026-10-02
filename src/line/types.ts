@@ -4,7 +4,7 @@ export type ParsedCommand =
   | { type: "help" }
   | { type: "search"; productId: string }
   | { type: "upload" }
-  | { type: "docs" }
+  | { type: "docs"; publicationDate?: string }
   | { type: "soldout"; productId: string; soldPrice: number }
   | { type: "revert" };
 
@@ -15,6 +15,7 @@ export type ParseErrorCode =
   | "multiple_product_ids"
   | "missing_price"
   | "invalid_price"
+  | "invalid_publication_date"
   | "multiple_prices";
 
 export type ParseResult =
