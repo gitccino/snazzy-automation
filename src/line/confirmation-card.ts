@@ -8,7 +8,7 @@ export function revertSuccessCard(publicBaseUrl: string): Record<string, unknown
       type: "box", layout: "horizontal", paddingAll: "24px", spacing: "md",
       alignItems: "center", backgroundColor: "#FFFFFF",
       contents: [
-        { type: "image", url: new URL("/line/icons/check-green-v1.png", publicBaseUrl).toString(), size: "40px", aspectRatio: "1:1", flex: 0 },
+        { type: "image", url: new URL("/line/icons/check-green-v2.png", publicBaseUrl).toString(), size: "40px", aspectRatio: "1:1", flex: 0 },
         {
           type: "box", layout: "vertical", spacing: "none", flex: 1,
           contents: [
