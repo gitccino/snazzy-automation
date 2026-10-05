@@ -12,7 +12,7 @@ export function helpCard(publicBaseUrl: string): SearchCardReply {
     kind: "flex",
     text: ["คำสั่งที่ใช้ได้", ...commands.map(([command, description]) => `${command}: ${description}`)].join("\n"),
     contents: {
-      type: "bubble", size: "mega",
+      type: "bubble", size: "giga",
       body: {
         type: "box", layout: "vertical", paddingAll: "24px", backgroundColor: "#FFFFFF",
         contents: [
