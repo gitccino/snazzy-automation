@@ -27,6 +27,7 @@ export type CommandReply =
       approveData: string;
       rejectData: string;
       sale?: { productId: string; soldPrice: number };
+      revert?: { productId: string; before: SaleValues; after: SaleValues };
     };
 
 export interface SoldoutDeps {

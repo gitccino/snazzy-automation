@@ -1,4 +1,5 @@
 import type { CommandReply } from "./soldout";
+import type { SaleValues } from "./types";
 
 export function confirmationCard(
   reply: Extract<CommandReply, { kind: "buttons" }>,
@@ -25,6 +26,26 @@ export function confirmationCard(
       { type: "text", text: value, color: ink, size: "sm", flex: 1, align: "end", wrap: true },
     ],
   });
+  const saleDetails = (title: string, values: SaleValues) => {
+    const soldAt = values.soldAt ? new Date(values.soldAt) : null;
+    const dateTime = soldAt && Number.isFinite(soldAt.getTime())
+      ? new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Asia/Bangkok", day: "numeric", month: "numeric", year: "2-digit",
+        hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+      }).format(soldAt).replace(/^0/, "").replace(/\/0(\d)\//, "/$1/").replace(", ", " เวลา ")
+      : "ไม่พบข้อมูลเดิม";
+    const seller = values.soldBy?.trim().replace(/\s+\(U[0-9a-f]{32}\)$/i, "") || "ไม่พบข้อมูลเดิม";
+    return {
+      type: "box", layout: "vertical", margin: "xl", spacing: "md",
+      contents: [
+        { type: "text", text: title, color: ink, size: "sm", weight: "bold" },
+        row("สถานะ", values.inventoryStatus),
+        row("ราคาขาย", values.soldPrice === null ? "ไม่พบข้อมูลเดิม" : `${values.soldPrice.toLocaleString("en-US")} บาท`),
+        row("ขายเมื่อ", dateTime),
+        row("บันทึกโดย", seller),
+      ],
+    };
+  };
   return {
     type: "bubble", size: "mega",
     body: {
@@ -34,11 +55,11 @@ export function confirmationCard(
           type: "box", layout: "horizontal", spacing: "md", alignItems: "center",
           contents: [
             { type: "image", url: new URL("/line/icons/check-v1.png", publicBaseUrl).toString(), size: "40px", aspectRatio: "1:1", flex: 0 },
-            reply.sale ? {
+            reply.sale || reply.revert ? {
               type: "box", layout: "vertical", spacing: "none", flex: 1,
               contents: [
-                { type: "text", text: "/soldout", color: muted, size: "xs" },
-                { type: "text", text: "ยืนยันการขาย", color: ink, size: "lg", weight: "bold", wrap: true },
+                { type: "text", text: reply.revert ? "/revert" : "/soldout", color: muted, size: "xs" },
+                { type: "text", text: reply.revert ? "ยืนยันการย้อนกลับ" : "ยืนยันการขาย", color: ink, size: "lg", weight: "bold", wrap: true },
               ],
             } : { type: "text", text: reply.text, color: ink, size: "md", wrap: true, flex: 1 },
           ],
@@ -50,6 +71,14 @@ export function confirmationCard(
             row("ราคา", `${reply.sale.soldPrice.toLocaleString("en-US")} บาท`),
           ],
         }] : []),
+        ...(reply.revert ? [
+          {
+            type: "box", layout: "vertical", margin: "xl",
+            contents: [row("รหัสสินค้า", reply.revert.productId)],
+          },
+          saleDetails("จาก", reply.revert.before),
+          saleDetails("เป็น", reply.revert.after),
+        ] : []),
       ],
     },
     footer: {

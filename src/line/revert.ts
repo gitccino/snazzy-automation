@@ -18,6 +18,7 @@ function confirmationReply(
 ): CommandReply {
   return {
     kind: "buttons",
+    revert: { productId: pending.productId, before: pending.before, after: pending.after },
     text:
       `ยืนยันย้อนกลับ ${pending.productId}\nจาก\n` +
       `${saleValuesText(pending.before)}\nเป็น\n` +
