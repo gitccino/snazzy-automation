@@ -15,11 +15,11 @@ function allMatches(text: string, patterns: RegExp[]): string[] {
 
 function extractProductIds(text: string): { values: string[]; malformed: boolean } {
   // Validate entire ID candidates, including additional malformed IDs, not numeric prefixes.
-  const candidates = Array.from(text.matchAll(/\bA(?:-\S*|\d\S*|\s+\d\S*)|รหัส(?:สินค้า)?\s+\S+/gi), match => match[0]);
+  const candidates = Array.from(text.matchAll(/(?<!\S)A(?:-\S*|\d\S*|\s+\d\S*)|รหัส(?:สินค้า)?\s+\S+/gi), match => match[0]);
   const values: string[] = [];
   let malformed = false;
   for (const candidate of candidates) {
-    const match = /^(?:A-([1-9]\d*)|รหัส(?:สินค้า)?\s+(?:A-?)?([1-9]\d*))$/i.exec(candidate);
+    const match = /^(?:A-?([1-9]\d*)|รหัส(?:สินค้า)?\s+(?:A-?)?([1-9]\d*))$/i.exec(candidate);
     if (match === null) malformed = true;
     else values.push(`A-${match[1] ?? match[2]}`);
   }

@@ -15,7 +15,7 @@ describe("parseLineCommand", () => {
 
   it.each([
     ["/soldout thb 1290", "missing_product_id"],
-    ["/soldout A1234 thb 1290", "invalid_product_id"],
+    ["/soldout A01234 thb 1290", "invalid_product_id"],
     ["/soldout A 1234 thb 1290", "invalid_product_id"],
     ["/soldout A-1-2 thb 1290", "invalid_product_id"],
     ["/soldout A-1.2 thb 1290", "invalid_product_id"],

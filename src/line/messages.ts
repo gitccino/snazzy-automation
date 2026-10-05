@@ -63,7 +63,7 @@ export function parseErrorText(code: ParseErrorCode): string {
   const messages: Record<ParseErrorCode, string> = {
     unknown_command: "ไม่รู้จักคำสั่ง ใช้ /help",
     missing_product_id: "ไม่พบรหัสสินค้า ตัวอย่าง A-1234",
-    invalid_product_id: "รูปแบบรหัสไม่ถูกต้อง ใช้ A-1234, รหัส 1234 หรือ รหัสสินค้า A-1234",
+    invalid_product_id: "รูปแบบรหัสไม่ถูกต้อง ใช้ A-1234, A1234, รหัส 1234 หรือ รหัสสินค้า A-1234",
     multiple_product_ids: "กรุณาระบุรหัสสินค้าเพียงหนึ่งรหัส",
     missing_price: "ไม่พบราคาขาย ตัวอย่าง ราคา 1,290 บาท",
     invalid_price: "ราคาต้องเป็นจำนวนเต็มบาท เช่น THB 1,290",
