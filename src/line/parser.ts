@@ -1,17 +1,12 @@
 import type { ParseResult } from "./types";
 
 const PRICE_NUMBER = "(?:\\d{1,3}(?:,\\d{3})+|\\d+)";
-const PRICE_END = "(?=\\s*(?:THB\\b|ราคา(?=\\s)|$))";
-const THB_PRICE = new RegExp(`\\bTHB\\s+(${PRICE_NUMBER})(?![\\d.,])(?:\\s+บาท)?${PRICE_END}`, "gi");
-const THAI_PRICE = new RegExp(`ราคา\\s+(${PRICE_NUMBER})(?![\\d.,])(?:\\s+บาท)?${PRICE_END}`, "g");
-
-function allMatches(text: string, patterns: RegExp[]): string[] {
-  return patterns.flatMap((pattern) =>
-    Array.from(text.matchAll(new RegExp(pattern.source, pattern.flags)), (match) => match[1]).filter(
-      (value): value is string => value !== undefined,
-    ),
-  );
-}
+const PRICE_CURRENCY = "(?:THB|baht|บาท)";
+const PRICE = new RegExp(
+  `(?<!\\S)(?:(?:THB|ราคา)\\s*(${PRICE_NUMBER})(?:\\s*${PRICE_CURRENCY})?|(${PRICE_NUMBER})\\s*${PRICE_CURRENCY})(?=\\s|$)`,
+  "gi",
+);
+const PRICE_LABEL = /(?<![A-Za-z])(?:THB|baht)(?![A-Za-z])|บาท|ราคา/i;
 
 function extractProductIds(text: string): { values: string[]; malformed: boolean } {
   // Validate entire ID candidates, including additional malformed IDs, not numeric prefixes.
@@ -27,9 +22,15 @@ function extractProductIds(text: string): { values: string[]; malformed: boolean
 }
 
 function extractPrices(text: string): { values: number[]; malformed: boolean } {
-  const values = allMatches(text, [THB_PRICE, THAI_PRICE]).map((value) => Number(value.replaceAll(",", "")));
-  const prefixCount = Array.from(text.matchAll(/\bTHB\b|ราคา/gi)).length;
-  const malformed = prefixCount !== values.length || values.some((value) => !Number.isSafeInteger(value) || value <= 0);
+  const matches = Array.from(text.matchAll(PRICE));
+  const values = matches.map((match) =>
+    Number((match[1] ?? match[2]!).replaceAll(",", "")),
+  );
+  // Unparsed currency labels indicate malformed amounts, not unrelated bare numbers.
+  const malformed = PRICE_LABEL.test(text.replace(PRICE, ""))
+    || matches.some((match) => match[2] !== undefined
+      && /[-–—+.,]\s*$/.test(text.slice(0, match.index)))
+    || values.some((value) => !Number.isSafeInteger(value) || value <= 0);
   return { values, malformed };
 }
 
