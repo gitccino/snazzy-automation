@@ -21,7 +21,7 @@ import type { SearchCardReply } from "./search-card";
 
 export type CommandReply =
   | SearchCardReply
-  | { kind: "text"; text: string; saleSuccess?: { productId: string; soldPrice: number; product?: InventoryProduct } }
+  | { kind: "text"; text: string; saleSuccess?: { productId: string; soldPrice: number; product?: InventoryProduct }; revertSuccess?: boolean }
   | {
       kind: "buttons";
       text: string;

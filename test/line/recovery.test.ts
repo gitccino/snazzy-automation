@@ -177,7 +177,7 @@ it.each(["soldout", "revert"] as const)("recovers completed %s when saving the d
   await expect(processLineEvents([event], h.d)).rejects.toThrow("outcome unavailable");
   h.setTime("2026-09-01T11:00:00.000Z");
   await processLineEvents([event], h.d);
-  const delivered = kind === "soldout" ? h.line.replyFlex.mock.lastCall : h.line.replyText.mock.lastCall;
+  const delivered = h.line.replyFlex.mock.lastCall;
   expect(delivered?.[1]).toContain(kind === "soldout" ? "เป็น Out ราคา 100" : "สำเร็จ");
   expect(h.writes).toHaveLength(kind === "soldout" ? 1 : 2);
 });

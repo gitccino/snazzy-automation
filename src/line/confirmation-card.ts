@@ -1,6 +1,26 @@
 import type { CommandReply } from "./soldout";
 import type { SaleValues } from "./types";
 
+export function revertSuccessCard(publicBaseUrl: string): Record<string, unknown> {
+  return {
+    type: "bubble", size: "mega",
+    body: {
+      type: "box", layout: "horizontal", paddingAll: "24px", spacing: "md",
+      alignItems: "center", backgroundColor: "#FFFFFF",
+      contents: [
+        { type: "image", url: new URL("/line/icons/check-green-v1.png", publicBaseUrl).toString(), size: "40px", aspectRatio: "1:1", flex: 0 },
+        {
+          type: "box", layout: "vertical", spacing: "none", flex: 1,
+          contents: [
+            { type: "text", text: "/revert", color: "#949494", size: "xs" },
+            { type: "text", text: "ย้อนกลับสำเร็จ", color: "#2C2C2C", size: "lg", weight: "bold", wrap: true },
+          ],
+        },
+      ],
+    },
+  };
+}
+
 export function confirmationCard(
   reply: Extract<CommandReply, { kind: "buttons" }>,
   publicBaseUrl: string,
