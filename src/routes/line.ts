@@ -88,8 +88,8 @@ export async function handleLineRoute(
       const response = await handleUploadTrigger(env, "line");
       return parseUploadTriggerResponse(await response.json());
     },
-    triggerDocs() {
-      return handleDocsTrigger(env, "line", clock);
+    triggerDocs(publicationDate) {
+      return handleDocsTrigger(env, "line", clock, publicationDate);
     },
   }));
   return new Response("ok");

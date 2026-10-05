@@ -42,7 +42,7 @@ const docsCases: Array<[DocsTriggerResult, string]> = [
   [{ status: "restarted", publicationRunId: "run-1" }, "เริ่มสร้างเอกสารใหม่แล้ว run-1"],
   [{ status: "resumed", publicationRunId: "run-1" }, "ทำงานสร้างเอกสารต่อแล้ว run-1"],
   [{ status: "already_running", publicationRunId: "run-1" }, "มีงานสร้างเอกสารกำลังทำงานอยู่ run-1"],
-  [{ status: "already_generated", publicationRunId: "run-1" }, "สร้างเอกสารของ Publication Run นี้แล้ว run-1"],
+  [{ status: "already_generated", publicationRunId: "run-1" }, "สร้างเอกสารของ Publication Run นี้แล้ว run-1\nหากต้องการสร้างเวอร์ชันใหม่ ตั้งสถานะเป็น Ready แล้วส่งคำสั่ง /docs อีกครั้ง"],
   [{ status: "no_runnable_run" }, "ยังไม่มี Publication Run ที่พร้อมวันนี้"],
 ];
 
