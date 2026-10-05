@@ -25,7 +25,7 @@ describe("LINE Thai messages", () => {
   });
 
   it("asks for one price when a sold-out command contains several", () => {
-    expect(parseErrorText("multiple_prices")).toContain("ราคาเดียว");
+    expect(parseErrorText("multiple_prices")).toBe("⚠️ พบหลายยอดเงินหรือข้อความราคาไม่ชัดเจน");
   });
 
   it("shows searchable inventory fields without sale details", () => {

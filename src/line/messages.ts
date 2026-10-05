@@ -61,14 +61,14 @@ export function helpText(): string {
 
 export function parseErrorText(code: ParseErrorCode): string {
   const messages: Record<ParseErrorCode, string> = {
-    unknown_command: "ไม่รู้จักคำสั่ง ใช้ /help",
-    missing_product_id: "ไม่พบรหัสสินค้า ตัวอย่าง A-1234",
-    invalid_product_id: "รูปแบบรหัสไม่ถูกต้อง ใช้ A-1234, A1234, รหัส 1234 หรือ รหัสสินค้า A-1234",
-    multiple_product_ids: "กรุณาระบุรหัสสินค้าเพียงหนึ่งรหัส",
-    missing_price: "ไม่พบราคาขาย ตัวอย่าง ราคา 1,290 บาท",
-    invalid_price: "รูปแบบราคาขายไม่ถูกต้อง ต้องเป็นจำนวนเต็มบาทมากกว่า 0 ไม่รองรับทศนิยม เช่น ราคา100 หรือ 1,290บาท",
+    unknown_command: "⚠️ ไม่รู้จักคำสั่ง ใช้ /help",
+    missing_product_id: "⚠️ ไม่พบรหัสสินค้า",
+    invalid_product_id: "⚠️ รูปแบบรหัสไม่ถูกต้อง",
+    multiple_product_ids: "⚠️ กรุณาระบุรหัสสินค้าเพียงหนึ่งรหัส",
+    missing_price: "⚠️ ไม่พบราคาขาย",
+    invalid_price: "⚠️ รูปแบบราคาขายไม่ถูกต้อง",
     invalid_publication_date: "วันที่ไม่ถูกต้อง ใช้ /docs วัน/เดือน/ปี ค.ศ. เช่น /docs 3/10/2026",
-    multiple_prices: "พบหลายยอดเงินหรือข้อความราคาไม่ชัดเจน กรุณาส่งเฉพาะรหัสสินค้าและราคาขาย เช่น /soldout A123 ราคา9900 โดยไม่รวมยอดมัดจำหรือยอดคงเหลือ",
+    multiple_prices: "⚠️ พบหลายยอดเงินหรือข้อความราคาไม่ชัดเจน",
   };
   return messages[code];
 }
@@ -84,14 +84,23 @@ export function searchText(product: InventoryProduct): string {
   ].join("\n");
 }
 
-export const notFoundText = (productId: string) => `ไม่พบสินค้า ${productId}`;
+export const notFoundText = (productId: string) => `⚠️ ไม่พบสินค้า ${productId}`;
 
 export function alreadyOutText(product: InventoryProduct): string {
+  const soldAt = product.soldAt ? new Date(product.soldAt) : null;
+  const hasDate = soldAt !== null && Number.isFinite(soldAt.getTime());
+  const date = hasDate ? new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Bangkok", day: "numeric", month: "numeric", year: "2-digit",
+  }).format(soldAt).replace(/^0/, "").replace(/\/0(\d)\//, "/$1/") : null;
+  const time = hasDate ? new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Bangkok", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).format(soldAt) : null;
+  const soldBy = product.soldBy?.replace(/\s+\(U[0-9a-f]{32}\)$/i, "") ?? null;
   return [
     `สินค้า ${product.productId} เป็น Out อยู่แล้ว`,
-    `ราคาขาย: ${oldValue(product.soldPrice)}`,
-    `ขายเมื่อ: ${oldValue(product.soldAt)}`,
-    `บันทึกโดย: ${oldValue(product.soldBy)}`,
+    `ราคาขาย ${product.soldPrice === null ? oldValue(null) : `${product.soldPrice.toLocaleString("en-US")} บาท`}`,
+    date && time ? `ขายเมื่อวันที่ ${date} เวลา ${time}` : `ขายเมื่อวันที่ ${oldValue(null)}`,
+    `บันทึกโดย ${oldValue(soldBy)}`,
     product.airtableUrl,
   ].join("\n");
 }
