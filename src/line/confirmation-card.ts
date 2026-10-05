@@ -35,7 +35,7 @@ export function confirmationCard(
           contents: [
             { type: "image", url: new URL("/line/icons/check-v1.png", publicBaseUrl).toString(), size: "40px", aspectRatio: "1:1", flex: 0 },
             reply.sale ? {
-              type: "box", layout: "vertical", spacing: "xs", flex: 1,
+              type: "box", layout: "vertical", spacing: "none", flex: 1,
               contents: [
                 { type: "text", text: "/soldout", color: muted, size: "xs" },
                 { type: "text", text: "ยืนยันการขาย", color: ink, size: "lg", weight: "bold", wrap: true },

@@ -42,7 +42,7 @@ export function searchCard(product: InventoryProduct, publicBaseUrl: string): Se
             contents: [
               { type: "image", url: iconUrl("bag"), size: "40px", aspectRatio: "1:1", flex: 0 },
               {
-                type: "box", layout: "vertical", flex: 1, spacing: "xs",
+                type: "box", layout: "vertical", flex: 1, spacing: "none",
                 contents: [
                   { type: "text", text: "รหัสสินค้า", color: muted, size: "sm" },
                   { type: "text", text: product.productId, color: ink, size: "xl", weight: "bold", wrap: true },
