@@ -51,7 +51,9 @@ export function parseLineCommand(input: string): ParseResult {
   if (text === "/revert") return { ok: true, command: { type: "revert" } };
 
   if (/^\/search(?:\s|$)/.test(text)) {
-    const ids = extractProductIds(text.slice(7));
+    const body = text.slice(7).trim();
+    const shortcut = /^(?:a)?([1-9]\d*)$/i.exec(body);
+    const ids = extractProductIds(shortcut ? `A-${shortcut[1]}` : body);
     if (ids.malformed) return { ok: false, code: "invalid_product_id" };
     if (ids.values.length === 0) return { ok: false, code: "missing_product_id" };
     if (ids.values.length > 1) return { ok: false, code: "multiple_product_ids" };
