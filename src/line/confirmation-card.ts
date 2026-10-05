@@ -5,14 +5,10 @@ export function confirmationCard(
   publicBaseUrl: string,
 ): Record<string, unknown> {
   const ink = "#2C2C2C";
-  const background = "#D9D9D9";
-  const button = (label: string, data: string, primary: boolean) => ({
-    type: "box", layout: "vertical", flex: 1, height: "40px",
-    cornerRadius: "12px", borderWidth: "1px", borderColor: primary ? ink : "#828282",
-    backgroundColor: primary ? ink : background,
-    justifyContent: "center", alignItems: "center",
+  const background = "#FFFFFF";
+  const button = (label: string, data: string) => ({
+    type: "button", style: "primary", color: ink, height: "sm", flex: 1,
     action: { type: "postback", label, data, displayText: label },
-    contents: [{ type: "text", text: label, size: "md", weight: "bold", color: primary ? "#FFFFFF" : ink, flex: 0, align: "center" }],
   });
   return {
     type: "bubble", size: "mega",
@@ -28,7 +24,7 @@ export function confirmationCard(
         },
         {
           type: "box", layout: "horizontal", margin: "xl", spacing: "sm",
-          contents: [button("ยกเลิก", reply.rejectData, false), button("ยืนยัน", reply.approveData, true)],
+          contents: [button("ยกเลิก", reply.rejectData), button("ยืนยัน", reply.approveData)],
         },
       ],
     },
