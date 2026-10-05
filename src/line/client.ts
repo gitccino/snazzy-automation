@@ -57,7 +57,7 @@ export function createLineClient(config: {
     replyFlex(replyToken, altText, contents) {
       return send(
         "https://api.line.me/v2/bot/message/reply",
-        { replyToken, messages: [{ type: "flex", altText, contents }] },
+        { replyToken, messages: [{ type: "flex", altText: altText.slice(0, 1500).replace(/[\uD800-\uDBFF]$/, ""), contents }] },
         "line_reply_failed",
       );
     },

@@ -4,6 +4,7 @@ import type { IdGenerator } from "../shared/ids";
 import type { Clock } from "../shared/time";
 import type { InventoryClient } from "./airtable-inventory";
 import type { LineClient } from "./client";
+import { confirmationCard } from "./confirmation-card";
 import { parseErrorText } from "./messages";
 import { parseLineCommand } from "./parser";
 import { prepareRevert, resolveRevert } from "./revert";
@@ -64,13 +65,19 @@ async function actorFor(event: SupportedLineEvent, line: LineClient): Promise<Li
   };
 }
 
-async function send(replyToken: string, reply: CommandReply, line: LineClient): Promise<void> {
+async function send(replyToken: string, reply: CommandReply, line: LineClient, publicBaseUrl: string): Promise<void> {
   if (reply.kind === "flex") {
     await line.replyFlex(replyToken, reply.text, reply.contents);
     return;
   }
   if (reply.kind === "text") {
     await line.replyText(replyToken, reply.text);
+    return;
+  }
+  // Flex text components allow 2,000 characters. Keep the existing lossless
+  // multi-message path for unusually large legacy confirmation details.
+  if (reply.text.length <= 2000) {
+    await line.replyFlex(replyToken, reply.text, confirmationCard(reply, publicBaseUrl));
     return;
   }
   await line.replyButtons(replyToken, reply.text, reply.text, [
@@ -103,12 +110,12 @@ export async function processLineEvents(
 
       const savedReply = await deps.repo.findEventReply(event.webhookEventId);
       if (savedReply !== null) {
-        await send(event.replyToken, savedReply, deps.line);
+        await send(event.replyToken, savedReply, deps.line, deps.publicBaseUrl);
         continue;
       }
       const deliver = async (reply: CommandReply) => {
         await deps.repo.saveEventReply(event.webhookEventId, reply);
-        await send(event.replyToken, reply, deps.line);
+        await send(event.replyToken, reply, deps.line, deps.publicBaseUrl);
       };
       const actor = await actorFor(event, deps.line);
       if (event.type === "postback") {
