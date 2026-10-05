@@ -31,7 +31,7 @@ describe("parseLineCommand", () => {
     ["/soldout A-1 thb 0", "invalid_price"],
     ["/soldout A-1 thb 100foo", "invalid_price"],
     ["/soldout A-1 ราคา 100xxx", "invalid_price"],
-    ["/soldout A-1 THB 100 บาทfoo", "invalid_price"],
+    ["/soldout A-1 THB 100 บาทfoo", "multiple_prices"],
     ["/soldout A-1 THB 100-200", "invalid_price"],
     ["/soldout A-1 thb 100 ราคา 200", "multiple_prices"],
     ["/soldout-extra A-1 thb 100", "unknown_command"],

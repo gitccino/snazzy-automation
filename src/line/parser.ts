@@ -21,17 +21,19 @@ function extractProductIds(text: string): { values: string[]; malformed: boolean
   return { values, malformed };
 }
 
-function extractPrices(text: string): { values: number[]; malformed: boolean } {
+function extractPrices(text: string): { values: number[]; malformed: boolean; ambiguous: boolean } {
   const matches = Array.from(text.matchAll(PRICE));
   const values = matches.map((match) =>
     Number((match[1] ?? match[2]!).replaceAll(",", "")),
   );
-  // Unparsed currency labels indicate malformed amounts, not unrelated bare numbers.
-  const malformed = PRICE_LABEL.test(text.replace(PRICE, ""))
+  const hasUnparsedLabels = PRICE_LABEL.test(text.replace(PRICE, ""));
+  // A valid amount plus other currency text needs clarification, not a decimal warning.
+  const ambiguous = values.length > 1 || (values.length > 0 && hasUnparsedLabels);
+  const malformed = (hasUnparsedLabels && values.length === 0)
     || matches.some((match) => match[2] !== undefined
       && /[-–—+.,]\s*$/.test(text.slice(0, match.index)))
     || values.some((value) => !Number.isSafeInteger(value) || value <= 0);
-  return { values, malformed };
+  return { values, malformed, ambiguous };
 }
 
 export function parseLineCommand(input: string): ParseResult {
@@ -70,7 +72,7 @@ export function parseLineCommand(input: string): ParseResult {
     const prices = extractPrices(body);
     if (prices.malformed) return { ok: false, code: "invalid_price" };
     if (prices.values.length === 0) return { ok: false, code: "missing_price" };
-    if (prices.values.length > 1) return { ok: false, code: "multiple_prices" };
+    if (prices.ambiguous) return { ok: false, code: "multiple_prices" };
     return { ok: true, command: { type: "soldout", productId: ids.values[0]!, soldPrice: prices.values[0]! } };
   }
 
