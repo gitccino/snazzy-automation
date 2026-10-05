@@ -132,8 +132,8 @@ it("restores exact legacy In values through the real Airtable writer and D1 audi
 
 function webhookSetup() {
   const h = setup();
-  const line = { pushMessage: vi.fn(), replyText: vi.fn().mockResolvedValue(undefined), replyButtons: vi.fn(), getGroupMemberProfile: vi.fn().mockResolvedValue({ userId: "U1", displayName: "Mint" }) };
-  const d: WebhookDeps = { ...h.d, line, allowedGroupId: h.actor.groupId, confirmationEnabled: false, audit: { record: vi.fn() }, triggerDocs: vi.fn(), triggerUpload: vi.fn() };
+  const line = { replyFlex: vi.fn(), pushMessage: vi.fn(), replyText: vi.fn().mockResolvedValue(undefined), replyButtons: vi.fn(), getGroupMemberProfile: vi.fn().mockResolvedValue({ userId: "U1", displayName: "Mint" }) };
+  const d: WebhookDeps = { ...h.d, publicBaseUrl: "https://worker.example", line, allowedGroupId: h.actor.groupId, confirmationEnabled: false, audit: { record: vi.fn() }, triggerDocs: vi.fn(), triggerUpload: vi.fn() };
   const message = (name: string, text: string): SupportedLineEvent => ({ type: "message", webhookEventId: h.source(name), replyToken: `reply-${name}`, source: { type: "group", groupId: h.actor.groupId, userId: h.actor.userId }, message: { id: name, type: "text", text } });
   return { ...h, d, message, line };
 }

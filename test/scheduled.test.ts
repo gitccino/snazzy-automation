@@ -124,6 +124,7 @@ describe("handleScheduled", () => {
     const pushed: Array<{ groupId: string; text: string }> = [];
     const lineClient: LineClient = {
       pushMessage: async (groupId, text) => { pushed.push({ groupId, text }); },
+      replyFlex: async () => undefined,
       replyText: vi.fn(),
       replyButtons: vi.fn(),
       getGroupMemberProfile: vi.fn(),
@@ -147,6 +148,7 @@ describe("handleScheduled", () => {
       ...env,
       __lineClientOverride: {
         pushMessage,
+        replyFlex: async () => undefined,
         replyText: vi.fn(),
         replyButtons: vi.fn(),
         getGroupMemberProfile: vi.fn(),
@@ -166,6 +168,7 @@ describe("handleScheduled", () => {
       ...env,
       __lineClientOverride: {
         pushMessage,
+        replyFlex: async () => undefined,
         replyText: vi.fn(),
         replyButtons: vi.fn(),
         getGroupMemberProfile: vi.fn(),

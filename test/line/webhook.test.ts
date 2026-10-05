@@ -31,6 +31,7 @@ function deps(): WebhookDeps {
   } satisfies LineRepository;
   const line = {
     pushMessage: vi.fn(),
+    replyFlex: vi.fn().mockResolvedValue(undefined),
     replyText: vi.fn().mockResolvedValue(undefined),
     replyButtons: vi.fn().mockResolvedValue(undefined),
     getGroupMemberProfile: vi.fn().mockResolvedValue({ userId: "U1", displayName: "Mint" }),
@@ -41,6 +42,7 @@ function deps(): WebhookDeps {
   } satisfies InventoryClient;
   const audit = { record: vi.fn().mockResolvedValue(undefined) } satisfies AuditLog;
   return {
+    publicBaseUrl: "https://worker.example",
     allowedGroupId: "C1",
     confirmationEnabled: true,
     clock: { now: () => new Date("2026-09-01T10:00:00.000Z") },

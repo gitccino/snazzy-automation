@@ -65,6 +65,10 @@ async function actorFor(event: SupportedLineEvent, line: LineClient): Promise<Li
 }
 
 async function send(replyToken: string, reply: CommandReply, line: LineClient): Promise<void> {
+  if (reply.kind === "flex") {
+    await line.replyFlex(replyToken, reply.text, reply.contents);
+    return;
+  }
   if (reply.kind === "text") {
     await line.replyText(replyToken, reply.text);
     return;
@@ -157,7 +161,8 @@ export async function processLineEvents(
         );
         continue;
       }
-      await deliver({ kind: "text", text: await handleReadOnlyCommand(parsed.command, deps) });
+      const reply = await handleReadOnlyCommand(parsed.command, deps);
+      await deliver(typeof reply === "string" ? { kind: "text", text: reply } : reply);
     } catch (error) {
       failures.push(error);
       if (claimed) {

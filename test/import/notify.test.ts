@@ -103,6 +103,7 @@ describe("sendImportSummary", () => {
 
     await sendImportSummary({
       pushMessage,
+      replyFlex: async () => undefined,
       replyText: async () => undefined,
       replyButtons: async () => undefined,
       getGroupMemberProfile: async () => ({ userId: "unused", displayName: "unused" }),
@@ -127,6 +128,7 @@ describe("sendImportSummary", () => {
       sendImportSummary(
         {
           pushMessage,
+          replyFlex: async () => undefined,
           replyText: async () => undefined,
           replyButtons: async () => undefined,
           getGroupMemberProfile: async () => ({ userId: "unused", displayName: "unused" }),

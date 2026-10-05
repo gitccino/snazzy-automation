@@ -11,6 +11,7 @@ function deps(
   docs: DocsTriggerResult = { status: "no_runnable_run" },
 ): ReadOnlyDeps {
   return {
+    publicBaseUrl: "https://worker.example",
     inventory: { findByProductId: vi.fn().mockResolvedValue(null) },
     triggerUpload: vi.fn<() => Promise<UploadTriggerResult>>().mockResolvedValue(upload),
     triggerDocs: vi.fn<() => Promise<DocsTriggerResult>>().mockResolvedValue(docs),

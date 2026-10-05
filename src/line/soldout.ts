@@ -16,8 +16,10 @@ import type {
   PendingLineCommand,
   SaleValues,
 } from "./types";
+import type { SearchCardReply } from "./search-card";
 
 export type CommandReply =
+  | SearchCardReply
   | { kind: "text"; text: string }
   | {
       kind: "buttons";
