@@ -19,7 +19,7 @@ function extractProductIds(text: string): { values: string[]; malformed: boolean
   const values: string[] = [];
   let malformed = false;
   for (const candidate of candidates) {
-    const match = /^(?:A-([1-9]\d*)|รหัส(?:สินค้า)?\s+([1-9]\d*))$/i.exec(candidate);
+    const match = /^(?:A-([1-9]\d*)|รหัส(?:สินค้า)?\s+(?:A-?)?([1-9]\d*))$/i.exec(candidate);
     if (match === null) malformed = true;
     else values.push(`A-${match[1] ?? match[2]}`);
   }
