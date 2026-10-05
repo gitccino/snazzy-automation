@@ -26,6 +26,7 @@ export type CommandReply =
       text: string;
       approveData: string;
       rejectData: string;
+      sale?: { productId: string; soldPrice: number };
     };
 
 export interface SoldoutDeps {
@@ -49,6 +50,7 @@ function confirmationReply(pending: PendingLineCommand): CommandReply {
   }
   return {
     kind: "buttons",
+    sale: { productId: pending.productId, soldPrice: price },
     text: `ยืนยันขาย ${pending.productId} ราคา ${price.toLocaleString("en-US")} บาท`,
     approveData: `action=soldout&decision=approve&token=${pending.token}`,
     rejectData: `action=soldout&decision=reject&token=${pending.token}`,
