@@ -7,10 +7,17 @@ export function confirmationCard(
   const ink = "#2C2C2C";
   const muted = "#949494";
   const background = "#FFFFFF";
-  const button = (label: string, data: string) => ({
-    type: "button", style: "primary", color: ink, height: "sm", flex: 1,
-    action: { type: "postback", label, data, displayText: label },
-  });
+  const button = (label: string, data: string, outline = false) => {
+    const action = { type: "postback", label, data, displayText: label };
+    return outline ? {
+      type: "box", layout: "vertical", flex: 1,
+      borderWidth: "1px", borderColor: "#828282", cornerRadius: "8px",
+      backgroundColor: background, action,
+      contents: [{ type: "button", style: "link", color: ink, height: "sm", action }],
+    } : {
+      type: "button", style: "primary", color: ink, height: "sm", flex: 1, action,
+    };
+  };
   const row = (label: string, value: string) => ({
     type: "box", layout: "horizontal", spacing: "md",
     contents: [
@@ -49,7 +56,7 @@ export function confirmationCard(
       type: "box", layout: "vertical", paddingAll: "16px", paddingTop: "0px", backgroundColor: background,
       contents: [{
         type: "box", layout: "horizontal", spacing: "md",
-        contents: [button("ยกเลิก", reply.rejectData), button("ยืนยัน", reply.approveData)],
+        contents: [button("ยกเลิก", reply.rejectData, true), button("ยืนยัน", reply.approveData)],
       }],
     },
   };
