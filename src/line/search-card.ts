@@ -8,11 +8,34 @@ export interface SearchCardReply {
 }
 
 export function searchCard(product: InventoryProduct, publicBaseUrl: string): SearchCardReply {
+  return productCard(product, publicBaseUrl, searchText(product));
+}
+
+export function saleSuccessCard(
+  productId: string,
+  soldPrice: number,
+  publicBaseUrl: string,
+  product?: InventoryProduct,
+): SearchCardReply {
+  return productCard(
+    { ...product, productId, inventoryStatus: "Out" },
+    publicBaseUrl,
+    `บันทึก ${productId} เป็น Out ราคา ${soldPrice.toLocaleString("en-US")} บาท`,
+    soldPrice,
+  );
+}
+
+function productCard(
+  product: Pick<InventoryProduct, "productId" | "inventoryStatus"> & Partial<InventoryProduct>,
+  publicBaseUrl: string,
+  text: string,
+  soldPrice?: number,
+): SearchCardReply {
   const isIn = product.inventoryStatus === "In";
   const ink = "#2C2C2C";
   const muted = "#949494";
   const background = "#FFFFFF";
-  const iconUrl = (name: string) => new URL(`/line/icons/${name}-v2.png`, publicBaseUrl).toString();
+  const iconUrl = (name: string) => new URL(`/line/icons/${name}-${name === "out" ? "v3" : "v2"}.png`, publicBaseUrl).toString();
   const row = (label: string, value: string) => ({
     type: "box", layout: "horizontal", spacing: "md",
     contents: [
@@ -26,7 +49,7 @@ export function searchCard(product: InventoryProduct, publicBaseUrl: string): Se
     : product.uploadDate ?? "ไม่พบข้อมูล";
   return {
     kind: "flex",
-    text: searchText(product),
+    text,
     contents: {
       type: "bubble", size: "mega",
       ...(product.imageUrl ? {
@@ -59,19 +82,21 @@ export function searchCard(product: InventoryProduct, publicBaseUrl: string): Se
           {
             type: "box", layout: "vertical", margin: "xl", spacing: "md",
             contents: [
-              row(product.brandName ? "แบรนด์" : "รุ่น", product.brandName || product.modelName || "ไม่พบข้อมูล"),
-              row("วันที่อัปโหลด", date),
+              soldPrice !== undefined
+                ? row("ราคา", `${soldPrice.toLocaleString("en-US")} บาท`)
+                : row(product.brandName ? "แบรนด์" : "รุ่น", product.brandName || product.modelName || "ไม่พบข้อมูล"),
+              ...(product.uploadDate !== undefined || soldPrice === undefined ? [row("วันที่อัปโหลด", date)] : []),
             ],
           },
         ],
       },
-      footer: {
+      ...(product.airtableUrl ? { footer: {
         type: "box", layout: "vertical", paddingAll: "16px", paddingTop: "0px", backgroundColor: background,
         contents: [{
           type: "button", style: "primary", color: ink, height: "sm",
           action: { type: "uri", label: "เปิดใน Airtable", uri: product.airtableUrl },
         }],
-      },
+      } } : {}),
     },
   };
 }

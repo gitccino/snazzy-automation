@@ -12,6 +12,7 @@ import {
   parseErrorText,
 } from "./messages";
 import type {
+  InventoryProduct,
   LineActor,
   PendingLineCommand,
   SaleValues,
@@ -20,7 +21,7 @@ import type { SearchCardReply } from "./search-card";
 
 export type CommandReply =
   | SearchCardReply
-  | { kind: "text"; text: string }
+  | { kind: "text"; text: string; saleSuccess?: { productId: string; soldPrice: number; product?: InventoryProduct } }
   | {
       kind: "buttons";
       text: string;
@@ -37,9 +38,10 @@ export interface SoldoutDeps {
   ids: IdGenerator;
 }
 
-function saleReply(productId: string, soldPrice: number): CommandReply {
+function saleReply(productId: string, soldPrice: number, product?: InventoryProduct): CommandReply {
   return {
     kind: "text",
+    saleSuccess: { productId, soldPrice, ...(product ? { product } : {}) },
     text: `บันทึก ${productId} เป็น Out ราคา ${soldPrice.toLocaleString("en-US")} บาท`,
   };
 }
@@ -213,7 +215,7 @@ export async function resolveSoldout(
       actor: resolver,
       correlationId,
     });
-    return saleReply(pending.productId, pending.soldPrice);
+    return saleReply(pending.productId, pending.soldPrice, { ...product, ...after });
   } catch (error) {
     if (!mutationIntentPersisted) {
       await deps.repo.resetPending(token, applyEventId);

@@ -141,13 +141,15 @@ function webhookSetup() {
 it("attempts later events despite reply failure and retries the stored successful mutation outcome", async () => {
   const h = webhookSetup();
   const events = [h.message("sale", `/soldout ${h.productId} THB 100`), h.message("help", "/help")];
-  h.line.replyText.mockRejectedValueOnce(new Error("reply response lost"));
+  h.line.replyFlex.mockRejectedValueOnce(new Error("reply response lost"));
   await expect(processLineEvents(events, h.d)).rejects.toThrow("reply response lost");
-  expect(h.line.replyText.mock.calls.map(call => call[0])).toEqual(["reply-sale", "reply-help"]);
-  const saleReply = h.line.replyText.mock.calls[0]![1];
+  expect(h.line.replyFlex.mock.calls.map(call => call[0])).toEqual(["reply-sale"]);
+  expect(h.line.replyText.mock.calls.map(call => call[0])).toEqual(["reply-help"]);
+  const saleReply = h.line.replyFlex.mock.calls[0];
   await processLineEvents(events, h.d);
-  expect(h.line.replyText.mock.calls.map(call => call[0])).toEqual(["reply-sale", "reply-help", "reply-sale"]);
-  expect(h.line.replyText.mock.calls[2]![1]).toBe(saleReply);
+  expect(h.line.replyFlex.mock.calls.map(call => call[0])).toEqual(["reply-sale", "reply-sale"]);
+  expect(h.line.replyText.mock.calls.map(call => call[0])).toEqual(["reply-help"]);
+  expect(h.line.replyFlex.mock.calls[1]).toEqual(saleReply);
   expect(h.writes).toHaveLength(1);
   expect(h.line.getGroupMemberProfile).toHaveBeenCalledTimes(2);
 });
@@ -175,7 +177,8 @@ it.each(["soldout", "revert"] as const)("recovers completed %s when saving the d
   await expect(processLineEvents([event], h.d)).rejects.toThrow("outcome unavailable");
   h.setTime("2026-09-01T11:00:00.000Z");
   await processLineEvents([event], h.d);
-  expect(h.line.replyText.mock.lastCall?.[1]).toContain(kind === "soldout" ? "เป็น Out ราคา 100" : "สำเร็จ");
+  const delivered = kind === "soldout" ? h.line.replyFlex.mock.lastCall : h.line.replyText.mock.lastCall;
+  expect(delivered?.[1]).toContain(kind === "soldout" ? "เป็น Out ราคา 100" : "สำเร็จ");
   expect(h.writes).toHaveLength(kind === "soldout" ? 1 : 2);
 });
 
