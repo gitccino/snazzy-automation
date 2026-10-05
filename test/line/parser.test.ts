@@ -15,7 +15,7 @@ describe("parseLineCommand", () => {
 
   it.each([
     ["/soldout thb 1290", "missing_product_id"],
-    ["/soldout A1234 thb 1290", "invalid_product_id"],
+    ["/soldout A01234 thb 1290", "invalid_product_id"],
     ["/soldout A 1234 thb 1290", "invalid_product_id"],
     ["/soldout A-1-2 thb 1290", "invalid_product_id"],
     ["/soldout A-1.2 thb 1290", "invalid_product_id"],
@@ -31,7 +31,7 @@ describe("parseLineCommand", () => {
     ["/soldout A-1 thb 0", "invalid_price"],
     ["/soldout A-1 thb 100foo", "invalid_price"],
     ["/soldout A-1 ราคา 100xxx", "invalid_price"],
-    ["/soldout A-1 THB 100 บาทfoo", "invalid_price"],
+    ["/soldout A-1 THB 100 บาทfoo", "multiple_prices"],
     ["/soldout A-1 THB 100-200", "invalid_price"],
     ["/soldout A-1 thb 100 ราคา 200", "multiple_prices"],
     ["/soldout-extra A-1 thb 100", "unknown_command"],
