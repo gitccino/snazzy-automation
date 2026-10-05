@@ -63,7 +63,7 @@ it("claims, ignores, and audits a disallowed group once", async () => {
   await processLineEvents([disallowed], d);
 
   expect(d.repo.claimEvent).toHaveBeenCalledWith("evt-1", "OTHER");
-  expect(d.line.replyText).not.toHaveBeenCalled();
+  expect(d.line.replyFlex).not.toHaveBeenCalled();
   expect(d.audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: "line_disallowed_group" }));
 });
 
@@ -74,7 +74,7 @@ it("deduplicates before profile lookup and command execution", async () => {
   await processLineEvents([event, event], d);
 
   expect(d.line.getGroupMemberProfile).toHaveBeenCalledTimes(1);
-  expect(d.line.replyText).toHaveBeenCalledTimes(1);
+  expect(d.line.replyFlex).toHaveBeenCalledTimes(1);
 });
 
 it("releases the event claim when command processing throws", async () => {

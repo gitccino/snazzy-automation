@@ -1,7 +1,8 @@
 import type { InventoryClient } from "./airtable-inventory";
 import { OperationalError } from "../shared/errors";
-import { helpText, notFoundText } from "./messages";
+import { notFoundText } from "./messages";
 import type { ParsedCommand } from "./types";
+import { helpCard } from "./help-card";
 import { searchCard, type SearchCardReply } from "./search-card";
 
 export type UploadTriggerResult =
@@ -69,7 +70,7 @@ export async function handleReadOnlyCommand(
   command: Extract<ParsedCommand, { type: "help" | "search" | "upload" | "docs" }>,
   deps: ReadOnlyDeps,
 ): Promise<string | SearchCardReply> {
-  if (command.type === "help") return helpText();
+  if (command.type === "help") return helpCard(deps.publicBaseUrl);
   if (command.type === "search") {
     const product = await deps.inventory.findByProductId(command.productId);
     return product ? searchCard(product, deps.publicBaseUrl) : notFoundText(command.productId);
