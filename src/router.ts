@@ -1,3 +1,4 @@
+import { handleLineIcon } from "./line/icons";
 import type { Env } from "./env";
 import { handleGetAsset } from "./routes/assets";
 import { handleDocsRoute } from "./routes/docs";
@@ -10,6 +11,9 @@ import { verifyAdminBearer } from "./shared/admin-auth";
 
 export async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
+  if (request.method === "GET" && url.pathname.startsWith("/line/icons/")) {
+    return handleLineIcon(url.pathname);
+  }
   if (request.method === "GET" && url.pathname.startsWith("/assets/")) {
     return handleGetAsset(request, env, { now: () => new Date() });
   }

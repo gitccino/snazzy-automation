@@ -12,18 +12,23 @@ import {
   parseErrorText,
 } from "./messages";
 import type {
+  InventoryProduct,
   LineActor,
   PendingLineCommand,
   SaleValues,
 } from "./types";
+import type { SearchCardReply } from "./search-card";
 
 export type CommandReply =
-  | { kind: "text"; text: string }
+  | SearchCardReply
+  | { kind: "text"; text: string; saleSuccess?: { productId: string; soldPrice: number; product?: InventoryProduct }; revertSuccess?: boolean }
   | {
       kind: "buttons";
       text: string;
       approveData: string;
       rejectData: string;
+      sale?: { productId: string; soldPrice: number };
+      revert?: { productId: string; before: SaleValues; after: SaleValues };
     };
 
 export interface SoldoutDeps {
@@ -33,9 +38,10 @@ export interface SoldoutDeps {
   ids: IdGenerator;
 }
 
-function saleReply(productId: string, soldPrice: number): CommandReply {
+function saleReply(productId: string, soldPrice: number, product?: InventoryProduct): CommandReply {
   return {
     kind: "text",
+    saleSuccess: { productId, soldPrice, ...(product ? { product } : {}) },
     text: `บันทึก ${productId} เป็น Out ราคา ${soldPrice.toLocaleString("en-US")} บาท`,
   };
 }
@@ -47,6 +53,7 @@ function confirmationReply(pending: PendingLineCommand): CommandReply {
   }
   return {
     kind: "buttons",
+    sale: { productId: pending.productId, soldPrice: price },
     text: `ยืนยันขาย ${pending.productId} ราคา ${price.toLocaleString("en-US")} บาท`,
     approveData: `action=soldout&decision=approve&token=${pending.token}`,
     rejectData: `action=soldout&decision=reject&token=${pending.token}`,
@@ -208,7 +215,7 @@ export async function resolveSoldout(
       actor: resolver,
       correlationId,
     });
-    return saleReply(pending.productId, pending.soldPrice);
+    return saleReply(pending.productId, pending.soldPrice, { ...product, ...after });
   } catch (error) {
     if (!mutationIntentPersisted) {
       await deps.repo.resetPending(token, applyEventId);

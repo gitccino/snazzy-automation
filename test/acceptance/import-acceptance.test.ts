@@ -206,6 +206,7 @@ async function buildHarness(
       notify: (result, orphanRange) =>
         sendImportSummary({
           pushMessage: push,
+          replyFlex: async () => undefined,
           replyText: async () => undefined,
           replyButtons: async () => undefined,
           getGroupMemberProfile: async () => ({

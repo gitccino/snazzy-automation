@@ -31,6 +31,7 @@ function deps(): WebhookDeps {
   } satisfies LineRepository;
   const line = {
     pushMessage: vi.fn(),
+    replyFlex: vi.fn().mockResolvedValue(undefined),
     replyText: vi.fn().mockResolvedValue(undefined),
     replyButtons: vi.fn().mockResolvedValue(undefined),
     getGroupMemberProfile: vi.fn().mockResolvedValue({ userId: "U1", displayName: "Mint" }),
@@ -41,6 +42,7 @@ function deps(): WebhookDeps {
   } satisfies InventoryClient;
   const audit = { record: vi.fn().mockResolvedValue(undefined) } satisfies AuditLog;
   return {
+    publicBaseUrl: "https://worker.example",
     allowedGroupId: "C1",
     confirmationEnabled: true,
     clock: { now: () => new Date("2026-09-01T10:00:00.000Z") },
@@ -61,7 +63,7 @@ it("claims, ignores, and audits a disallowed group once", async () => {
   await processLineEvents([disallowed], d);
 
   expect(d.repo.claimEvent).toHaveBeenCalledWith("evt-1", "OTHER");
-  expect(d.line.replyText).not.toHaveBeenCalled();
+  expect(d.line.replyFlex).not.toHaveBeenCalled();
   expect(d.audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: "line_disallowed_group" }));
 });
 
@@ -72,7 +74,7 @@ it("deduplicates before profile lookup and command execution", async () => {
   await processLineEvents([event, event], d);
 
   expect(d.line.getGroupMemberProfile).toHaveBeenCalledTimes(1);
-  expect(d.line.replyText).toHaveBeenCalledTimes(1);
+  expect(d.line.replyFlex).toHaveBeenCalledTimes(1);
 });
 
 it("releases the event claim when command processing throws", async () => {

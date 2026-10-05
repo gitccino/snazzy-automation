@@ -1,7 +1,9 @@
 import type { InventoryClient } from "./airtable-inventory";
 import { OperationalError } from "../shared/errors";
-import { helpText, notFoundText, searchText } from "./messages";
+import { notFoundText } from "./messages";
 import type { ParsedCommand } from "./types";
+import { helpCard } from "./help-card";
+import { searchCard, type SearchCardReply } from "./search-card";
 
 export type UploadTriggerResult =
   | { status: "started"; importRunId: string }
@@ -22,6 +24,7 @@ export type DocsTriggerResult =
     };
 
 export interface ReadOnlyDeps {
+  publicBaseUrl: string;
   inventory: Pick<InventoryClient, "findByProductId">;
   triggerUpload(): Promise<UploadTriggerResult>;
   triggerDocs(publicationDate?: string): Promise<DocsTriggerResult>;
@@ -66,11 +69,11 @@ function docsResultText(result: DocsTriggerResult, publicationDate?: string): st
 export async function handleReadOnlyCommand(
   command: Extract<ParsedCommand, { type: "help" | "search" | "upload" | "docs" }>,
   deps: ReadOnlyDeps,
-): Promise<string> {
-  if (command.type === "help") return helpText();
+): Promise<string | SearchCardReply> {
+  if (command.type === "help") return helpCard(deps.publicBaseUrl);
   if (command.type === "search") {
     const product = await deps.inventory.findByProductId(command.productId);
-    return product ? searchText(product) : notFoundText(command.productId);
+    return product ? searchCard(product, deps.publicBaseUrl) : notFoundText(command.productId);
   }
   if (command.type === "upload") return uploadResultText(await deps.triggerUpload());
   try {

@@ -101,7 +101,13 @@ export function createInventoryClient(config: {
       if (fields["Product ID"] !== productId) {
         throw new OperationalError("airtable_inventory_invalid_record", "Airtable inventory record product ID did not match lookup", false);
       }
+      const image = z.object({ url: z.url().startsWith("https://").max(2000) }).safeParse(
+        Array.isArray(record.fields["Product Images"]) ? record.fields["Product Images"][0] : undefined,
+      );
       return {
+        imageUrl: image.success ? image.data.url : null,
+        brandName: typeof record.fields["Brand Name"] === "string" ? record.fields["Brand Name"].trim() || null : null,
+        modelName: typeof record.fields["Model Name"] === "string" ? record.fields["Model Name"].trim() || null : null,
         recordId: record.id,
         productId: fields["Product ID"],
         uploadDate: fields["Upload Date"] ?? null,

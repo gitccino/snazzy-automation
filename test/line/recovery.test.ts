@@ -132,8 +132,8 @@ it("restores exact legacy In values through the real Airtable writer and D1 audi
 
 function webhookSetup() {
   const h = setup();
-  const line = { pushMessage: vi.fn(), replyText: vi.fn().mockResolvedValue(undefined), replyButtons: vi.fn(), getGroupMemberProfile: vi.fn().mockResolvedValue({ userId: "U1", displayName: "Mint" }) };
-  const d: WebhookDeps = { ...h.d, line, allowedGroupId: h.actor.groupId, confirmationEnabled: false, audit: { record: vi.fn() }, triggerDocs: vi.fn(), triggerUpload: vi.fn() };
+  const line = { replyFlex: vi.fn(), pushMessage: vi.fn(), replyText: vi.fn().mockResolvedValue(undefined), replyButtons: vi.fn(), getGroupMemberProfile: vi.fn().mockResolvedValue({ userId: "U1", displayName: "Mint" }) };
+  const d: WebhookDeps = { ...h.d, publicBaseUrl: "https://worker.example", line, allowedGroupId: h.actor.groupId, confirmationEnabled: false, audit: { record: vi.fn() }, triggerDocs: vi.fn(), triggerUpload: vi.fn() };
   const message = (name: string, text: string): SupportedLineEvent => ({ type: "message", webhookEventId: h.source(name), replyToken: `reply-${name}`, source: { type: "group", groupId: h.actor.groupId, userId: h.actor.userId }, message: { id: name, type: "text", text } });
   return { ...h, d, message, line };
 }
@@ -141,24 +141,26 @@ function webhookSetup() {
 it("attempts later events despite reply failure and retries the stored successful mutation outcome", async () => {
   const h = webhookSetup();
   const events = [h.message("sale", `/soldout ${h.productId} THB 100`), h.message("help", "/help")];
-  h.line.replyText.mockRejectedValueOnce(new Error("reply response lost"));
+  h.line.replyFlex.mockRejectedValueOnce(new Error("reply response lost"));
   await expect(processLineEvents(events, h.d)).rejects.toThrow("reply response lost");
-  expect(h.line.replyText.mock.calls.map(call => call[0])).toEqual(["reply-sale", "reply-help"]);
-  const saleReply = h.line.replyText.mock.calls[0]![1];
+  expect(h.line.replyFlex.mock.calls.map(call => call[0])).toEqual(["reply-sale", "reply-help"]);
+  expect(h.line.replyText).not.toHaveBeenCalled();
+  const saleReply = h.line.replyFlex.mock.calls[0];
   await processLineEvents(events, h.d);
-  expect(h.line.replyText.mock.calls.map(call => call[0])).toEqual(["reply-sale", "reply-help", "reply-sale"]);
-  expect(h.line.replyText.mock.calls[2]![1]).toBe(saleReply);
+  expect(h.line.replyFlex.mock.calls.map(call => call[0])).toEqual(["reply-sale", "reply-help", "reply-sale"]);
+  expect(h.line.replyText).not.toHaveBeenCalled();
+  expect(h.line.replyFlex.mock.calls[2]).toEqual(saleReply);
   expect(h.writes).toHaveLength(1);
   expect(h.line.getGroupMemberProfile).toHaveBeenCalledTimes(2);
 });
 
 it("does not starve a later event on repeated invalid reply-token redeliveries", async () => {
   const h = webhookSetup();
-  h.line.replyText.mockImplementation(async token => { if (token === "reply-one") throw new Error("invalid reply token"); });
+  h.line.replyFlex.mockImplementation(async token => { if (token === "reply-one") throw new Error("invalid reply token"); });
   const events = [h.message("one", "/help"), h.message("two", "/help")];
   await expect(processLineEvents(events, h.d)).rejects.toThrow("invalid reply token");
   await expect(processLineEvents(events, h.d)).rejects.toThrow("invalid reply token");
-  expect(h.line.replyText.mock.calls.map(call => call[0])).toEqual(["reply-one", "reply-two", "reply-one"]);
+  expect(h.line.replyFlex.mock.calls.map(call => call[0])).toEqual(["reply-one", "reply-two", "reply-one"]);
 });
 
 it.each(["soldout", "revert"] as const)("recovers completed %s when saving the delivery outcome failed", async kind => {
@@ -175,7 +177,8 @@ it.each(["soldout", "revert"] as const)("recovers completed %s when saving the d
   await expect(processLineEvents([event], h.d)).rejects.toThrow("outcome unavailable");
   h.setTime("2026-09-01T11:00:00.000Z");
   await processLineEvents([event], h.d);
-  expect(h.line.replyText.mock.lastCall?.[1]).toContain(kind === "soldout" ? "เป็น Out ราคา 100" : "สำเร็จ");
+  const delivered = h.line.replyFlex.mock.lastCall;
+  expect(delivered?.[1]).toContain(kind === "soldout" ? "เป็น Out ราคา 100" : "สำเร็จ");
   expect(h.writes).toHaveLength(kind === "soldout" ? 1 : 2);
 });
 

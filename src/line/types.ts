@@ -40,6 +40,9 @@ export interface InventoryProduct extends SaleValues {
   productId: string;
   uploadDate: string | null;
   airtableUrl: string;
+  imageUrl?: string | null;
+  brandName?: string | null;
+  modelName?: string | null;
 }
 
 export type PendingCommandKind = "soldout" | "revert";

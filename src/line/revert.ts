@@ -18,6 +18,7 @@ function confirmationReply(
 ): CommandReply {
   return {
     kind: "buttons",
+    revert: { productId: pending.productId, before: pending.before, after: pending.after },
     text:
       `ยืนยันย้อนกลับ ${pending.productId}\nจาก\n` +
       `${saleValuesText(pending.before)}\nเป็น\n` +
@@ -120,7 +121,7 @@ export async function resolveRevert(
 
   const resolver = actorText(actor.displayName, actor.userId);
   if (pending.status === "approved") {
-    return { kind: "text", text: `ย้อนกลับ ${pending.productId} สำเร็จ` };
+    return { kind: "text", text: `ย้อนกลับ ${pending.productId} สำเร็จ`, revertSuccess: true };
   }
   if (decision === "reject") {
     await deps.repo.resolvePending(
@@ -194,6 +195,7 @@ export async function resolveRevert(
     return {
       kind: "text",
       text: `ย้อนกลับ ${pending.productId} สำเร็จ`,
+      revertSuccess: true,
     };
   } catch (error) {
     // Claiming persists the complete revert intent. Even a read failure on this

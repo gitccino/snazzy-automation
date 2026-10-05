@@ -70,6 +70,7 @@ export async function handleLineRoute(
     fetch: fetcher,
   });
   ctx.waitUntil(processLineEvents(events, {
+    publicBaseUrl: config.publicBaseUrl,
     allowedGroupId: config.lineAllowedGroupId,
     confirmationEnabled: config.soldoutConfirmationEnabled,
     line,
