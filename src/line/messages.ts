@@ -50,7 +50,7 @@ const oldValue = (value: string | number | null) => value === null ? "ไม่�
 export function helpText(): string {
   return [
     "คำสั่งที่ใช้ได้",
-    "/search A-1234",
+    "/search 1234 (หรือ A1234, a1234, A-1234)",
     "/upload",
     "/docs",
     "/docs 3/10/2026 (วัน/เดือน/ปี ค.ศ.)",
