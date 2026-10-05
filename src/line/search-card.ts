@@ -11,14 +11,13 @@ export function searchCard(product: InventoryProduct, publicBaseUrl: string): Se
   const isIn = product.inventoryStatus === "In";
   const ink = "#2C2C2C";
   const muted = "#949494";
-  const background = "#D9D9D9";
-  const statusColor = isIn ? "#22A559" : "#FA2C37";
-  const iconUrl = (name: string) => new URL(`/line/icons/${name}.png`, publicBaseUrl).toString();
-  const row = (label: string, value: string, color = ink) => ({
+  const background = "#FFFFFF";
+  const iconUrl = (name: string) => new URL(`/line/icons/${name}-v2.png`, publicBaseUrl).toString();
+  const row = (label: string, value: string) => ({
     type: "box", layout: "horizontal", spacing: "md",
     contents: [
       { type: "text", text: label, color: muted, size: "sm", flex: 1, wrap: true },
-      { type: "text", text: value, color, size: "sm", flex: 1, align: "end", wrap: true },
+      { type: "text", text: value, color: ink, size: "sm", flex: 1, align: "end", wrap: true },
     ],
   });
   const uploadDate = product.uploadDate?.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -53,22 +52,23 @@ export function searchCard(product: InventoryProduct, publicBaseUrl: string): Se
                 type: "box", layout: "vertical", flex: 0, width: "48px", spacing: "xs",
                 contents: [
                   { type: "image", url: iconUrl(isIn ? "in" : "out"), size: "40px", align: "center", aspectRatio: "1:1" },
-                  { type: "text", text: isIn ? "IN" : "Out", size: "xs", weight: "bold", color: statusColor, align: "center" },
                 ],
               },
             ],
           },
-          { type: "separator", margin: "xl", color: "#949494" },
           {
             type: "box", layout: "vertical", margin: "xl", spacing: "md",
-            contents: [row("สถานะ", product.inventoryStatus, statusColor), row("วันที่อัปโหลด", date)],
+            contents: [
+              row(product.brandName ? "แบรนด์" : "รุ่น", product.brandName || product.modelName || "ไม่พบข้อมูล"),
+              row("วันที่อัปโหลด", date),
+            ],
           },
         ],
       },
       footer: {
         type: "box", layout: "vertical", paddingAll: "16px", paddingTop: "0px", backgroundColor: background,
         contents: [{
-          type: "button", style: "link", color: ink, height: "sm",
+          type: "button", style: "primary", color: ink, height: "sm",
           action: { type: "uri", label: "เปิดใน Airtable", uri: product.airtableUrl },
         }],
       },

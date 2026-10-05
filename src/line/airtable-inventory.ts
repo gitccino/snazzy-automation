@@ -106,6 +106,8 @@ export function createInventoryClient(config: {
       );
       return {
         imageUrl: image.success ? image.data.url : null,
+        brandName: typeof record.fields["Brand Name"] === "string" ? record.fields["Brand Name"].trim() || null : null,
+        modelName: typeof record.fields["Model Name"] === "string" ? record.fields["Model Name"].trim() || null : null,
         recordId: record.id,
         productId: fields["Product ID"],
         uploadDate: fields["Upload Date"] ?? null,
