@@ -36,7 +36,7 @@ export function confirmationCard(
       : "ไม่พบข้อมูลเดิม";
     const seller = values.soldBy?.trim().replace(/\s+\(U[0-9a-f]{32}\)$/i, "") || "ไม่พบข้อมูลเดิม";
     return {
-      type: "box", layout: "vertical", margin: "xl", spacing: "md",
+      type: "box", layout: "vertical", margin: "xl", spacing: "sm",
       contents: [
         { type: "text", text: title, color: ink, size: "sm", weight: "bold" },
         row("สถานะ", values.inventoryStatus),
