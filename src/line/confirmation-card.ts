@@ -13,7 +13,7 @@ export function confirmationCard(
   return {
     type: "bubble", size: "mega",
     body: {
-      type: "box", layout: "vertical", paddingAll: "20px", backgroundColor: background,
+      type: "box", layout: "vertical", paddingAll: "24px", backgroundColor: background,
       contents: [
         {
           type: "box", layout: "horizontal", spacing: "md", alignItems: "center",
@@ -22,11 +22,14 @@ export function confirmationCard(
             { type: "text", text: reply.text, color: ink, size: "md", wrap: true, flex: 1 },
           ],
         },
-        {
-          type: "box", layout: "horizontal", margin: "xl", spacing: "sm",
-          contents: [button("ยกเลิก", reply.rejectData), button("ยืนยัน", reply.approveData)],
-        },
       ],
+    },
+    footer: {
+      type: "box", layout: "vertical", paddingAll: "16px", paddingTop: "0px", backgroundColor: background,
+      contents: [{
+        type: "box", layout: "horizontal", spacing: "md",
+        contents: [button("ยกเลิก", reply.rejectData), button("ยืนยัน", reply.approveData)],
+      }],
     },
   };
 }
