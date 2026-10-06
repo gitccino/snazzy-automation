@@ -11,6 +11,8 @@ describe("parseLineCommand", () => {
     ["/soldout A-1234 thb 1290", { type: "soldout", productId: "A-1234", soldPrice: 1290 }],
     ["/soldout รหัส 1234 THB 1,290", { type: "soldout", productId: "A-1234", soldPrice: 1290 }],
     ["/soldout รหัสสินค้า 1234 ราคา 1,290 บาท", { type: "soldout", productId: "A-1234", soldPrice: 1290 }],
+    ["/soldout ❤️ แมส 14.30 ❤️\n\nปลายทาง\n\n[ชื่อ]\n[ที่อยู่]\n[เบอร์]\n\n❤️รหัสสินค้า A-14❤️\nUsed like new\n\n[รายละเอียดสินค้า] 14000 บาท", { type: "soldout", productId: "A-14", soldPrice: 14000 }],
+    ["/soldout ❤️A-14❤️ ราคาขาย 14000 ค่าแมส 82 บาท", { type: "soldout", productId: "A-14", soldPrice: 14000 }],
   ])("parses %s", (text, expected) => expect(parseLineCommand(text)).toEqual({ ok: true, command: expected }));
 
   it.each([
@@ -19,6 +21,7 @@ describe("parseLineCommand", () => {
     ["/soldout A 1234 thb 1290", "invalid_product_id"],
     ["/soldout A-1-2 thb 1290", "invalid_product_id"],
     ["/soldout A-1.2 thb 1290", "invalid_product_id"],
+    ["/soldout ❤️รหัสสินค้า A-1❤️4❤️ 14000 บาท", "invalid_product_id"],
     ["/soldout A-1 A-02 thb 1290", "invalid_product_id"],
     ["/soldout A-1 รหัส 02 thb 1290", "invalid_product_id"],
     ["/soldout รหัสสินค้า 1.2 thb 1290", "invalid_product_id"],

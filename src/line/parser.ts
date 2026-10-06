@@ -10,8 +10,10 @@ const PRICE_LABEL = /(?<![A-Za-z])(?:THB|baht)(?![A-Za-z])|บาท|ราค�
 const SALE_PRICE = new RegExp(`^ราคาขาย\\s*(${PRICE_NUMBER})(?:\\s*${PRICE_CURRENCY})?(?=\\s|$)`, "i");
 
 function extractProductIds(text: string): { values: string[]; malformed: boolean } {
+  // Ignore emoji decoration at token edges; emoji inside an ID remains invalid.
+  const undecorated = text.replace(/(?<!\S)[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\uFE0F\u200D]+|[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\uFE0F\u200D]+(?!\S)/gu, "");
   // Validate entire ID candidates, including additional malformed IDs, not numeric prefixes.
-  const candidates = Array.from(text.matchAll(/(?<!\S)A(?:-\S*|\d\S*|\s+\d\S*)|รหัส(?:สินค้า)?\s+\S+/gi), match => match[0]);
+  const candidates = Array.from(undecorated.matchAll(/(?<!\S)A(?:-\S*|\d\S*|\s+\d\S*)|รหัส(?:สินค้า)?\s+\S+/gi), match => match[0]);
   const values: string[] = [];
   let malformed = false;
   for (const candidate of candidates) {
