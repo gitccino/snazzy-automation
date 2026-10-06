@@ -57,7 +57,7 @@ function productCard(
     text,
     contents: {
       type: "bubble", size: "mega",
-      ...(product.imageUrl ? {
+      ...(product.imageUrl && !alreadyOut ? {
         hero: {
           type: "image", url: product.imageUrl, size: "full", aspectRatio: "4:3", aspectMode: "cover",
         },
@@ -72,16 +72,16 @@ function productCard(
               {
                 type: "box", layout: "vertical", flex: 1, spacing: "none",
                 contents: [
-                  { type: "text", text: "รหัสสินค้า", color: muted, size: "sm" },
-                  { type: "text", text: product.productId, color: ink, size: "xl", weight: "bold", wrap: true },
+                  { type: "text", text: alreadyOut ? "/soldout" : "รหัสสินค้า", color: muted, size: "sm" },
+                  { type: "text", text: alreadyOut ? "ขายแล้ว" : product.productId, color: ink, size: "xl", weight: "bold", wrap: true },
                 ],
               },
-              {
+              ...(!alreadyOut ? [{
                 type: "box", layout: "vertical", flex: 0, width: "48px", spacing: "xs",
                 contents: [
                   { type: "image", url: iconUrl(isIn ? "in" : "out"), size: "40px", align: "center", aspectRatio: "1:1" },
                 ],
-              },
+              }] : []),
             ],
           },
           {
