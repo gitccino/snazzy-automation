@@ -86,8 +86,8 @@ export function searchText(product: InventoryProduct): string {
 
 export const notFoundText = (productId: string) => `⚠️ ไม่พบสินค้า ${productId}`;
 
-export function alreadyOutText(product: InventoryProduct): string {
-  const soldAt = product.soldAt ? new Date(product.soldAt) : null;
+export function soldAtText(value: string | null): string {
+  const soldAt = value ? new Date(value) : null;
   const hasDate = soldAt !== null && Number.isFinite(soldAt.getTime());
   const date = hasDate ? new Intl.DateTimeFormat("en-GB", {
     timeZone: "Asia/Bangkok", day: "numeric", month: "numeric", year: "2-digit",
@@ -95,11 +95,15 @@ export function alreadyOutText(product: InventoryProduct): string {
   const time = hasDate ? new Intl.DateTimeFormat("en-GB", {
     timeZone: "Asia/Bangkok", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
   }).format(soldAt) : null;
+  return date && time ? `${date} เวลา ${time}` : oldValue(null);
+}
+
+export function alreadyOutText(product: InventoryProduct): string {
   const soldBy = product.soldBy?.replace(/\s+\(U[0-9a-f]{32}\)$/i, "") ?? null;
   return [
     `สินค้า ${product.productId} เป็น Out อยู่แล้ว`,
     `ราคาขาย ${product.soldPrice === null ? oldValue(null) : `${product.soldPrice.toLocaleString("en-US")} บาท`}`,
-    date && time ? `ขายเมื่อวันที่ ${date} เวลา ${time}` : `ขายเมื่อวันที่ ${oldValue(null)}`,
+    `ขายเมื่อวันที่ ${soldAtText(product.soldAt)}`,
     `บันทึกโดย ${oldValue(soldBy)}`,
     product.airtableUrl,
   ].join("\n");

@@ -1,5 +1,5 @@
 import type { InventoryProduct } from "./types";
-import { searchText } from "./messages";
+import { alreadyOutText, searchText, soldAtText } from "./messages";
 
 export interface SearchCardReply {
   kind: "flex";
@@ -9,6 +9,10 @@ export interface SearchCardReply {
 
 export function searchCard(product: InventoryProduct, publicBaseUrl: string): SearchCardReply {
   return productCard(product, publicBaseUrl, searchText(product));
+}
+
+export function alreadyOutCard(product: InventoryProduct, publicBaseUrl: string): SearchCardReply {
+  return productCard(product, publicBaseUrl, alreadyOutText(product), undefined, true);
 }
 
 export function saleSuccessCard(
@@ -30,6 +34,7 @@ function productCard(
   publicBaseUrl: string,
   text: string,
   soldPrice?: number,
+  alreadyOut = false,
 ): SearchCardReply {
   const isIn = product.inventoryStatus === "In";
   const ink = "#2C2C2C";
@@ -63,7 +68,7 @@ function productCard(
           {
             type: "box", layout: "horizontal", spacing: "md", alignItems: "center",
             contents: [
-              { type: "image", url: iconUrl("bag"), size: "40px", aspectRatio: "1:1", flex: 0 },
+              { type: "image", url: alreadyOut ? new URL("/line/icons/alert-v1.png", publicBaseUrl).toString() : iconUrl("bag"), size: "40px", aspectRatio: "1:1", flex: 0 },
               {
                 type: "box", layout: "vertical", flex: 1, spacing: "none",
                 contents: [
@@ -81,7 +86,10 @@ function productCard(
           },
           {
             type: "box", layout: "vertical", margin: "xl", spacing: "md",
-            contents: [
+            contents: alreadyOut ? [
+              row("ราคาขาย", product.soldPrice == null ? "ไม่พบข้อมูลเดิม" : `${product.soldPrice.toLocaleString("en-US")} บาท`),
+              row("ขายเมื่อวันที่", soldAtText(product.soldAt ?? null)),
+            ] : [
               soldPrice !== undefined
                 ? row("ราคา", `${soldPrice.toLocaleString("en-US")} บาท`)
                 : row(product.brandName ? "แบรนด์" : "รุ่น", product.brandName || product.modelName || "ไม่พบข้อมูล"),
