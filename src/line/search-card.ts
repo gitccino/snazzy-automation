@@ -87,6 +87,7 @@ function productCard(
           {
             type: "box", layout: "vertical", margin: "xl", spacing: "md",
             contents: alreadyOut ? [
+              { type: "text", text: "ไม่มีสินค้าดังกล่าวอยู่ในคลังสินค้า", color: ink, size: "sm", weight: "bold", wrap: true },
               row("ราคาขาย", product.soldPrice == null ? "ไม่พบข้อมูลเดิม" : `${product.soldPrice.toLocaleString("en-US")} บาท`),
               row("ขายเมื่อวันที่", soldAtText(product.soldAt ?? null)),
             ] : [
