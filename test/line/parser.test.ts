@@ -13,6 +13,7 @@ describe("parseLineCommand", () => {
     ["/soldout รหัสสินค้า 1234 ราคา 1,290 บาท", { type: "soldout", productId: "A-1234", soldPrice: 1290 }],
     ["/soldout ❤️ แมส 14.30 ❤️\n\nปลายทาง\n\n[ชื่อ]\n[ที่อยู่]\n[เบอร์]\n\n❤️รหัสสินค้า A-14❤️\nUsed like new\n\n[รายละเอียดสินค้า] 14000 บาท", { type: "soldout", productId: "A-14", soldPrice: 14000 }],
     ["/soldout ❤️A-14❤️ ราคาขาย 14000 ค่าแมส 82 บาท", { type: "soldout", productId: "A-14", soldPrice: 14000 }],
+    ["/soldout\n" + String.raw`❤️ แมส 14.30 ❤️\n\nปลายทาง\n\n[ชื่อ]\n[ที่อยู่]\n[เบอร์]\n\n❤️รหัสสินค้า A-14❤️\nUsed like new\n\n[รายละเอียดสินค้า] 14000 บาท`, { type: "soldout", productId: "A-14", soldPrice: 14000 }],
   ])("parses %s", (text, expected) => expect(parseLineCommand(text)).toEqual({ ok: true, command: expected }));
 
   it.each([

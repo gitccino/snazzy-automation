@@ -74,7 +74,8 @@ export function parseLineCommand(input: string): ParseResult {
   }
 
   if (/^\/soldout(?:\s|$)/.test(text)) {
-    const body = text.slice(8);
+    // Pasted messages can contain literal escaped line breaks instead of newlines.
+    const body = text.slice(8).replace(/\\r\\n|\\[rn]/g, "\n");
     const ids = extractProductIds(body);
     if (ids.malformed) return { ok: false, code: "invalid_product_id" };
     if (ids.values.length === 0) return { ok: false, code: "missing_product_id" };
