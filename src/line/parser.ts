@@ -7,6 +7,7 @@ const PRICE = new RegExp(
   "gi",
 );
 const PRICE_LABEL = /(?<![A-Za-z])(?:THB|baht)(?![A-Za-z])|บาท|ราคา/i;
+const SALE_PRICE = new RegExp(`^ราคาขาย\\s*(${PRICE_NUMBER})(?:\\s*${PRICE_CURRENCY})?(?=\\s|$)`, "i");
 
 function extractProductIds(text: string): { values: string[]; malformed: boolean } {
   // Validate entire ID candidates, including additional malformed IDs, not numeric prefixes.
@@ -22,6 +23,13 @@ function extractProductIds(text: string): { values: string[]; malformed: boolean
 }
 
 function extractPrices(text: string): { values: number[]; malformed: boolean; ambiguous: boolean } {
+  const saleLabels = Array.from(text.matchAll(/(?<!\S)ราคาขาย/g));
+  if (saleLabels.length > 1) return { values: [], malformed: false, ambiguous: true };
+  if (saleLabels.length === 1) {
+    const match = SALE_PRICE.exec(text.slice(saleLabels[0]!.index));
+    const value = match ? Number(match[1]!.replaceAll(",", "")) : NaN;
+    return { values: [value], malformed: !Number.isSafeInteger(value) || value <= 0, ambiguous: false };
+  }
   const matches = Array.from(text.matchAll(PRICE));
   const values = matches.map((match) =>
     Number((match[1] ?? match[2]!).replaceAll(",", "")),
@@ -71,8 +79,8 @@ export function parseLineCommand(input: string): ParseResult {
     if (ids.values.length > 1) return { ok: false, code: "multiple_product_ids" };
     const prices = extractPrices(body);
     if (prices.malformed) return { ok: false, code: "invalid_price" };
-    if (prices.values.length === 0) return { ok: false, code: "missing_price" };
     if (prices.ambiguous) return { ok: false, code: "multiple_prices" };
+    if (prices.values.length === 0) return { ok: false, code: "missing_price" };
     return { ok: true, command: { type: "soldout", productId: ids.values[0]!, soldPrice: prices.values[0]! } };
   }
 
