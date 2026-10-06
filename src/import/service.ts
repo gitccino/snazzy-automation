@@ -6,7 +6,7 @@ import type { AlbumSnapshot, ImageSource, SourcePhoto } from "../icloud/types";
 import { OperationalError } from "../shared/errors";
 import { sha256Hex } from "../shared/ids";
 import { todayBangkokDate } from "../shared/time";
-import type { AssetStore } from "./asset-store";
+import { AIRTABLE_PREVIEW_VARIANT, type AssetStore } from "./asset-store";
 import type { AirtableProductsClient } from "./airtable-products";
 import {
   computeGroupHash,
@@ -331,6 +331,7 @@ export async function processProductGroupAttempt(
           url: await deps.assets.signUrl(
             photo.r2Key,
             deps.assetUrlTtlSeconds,
+            AIRTABLE_PREVIEW_VARIANT,
           ),
           filename: photo.r2Key.slice("assets/".length),
         };

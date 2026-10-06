@@ -5,7 +5,7 @@ import { fixedClock, sequentialIdGenerator } from "../helpers/fakes";
 import { createImportRepository } from "../../src/db/import-repository";
 import { createSequenceRepository } from "../../src/db/sequence-repository";
 import { createAuditLog } from "../../src/db/audit";
-import { createAssetStore } from "../../src/import/asset-store";
+import { AIRTABLE_PREVIEW_VARIANT, createAssetStore } from "../../src/import/asset-store";
 import type { AirtableProductsClient } from "../../src/import/airtable-products";
 import {
   downloadAndGroupSnapshot,
@@ -962,7 +962,7 @@ describe("processProductGroupAttempt", () => {
       recordId: string;
       expected: Parameters<AirtableProductsClient["verifyProduct"]>[1];
     }> = [];
-    const signingCalls: Array<{ r2Key: string; ttlSeconds: number }> = [];
+    const signingCalls: Array<{ r2Key: string; ttlSeconds: number; variant?: string }> = [];
     const { deps, group } = await buildProcessDeps(
       {
         createProduct: async (payload) => {
@@ -980,8 +980,8 @@ describe("processProductGroupAttempt", () => {
       putIfAbsent: async () => {
         throw new Error("putIfAbsent is outside the Product creation boundary");
       },
-      signUrl: async (r2Key, ttlSeconds) => {
-        signingCalls.push({ r2Key, ttlSeconds });
+      signUrl: async (r2Key, ttlSeconds, variant) => {
+        signingCalls.push({ r2Key, ttlSeconds, variant });
         if (r2Key === "assets/p1.jpg") {
           return "https://assets.example/signed-p1.jpg?ttl=300";
         }
@@ -995,8 +995,8 @@ describe("processProductGroupAttempt", () => {
     await processProductGroupAttempt(deps, group, "run-payload");
 
     expect(signingCalls).toEqual([
-      { r2Key: "assets/p1.jpg", ttlSeconds: 300 },
-      { r2Key: "assets/p2.jpg", ttlSeconds: 300 },
+      { r2Key: "assets/p1.jpg", ttlSeconds: 300, variant: AIRTABLE_PREVIEW_VARIANT },
+      { r2Key: "assets/p2.jpg", ttlSeconds: 300, variant: AIRTABLE_PREVIEW_VARIANT },
     ]);
     expect(submittedPayload).toEqual({
       productId: "A-501",
