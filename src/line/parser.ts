@@ -7,10 +7,13 @@ const PRICE = new RegExp(
   "gi",
 );
 const PRICE_LABEL = /(?<![A-Za-z])(?:THB|baht)(?![A-Za-z])|บาท|ราคา/i;
+const SALE_PRICE = new RegExp(`^ราคาขาย\\s*(${PRICE_NUMBER})(?:\\s*${PRICE_CURRENCY})?(?=\\s|$)`, "i");
 
 function extractProductIds(text: string): { values: string[]; malformed: boolean } {
+  // Ignore emoji decoration at token edges; emoji inside an ID remains invalid.
+  const undecorated = text.replace(/(?<!\S)[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\uFE0F\u200D]+|[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\uFE0F\u200D]+(?!\S)/gu, "");
   // Validate entire ID candidates, including additional malformed IDs, not numeric prefixes.
-  const candidates = Array.from(text.matchAll(/(?<!\S)A(?:-\S*|\d\S*|\s+\d\S*)|รหัส(?:สินค้า)?\s+\S+/gi), match => match[0]);
+  const candidates = Array.from(undecorated.matchAll(/(?<!\S)A(?:-\S*|\d\S*|\s+\d\S*)|รหัส(?:สินค้า)?\s+\S+/gi), match => match[0]);
   const values: string[] = [];
   let malformed = false;
   for (const candidate of candidates) {
@@ -22,6 +25,13 @@ function extractProductIds(text: string): { values: string[]; malformed: boolean
 }
 
 function extractPrices(text: string): { values: number[]; malformed: boolean; ambiguous: boolean } {
+  const saleLabels = Array.from(text.matchAll(/(?<!\S)ราคาขาย/g));
+  if (saleLabels.length > 1) return { values: [], malformed: false, ambiguous: true };
+  if (saleLabels.length === 1) {
+    const match = SALE_PRICE.exec(text.slice(saleLabels[0]!.index));
+    const value = match ? Number(match[1]!.replaceAll(",", "")) : NaN;
+    return { values: [value], malformed: !Number.isSafeInteger(value) || value <= 0, ambiguous: false };
+  }
   const matches = Array.from(text.matchAll(PRICE));
   const values = matches.map((match) =>
     Number((match[1] ?? match[2]!).replaceAll(",", "")),
@@ -64,15 +74,16 @@ export function parseLineCommand(input: string): ParseResult {
   }
 
   if (/^\/soldout(?:\s|$)/.test(text)) {
-    const body = text.slice(8);
+    // Pasted messages can contain literal escaped line breaks instead of newlines.
+    const body = text.slice(8).replace(/\\r\\n|\\[rn]/g, "\n");
     const ids = extractProductIds(body);
     if (ids.malformed) return { ok: false, code: "invalid_product_id" };
     if (ids.values.length === 0) return { ok: false, code: "missing_product_id" };
     if (ids.values.length > 1) return { ok: false, code: "multiple_product_ids" };
     const prices = extractPrices(body);
     if (prices.malformed) return { ok: false, code: "invalid_price" };
-    if (prices.values.length === 0) return { ok: false, code: "missing_price" };
     if (prices.ambiguous) return { ok: false, code: "multiple_prices" };
+    if (prices.values.length === 0) return { ok: false, code: "missing_price" };
     return { ok: true, command: { type: "soldout", productId: ids.values[0]!, soldPrice: prices.values[0]! } };
   }
 
