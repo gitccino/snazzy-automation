@@ -4,7 +4,7 @@ import type { IdGenerator } from "../shared/ids";
 import type { Clock } from "../shared/time";
 import type { InventoryClient } from "./airtable-inventory";
 import type { LineClient } from "./client";
-import { saleSuccessCard } from "./search-card";
+import { alreadyOutCard, saleSuccessCard } from "./search-card";
 import { confirmationCard, revertSuccessCard } from "./confirmation-card";
 import { parseErrorText } from "./messages";
 import { parseLineCommand } from "./parser";
@@ -72,6 +72,11 @@ async function send(replyToken: string, reply: CommandReply, line: LineClient, p
     return;
   }
   if (reply.kind === "text") {
+    if (reply.alreadyOut) {
+      const card = alreadyOutCard(reply.alreadyOut, publicBaseUrl);
+      await line.replyFlex(replyToken, card.text, card.contents);
+      return;
+    }
     if (reply.revertSuccess) {
       await line.replyFlex(replyToken, reply.text, revertSuccessCard(publicBaseUrl));
       return;

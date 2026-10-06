@@ -21,7 +21,7 @@ import type { SearchCardReply } from "./search-card";
 
 export type CommandReply =
   | SearchCardReply
-  | { kind: "text"; text: string; saleSuccess?: { productId: string; soldPrice: number; product?: InventoryProduct }; revertSuccess?: boolean }
+  | { kind: "text"; text: string; saleSuccess?: { productId: string; soldPrice: number; product?: InventoryProduct }; revertSuccess?: boolean; alreadyOut?: InventoryProduct }
   | {
       kind: "buttons";
       text: string;
@@ -90,7 +90,7 @@ export async function prepareSoldout(
     return { kind: "text", text: notFoundText(input.productId) };
   }
   if (product.inventoryStatus === "Out") {
-    return { kind: "text", text: alreadyOutText(product) };
+    return { kind: "text", text: alreadyOutText(product), alreadyOut: product };
   }
 
   const before: SaleValues = {

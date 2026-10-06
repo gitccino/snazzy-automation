@@ -1,5 +1,5 @@
 import type { InventoryProduct } from "./types";
-import { searchText } from "./messages";
+import { alreadyOutText, searchText, soldAtText } from "./messages";
 
 export interface SearchCardReply {
   kind: "flex";
@@ -9,6 +9,10 @@ export interface SearchCardReply {
 
 export function searchCard(product: InventoryProduct, publicBaseUrl: string): SearchCardReply {
   return productCard(product, publicBaseUrl, searchText(product));
+}
+
+export function alreadyOutCard(product: InventoryProduct, publicBaseUrl: string): SearchCardReply {
+  return productCard(product, publicBaseUrl, alreadyOutText(product), undefined, true);
 }
 
 export function saleSuccessCard(
@@ -30,6 +34,7 @@ function productCard(
   publicBaseUrl: string,
   text: string,
   soldPrice?: number,
+  alreadyOut = false,
 ): SearchCardReply {
   const isIn = product.inventoryStatus === "In";
   const ink = "#2C2C2C";
@@ -52,7 +57,7 @@ function productCard(
     text,
     contents: {
       type: "bubble", size: "mega",
-      ...(product.imageUrl ? {
+      ...(product.imageUrl && !alreadyOut ? {
         hero: {
           type: "image", url: product.imageUrl, size: "full", aspectRatio: "4:3", aspectMode: "cover",
         },
@@ -63,25 +68,28 @@ function productCard(
           {
             type: "box", layout: "horizontal", spacing: "md", alignItems: "center",
             contents: [
-              { type: "image", url: iconUrl("bag"), size: "40px", aspectRatio: "1:1", flex: 0 },
+              { type: "image", url: alreadyOut ? new URL("/line/icons/alert-v1.png", publicBaseUrl).toString() : iconUrl("bag"), size: "40px", aspectRatio: "1:1", flex: 0 },
               {
                 type: "box", layout: "vertical", flex: 1, spacing: "none",
                 contents: [
-                  { type: "text", text: "รหัสสินค้า", color: muted, size: "sm" },
-                  { type: "text", text: product.productId, color: ink, size: "xl", weight: "bold", wrap: true },
+                  { type: "text", text: alreadyOut ? "/soldout" : "รหัสสินค้า", color: muted, size: "sm" },
+                  { type: "text", text: alreadyOut ? "ขายแล้ว" : product.productId, color: ink, size: "xl", weight: "bold", wrap: true },
                 ],
               },
-              {
+              ...(!alreadyOut ? [{
                 type: "box", layout: "vertical", flex: 0, width: "48px", spacing: "xs",
                 contents: [
                   { type: "image", url: iconUrl(isIn ? "in" : "out"), size: "40px", align: "center", aspectRatio: "1:1" },
                 ],
-              },
+              }] : []),
             ],
           },
           {
             type: "box", layout: "vertical", margin: "xl", spacing: "md",
-            contents: [
+            contents: alreadyOut ? [
+              row("ราคาขาย", product.soldPrice == null ? "ไม่พบข้อมูลเดิม" : `${product.soldPrice.toLocaleString("en-US")} บาท`),
+              row("ขายเมื่อวันที่", soldAtText(product.soldAt ?? null)),
+            ] : [
               soldPrice !== undefined
                 ? row("ราคา", `${soldPrice.toLocaleString("en-US")} บาท`)
                 : row(product.brandName ? "แบรนด์" : "รุ่น", product.brandName || product.modelName || "ไม่พบข้อมูล"),

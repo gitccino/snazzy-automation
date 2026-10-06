@@ -1,6 +1,7 @@
 import { expect, it, vi } from "vitest";
 import type { LineRepository } from "../../src/db/line-repository";
 import type { InventoryClient } from "../../src/line/airtable-inventory";
+import { alreadyOutCard } from "../../src/line/search-card";
 import {
   prepareSoldout,
   resolveSoldout,
@@ -88,13 +89,21 @@ function deps(found: InventoryProduct | null = product) {
 }
 
 it("does not overwrite or create a command for an already-Out Product", async () => {
-  const d = deps({ ...product, inventoryStatus: "Out", soldPrice: 900 });
+  const soldProduct: InventoryProduct = { ...product, inventoryStatus: "Out", soldPrice: 900, soldAt: "2026-10-06T11:46:00Z" };
+  const d = deps(soldProduct);
 
   const result = await prepareSoldout(
     { productId: "A-1", soldPrice: 1290 }, actor, "evt-command", true, d,
   );
 
   expect(result.kind).toBe("text");
+  expect(result).toMatchObject({ alreadyOut: soldProduct });
+  const card = JSON.stringify(alreadyOutCard(soldProduct, "https://worker.example").contents);
+  expect(card).toContain("/line/icons/alert-v1.png");
+  expect(card).toContain("900 บาท");
+  expect(card).toContain("6/10/26 เวลา 18:46");
+  expect(card).not.toContain("วันที่อัปโหลด");
+  expect(card).not.toContain("บันทึกโดย");
   expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
   expect(d.repo.createPending).not.toHaveBeenCalled();
 });
