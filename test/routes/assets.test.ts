@@ -5,7 +5,7 @@ import { handleGetAsset } from "../../src/routes/assets";
 import { fixedClock } from "../helpers/fakes";
 
 describe("GET /assets/:key", () => {
-  it("serves authenticated 1200px previews while preserving sources and rejecting variant tampering", async () => {
+  it("serves authenticated 600px previews while preserving sources and rejecting variant tampering", async () => {
     const env = testEnv();
     const clock = fixedClock("2026-09-01T09:00:00.000Z");
     const store = createAssetStore(env.IMAGES_BUCKET, { signingSecret: env.ASSET_URL_SIGNING_SECRET, publicBaseUrl: "https://example.workers.dev" }, clock);
@@ -21,7 +21,7 @@ describe("GET /assets/:key", () => {
     const response = await handleGetAsset(new Request(signed), previewEnv, clock);
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("preview-image");
-    expect(pipeline.transform).toHaveBeenCalledWith({ width: 1200, height: 1200, fit: "scale-down" });
+    expect(pipeline.transform).toHaveBeenCalledWith({ width: 600, height: 600, fit: "scale-down" });
     expect(pipeline.output).toHaveBeenCalledWith({ format: "image/jpeg", quality: 80 });
     const source = await handleGetAsset(new Request(await store.signUrl(r2Key, 300)), previewEnv, clock);
     expect(await source.text()).toBe("source-image");

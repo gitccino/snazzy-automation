@@ -38,7 +38,7 @@ export async function handleGetAsset(request: Request, env: Env, clock: Clock): 
 
   if (variant === AIRTABLE_PREVIEW_VARIANT) {
     const output = await env.IMAGES.input(object.body)
-      .transform({ width: 1200, height: 1200, fit: "scale-down" })
+      .transform({ width: 600, height: 600, fit: "scale-down" })
       .output({ format: "image/jpeg", quality: 80 });
     const preview = output.response();
     if (!preview.ok || preview.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "image/jpeg") {

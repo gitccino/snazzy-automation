@@ -29,7 +29,9 @@ const AssetFieldsSchema = z.object({
   assetDate: z.object({ value: z.number().int().min(0).max(8640000000000000) }),
 });
 const MasterFieldsSchema = z.object({
-  resJPEGMedRes: z.object({ value: z.object({ downloadURL: z.string().min(1) }) }),
+  resJPEGMedRes: z.object({ value: z.object({ downloadURL: z.string().min(1) }) }).optional(),
+  resOriginalRes: z.object({ value: z.object({ downloadURL: z.string().min(1) }) }).optional(),
+  resOriginalFileType: z.object({ value: z.string() }).optional(),
   dataClassType: z.object({ value: z.literal(1) }).optional(),
 });
 
@@ -151,7 +153,14 @@ export function createCloudKitClient(
       if (master?.recordType !== "CPLMaster" || !fields.success) {
         fail("icloud_missing_asset_url", "iCloud omitted a JPEG photo resource or returned unsupported media");
       }
-      const derivativeUrl = appleUrl(fields.data.resJPEGMedRes.value.downloadURL, "asset").toString();
+      // Small JPEGs can have an original resource without a medium derivative.
+      const downloadURL = fields.data.resJPEGMedRes?.value.downloadURL
+        ?? (fields.data.resOriginalFileType?.value === "public.jpeg"
+          ? fields.data.resOriginalRes?.value.downloadURL : undefined);
+      if (!downloadURL) {
+        fail("icloud_missing_asset_url", "iCloud omitted a JPEG photo resource or returned unsupported media");
+      }
+      const derivativeUrl = appleUrl(downloadURL, "asset").toString();
       photos.push({
         sourceAlbumId,
         applePhotoId: record.recordName,
