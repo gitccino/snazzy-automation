@@ -99,7 +99,9 @@ it("previews search cards and errors without reading inventory or running pipeli
     const parsed = parseLineCommand(`/testsearch${suffix}`);
     if (!parsed.ok || parsed.command.type !== "testsearch") throw new Error("Expected search preview");
     const reply = await handleReadOnlyCommand(parsed.command, d);
-    if (parsed.command.caseNumber !== null && parsed.command.caseNumber <= 5) {
+    if (parsed.command.caseNumber === null) {
+      expect(reply).toMatchObject({ kind: "flex", contents: { type: "bubble" } });
+    } else if (parsed.command.caseNumber <= 5) {
       expect(reply).toMatchObject({ kind: "flex", contents: { type: "bubble" } });
       if (typeof reply === "string") throw new Error("Expected card");
       expect(Boolean(reply.contents.hero)).toBe(parsed.command.caseNumber !== 3);
@@ -118,7 +120,7 @@ it("previews soldout cases with safe confirmation buttons and no pipeline calls"
     const parsed = parseLineCommand(`/testsoldout${suffix}`);
     if (!parsed.ok || parsed.command.type !== "testsoldout") throw new Error("Expected soldout preview");
     const reply = await handleReadOnlyCommand(parsed.command, d);
-    if (parsed.command.caseNumber !== null && parsed.command.caseNumber <= 3) {
+    if (parsed.command.caseNumber === null || parsed.command.caseNumber <= 3) {
       expect(reply).toMatchObject({ kind: "flex" });
       if (typeof reply === "string") throw new Error("Expected Flex card");
       if (parsed.command.caseNumber === 1) {
@@ -140,7 +142,7 @@ it("previews all docs replies without invoking workflows or inventory reads", as
     const parsed = parseLineCommand(`/testdocs${suffix}`);
     if (!parsed.ok || parsed.command.type !== "testdocs") throw new Error("Expected docs preview");
     const reply = await handleReadOnlyCommand(parsed.command, d);
-    if (parsed.command.caseNumber !== null && (parsed.command.caseNumber <= 4 || parsed.command.caseNumber >= 11)) expect(reply).toMatchObject({ kind: "flex", contents: { type: "bubble" } });
+    if (parsed.command.caseNumber === null || parsed.command.caseNumber <= 4 || parsed.command.caseNumber >= 11) expect(reply).toMatchObject({ kind: "flex", contents: { type: "bubble" } });
     else expect(typeof reply).toBe("string");
     expect(reply).not.toBe("");
   }

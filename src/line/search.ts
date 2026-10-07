@@ -5,7 +5,7 @@ import type { InventoryClient } from "./airtable-inventory";
 import { OperationalError } from "../shared/errors";
 import { notFoundText, parseErrorText, soldoutMessages } from "./messages";
 import type { InventoryProduct, ParsedCommand } from "./types";
-import { helpCard } from "./help-card";
+import { commandListCard, helpCard } from "./help-card";
 import { docsStartCard, uploadStartCard } from "./upload-card";
 import { alreadyOutCard, saleSuccessCard, searchCard, type SearchCardReply } from "./search-card";
 
@@ -51,7 +51,7 @@ function uploadResultReply(result: UploadTriggerResult, publicBaseUrl: string): 
 
 function testUploadReply(caseNumber: number | null, publicBaseUrl: string): string | SearchCardReply {
   const labels = ["เริ่มนำเข้า", "มีงานกำลังทำงาน", "ยังไม่ได้ตั้งค่าลำดับรหัส", "เริ่ม Workflow ไม่สำเร็จ", "ระบบเริ่มงานขัดข้อง", "สำเร็จทั้งหมด", "สำเร็จบางรายการ", "ล้มเหลวทั้งหมด", "ไม่มีสินค้าใหม่", "ภาพก่อนมาร์กเกอร์"];
-  if (caseNumber === null) return "ตัวอย่างข้อความ /upload (ไม่มีการนำเข้าจริง)\n" + labels.map((label, index) => `/testupload ${index + 1} — ${label}`).join("\n");
+  if (caseNumber === null) return commandListCard(publicBaseUrl, "/testupload", "ตัวอย่างข้อความ /upload", "setting-yellow-v1", labels.map((label, index) => [String(index + 1), label]));
   let reply: string | SearchCardReply;
   if (caseNumber <= 5) {
     const outcomes: UploadTriggerResult[] = [
@@ -78,7 +78,7 @@ function testUploadReply(caseNumber: number | null, publicBaseUrl: string): stri
 
 function testSearchReply(caseNumber: number | null, publicBaseUrl: string): string | SearchCardReply {
   const labels = ["สินค้า In พร้อมภาพ", "สินค้า Out พร้อมภาพ", "ไม่มีภาพ", "แสดงรุ่นแทนแบรนด์", "ข้อมูลสินค้าไม่ครบ", "ไม่พบสินค้า", "ไม่พบรหัสสินค้า", "รหัสไม่ถูกต้อง", "หลายรหัสสินค้า"];
-  if (caseNumber === null) return "ตัวอย่างข้อความ /search (ไม่มีการค้นหาจริง)\n" + labels.map((label, index) => `/testsearch ${index + 1} — ${label}`).join("\n");
+  if (caseNumber === null) return commandListCard(publicBaseUrl, "/testsearch", "ตัวอย่างข้อความ /search", "setting-yellow-v1", labels.map((label, index) => [String(index + 1), label]));
   if (caseNumber === 6) return notFoundText("A-999");
   if (caseNumber === 7) return parseErrorText("missing_product_id");
   if (caseNumber === 8) return parseErrorText("invalid_product_id");
@@ -100,7 +100,7 @@ function testSearchReply(caseNumber: number | null, publicBaseUrl: string): stri
 
 function testSoldoutReply(caseNumber: number | null, publicBaseUrl: string): string | SearchCardReply {
   const labels = ["ยืนยันการขาย", "บันทึกขายสำเร็จ", "ขายแล้ว", "ยกเลิกการขาย", "ไม่พบรหัสสินค้า", "รหัสไม่ถูกต้อง", "หลายรหัสสินค้า", "ไม่พบราคาขาย", "ราคาไม่ถูกต้อง", "หลายยอดเงิน", "ไม่รู้จักคำสั่ง", "ไม่พบสินค้า", "มีคำสั่งรอยืนยัน", "คำยืนยันหมดอายุหรือถูกใช้แล้ว", "คำยืนยันราคาไม่ถูกต้อง", "ข้อมูลสินค้าเปลี่ยนแล้ว"];
-  if (caseNumber === null) return "ตัวอย่างข้อความ /soldout (ไม่มีการขายจริง)\n" + labels.map((label, index) => `/testsoldout ${index + 1} — ${label}`).join("\n");
+  if (caseNumber === null) return commandListCard(publicBaseUrl, "/testsoldout", "ตัวอย่างข้อความ /soldout", "setting-yellow-v1", labels.map((label, index) => [String(index + 1), label]));
   const productId = "A-22";
   const soldPrice = 12000;
   if (caseNumber === 1) {
@@ -178,7 +178,7 @@ function duplicatePublicationDateText(publicationDate?: string): string {
 
 function testDocsReply(caseNumber: number | null, publicBaseUrl: string): string | SearchCardReply {
   const labels = ["เริ่มสร้างเอกสาร", "เริ่มสร้างเวอร์ชัน v2", "เริ่มสร้างใหม่", "ทำงานต่อ", "กำลังทำงานอยู่", "สร้างเอกสารแล้ว", "ไม่มีรอบพร้อมวันนี้", "ไม่มีรอบพร้อมสำหรับวันที่เลือก", "วันที่ไม่ถูกต้อง", "วันที่ซ้ำ", "สร้างเอกสารสำเร็จ", "ข้อมูลสินค้าไม่ครบ", "Workflow ล้มเหลว"];
-  if (caseNumber === null) return "ตัวอย่างข้อความ /docs (ไม่มีการสร้างเอกสารจริง)\n" + labels.map((label, index) => `/testdocs ${index + 1} — ${label}`).join("\n");
+  if (caseNumber === null) return commandListCard(publicBaseUrl, "/testdocs", "ตัวอย่างข้อความ /docs", "setting-yellow-v1", labels.map((label, index) => [String(index + 1), label]));
   const publicationRunId = "recPreviewOnly";
   const thaiDate = "7 ตุลาคม 2569";
   if (caseNumber <= 7) {
