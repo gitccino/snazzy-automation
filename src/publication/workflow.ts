@@ -44,7 +44,7 @@ function depsFor(env: Env, clock: Clock): PublicationServiceDeps {
       clientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
       refreshToken: env.GOOGLE_REFRESH_TOKEN,
     },
-    notify: (text) => line.pushMessage(config.lineAllowedGroupId, text),
+    notify: (text, contents) => line.pushMessage(config.lineAllowedGroupId, text, contents),
   };
 }
 

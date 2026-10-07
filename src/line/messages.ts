@@ -67,7 +67,7 @@ export function parseErrorText(code: ParseErrorCode): string {
     multiple_product_ids: "⚠️ กรุณาระบุรหัสสินค้าเพียงหนึ่งรหัส",
     missing_price: "⚠️ ไม่พบราคาขาย",
     invalid_price: "⚠️ รูปแบบราคาขายไม่ถูกต้อง",
-    invalid_publication_date: "วันที่ไม่ถูกต้อง ใช้ /docs วัน/เดือน/ปี ค.ศ. เช่น /docs 3/10/2026",
+    invalid_publication_date: "⚠️ วันที่ไม่ถูกต้อง ใช้ /docs วัน/เดือน/ปี ค.ศ. เช่น /docs 3/10/2026",
     multiple_prices: "⚠️ พบหลายยอดเงินหรือข้อความราคาไม่ชัดเจน\nกรุณาระบุราคาขายเพียงหนึ่งยอด เช่น ราคาขาย 12,000 บาท",
   };
   return messages[code];

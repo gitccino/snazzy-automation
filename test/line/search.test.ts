@@ -60,14 +60,19 @@ const docsCases: Array<[DocsTriggerResult, string]> = [
   [{ status: "started", publicationRunId: "run-1" }, "เริ่มสร้างเอกสารแล้ว run-1"],
   [{ status: "restarted", publicationRunId: "run-1" }, "เริ่มสร้างเอกสารใหม่แล้ว run-1"],
   [{ status: "resumed", publicationRunId: "run-1" }, "ทำงานสร้างเอกสารต่อแล้ว run-1"],
-  [{ status: "already_running", publicationRunId: "run-1" }, "มีงานสร้างเอกสารกำลังทำงานอยู่ run-1"],
-  [{ status: "already_generated", publicationRunId: "run-1" }, "สร้างเอกสารของ Publication Run นี้แล้ว run-1\nหากต้องการสร้างเวอร์ชันใหม่ ตั้งสถานะเป็น Ready แล้วส่งคำสั่ง /docs อีกครั้ง"],
-  [{ status: "no_runnable_run" }, "ยังไม่มี Publication Run ที่พร้อมวันนี้"],
+  [{ status: "already_running", publicationRunId: "run-1" }, "⚠️ มีงานสร้างเอกสารกำลังทำงานอยู่ run-1"],
+  [{ status: "already_generated", publicationRunId: "run-1" }, "⚠️ สร้างเอกสารของ Publication Run นี้แล้ว run-1\nหากต้องการสร้างเวอร์ชันใหม่ ตั้งสถานะเป็น Ready แล้วส่งคำสั่ง /docs อีกครั้ง"],
+  [{ status: "no_runnable_run" }, "⚠️ ยังไม่มี Publication Run ที่พร้อมวันนี้"],
 ];
 
 it.each(docsCases)("maps docs result %j to its Thai reply", async (result, expected) => {
   const d = deps({ status: "already_running" }, result);
-  await expect(handleReadOnlyCommand({ type: "docs" }, d)).resolves.toBe(expected);
+  const reply = await handleReadOnlyCommand({ type: "docs" }, d);
+  if (["started", "regenerating", "restarted", "resumed"].includes(result.status)) {
+    expect(reply).toMatchObject({ kind: "flex", text: expected, contents: { type: "bubble" } });
+    expect(JSON.stringify(reply)).toContain('"text":"/docs"');
+    expect(JSON.stringify(reply)).toContain("/line/icons/doc-v1.png");
+  } else expect(reply).toBe(expected);
   expect(d.triggerDocs).toHaveBeenCalledOnce();
 });
 
@@ -127,4 +132,19 @@ it("previews soldout cases with safe confirmation buttons and no pipeline calls"
   expect(d.inventory.findByProductId).not.toHaveBeenCalled();
   expect(d.triggerUpload).not.toHaveBeenCalled();
   expect(d.triggerDocs).not.toHaveBeenCalled();
+});
+
+it("previews all docs replies without invoking workflows or inventory reads", async () => {
+  const d = deps();
+  for (const suffix of ["", " 0", " 14", " abc", ...Array.from({ length: 13 }, (_, index) => ` ${index + 1}`)]) {
+    const parsed = parseLineCommand(`/testdocs${suffix}`);
+    if (!parsed.ok || parsed.command.type !== "testdocs") throw new Error("Expected docs preview");
+    const reply = await handleReadOnlyCommand(parsed.command, d);
+    if (parsed.command.caseNumber !== null && (parsed.command.caseNumber <= 4 || parsed.command.caseNumber >= 11)) expect(reply).toMatchObject({ kind: "flex", contents: { type: "bubble" } });
+    else expect(typeof reply).toBe("string");
+    expect(reply).not.toBe("");
+  }
+  expect(d.triggerDocs).not.toHaveBeenCalled();
+  expect(d.triggerUpload).not.toHaveBeenCalled();
+  expect(d.inventory.findByProductId).not.toHaveBeenCalled();
 });

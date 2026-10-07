@@ -330,7 +330,7 @@ describe("publication acceptance", () => {
       fields: { Status: "Draft", "Error Summary": "A-1002: Size, Description\nA-1003: Brand Name" },
     }]);
     expect(await job()).toMatchObject({ state: "validation_failed", temp_doc_id: null, google_doc_id: null });
-    expect(fixture.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("A-1002: Size, Description\nA-1003: Brand Name"));
+    expect(fixture.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("A-1002: Size, Description\nA-1003: Brand Name"), expect.objectContaining({ type: "bubble" }));
     expect(fixture.notify.mock.calls[0]![0]).toMatch(/[ก-๙]/);
     expect(fixture.notify.mock.calls[0]![0]).toContain("2 กันยายน 2569");
     expect(fixture.calls.every(c => new URL(c.url).hostname === "api.airtable.com")).toBe(true);
@@ -504,7 +504,7 @@ describe("publication acceptance", () => {
     expect(fixture.calls.filter(c => c.url.endsWith(`/tblRuns/${runId}`) && c.method === "PATCH").at(-1)!.body).toEqual({
       fields: { Status: "Generated", "Google Doc URL": result!.googleDocUrl, "Generated At": "2026-09-01T17:30:00.000Z", "Error Summary": null },
     });
-    expect(fixture.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(result!.googleDocUrl));
+    expect(fixture.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(result!.googleDocUrl), expect.objectContaining({ type: "bubble" }));
     expect(await fixture.run()).toEqual(result);
     expect(fixture.calls.filter(c => new URL(c.url).pathname.endsWith("/copy"))).toHaveLength(1);
     expect(fixture.calls.filter(c => c.method === "PATCH" && c.url.includes("/drive/"))).toHaveLength(1);
@@ -570,7 +570,7 @@ describe("publication acceptance", () => {
       expect(fixture.calls.filter(c => c.url.endsWith(`/tblRuns/${runId}`) && c.method === "PATCH").at(-1)!.body).toEqual({
         fields: { Status: "Failed", "Error Summary": "Unable to fill or verify the Google document." },
       });
-      expect(fixture.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Unable to fill or verify the Google document."));
+      expect(fixture.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Unable to fill or verify the Google document."), expect.objectContaining({ type: "bubble" }));
       expect(fixture.notify.mock.calls[0]![0]).toMatch(/[ก-๙]/);
       const cached = await getProductCache(env.DB, runId, "A-1001");
       expect(cached).toEqual({
