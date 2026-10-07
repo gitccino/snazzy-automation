@@ -1,10 +1,12 @@
+import type { MarkerKind } from "./marker";
 import { sha256Hex } from "../shared/ids";
 
 export interface GroupingPhoto {
   applePhotoId: string;
   position: number;
   isMarker: boolean;
-  r2Key: string;
+  markerKind?: MarkerKind;
+  r2Key: string | null;
 }
 
 export interface GroupedProduct {
@@ -16,48 +18,32 @@ export interface GroupedProduct {
 export interface GroupingResult {
   groups: GroupedProduct[];
   orphanPhotos: GroupingPhoto[];
+  ignoredPhotos: GroupingPhoto[];
 }
 
 export function groupByMarkers(photos: GroupingPhoto[]): GroupingResult {
-  const sorted = [...photos].sort((a, b) => a.position - b.position);
-  const firstMarkerIndex = sorted.findIndex((photo) => photo.isMarker);
+  const groups: GroupedProduct[] = [], orphanPhotos: GroupingPhoto[] = [], ignoredPhotos: GroupingPhoto[] = [];
+let currentMarkerPhotoId: string | null = null;
+let currentPhotos: GroupingPhoto[] = [];
+let ignoring = false;
+const flush = () => {
+  if (currentMarkerPhotoId !== null) groups.push({ ordinal: groups.length, markerPhotoId: currentMarkerPhotoId, photos: currentPhotos });
+  currentMarkerPhotoId = null;
+  currentPhotos = [];
+};
+for (const photo of [...photos].sort((a, b) => a.position - b.position)) {
+  const kind = photo.markerKind ?? (photo.isMarker ? "product_start" : "none");
+  if (kind === "product_start") {
+    flush(); ignoring = false; currentMarkerPhotoId = photo.applePhotoId; currentPhotos = [photo];
+  } else if (kind === "ignore_start") {
+    flush(); ignoring = true; ignoredPhotos.push(photo);
+  } else if (ignoring) ignoredPhotos.push(photo);
+  else if (currentMarkerPhotoId !== null) currentPhotos.push(photo);
+  else orphanPhotos.push(photo);
+}
+flush();
+return { groups, orphanPhotos, ignoredPhotos };
 
-  if (firstMarkerIndex === -1) {
-    return { groups: [], orphanPhotos: sorted };
-  }
-
-  const orphanPhotos = sorted.slice(0, firstMarkerIndex);
-  const groups: GroupedProduct[] = [];
-  let currentMarkerPhotoId: string | null = null;
-  let currentPhotos: GroupingPhoto[] = [];
-
-  for (const photo of sorted.slice(firstMarkerIndex)) {
-    if (photo.isMarker) {
-      if (currentMarkerPhotoId !== null) {
-        groups.push({
-          ordinal: groups.length,
-          markerPhotoId: currentMarkerPhotoId,
-          photos: currentPhotos,
-        });
-      }
-
-      currentMarkerPhotoId = photo.applePhotoId;
-      currentPhotos = [photo];
-      continue;
-    }
-
-    currentPhotos.push(photo);
-  }
-
-  if (currentMarkerPhotoId !== null) {
-    groups.push({
-      ordinal: groups.length,
-      markerPhotoId: currentMarkerPhotoId,
-      photos: currentPhotos,
-    });
-  }
-
-  return { groups, orphanPhotos };
 }
 
 export async function computeGroupHash(

@@ -223,7 +223,7 @@ export async function downloadAndGroupSnapshot(
         .filter((photo) => !photo.isMarker)
         .map((photo) => ({
           applePhotoId: photo.applePhotoId,
-          r2Key: photo.r2Key,
+          r2Key: photo.r2Key!,
         })),
     });
   }
