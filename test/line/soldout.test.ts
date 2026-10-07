@@ -204,7 +204,7 @@ it("keeps the first approver's applying ownership after an ambiguous intent-writ
 
   const differentActor = { ...actor, userId: "U2", displayName: "Ploy" };
   await expect(resolveSoldout("approve", "tok", differentActor, "evt-other", "corr-other", d))
-    .resolves.toEqual({ kind: "text", text: "คำยืนยันหมดอายุหรือถูกใช้แล้ว" });
+    .resolves.toEqual({ kind: "text", text: "⚠️ คำยืนยันหมดอายุหรือถูกใช้แล้ว" });
   expect(d.repo.resetPending).not.toHaveBeenCalled();
 });
 
@@ -231,7 +231,7 @@ it("rejects a claimed command without mutating Airtable", async () => {
   d.repo.claimPending = vi.fn().mockResolvedValue(soldoutPending());
 
   await expect(resolveSoldout("reject", "tok", actor, "evt-approve", "corr", d))
-    .resolves.toEqual({ kind: "text", text: "ยกเลิกการขาย A-1" });
+    .resolves.toEqual({ kind: "text", text: "⚠️ ยกเลิกการขาย A-1" });
 
   expect(d.repo.resolvePending).toHaveBeenCalledWith(
     "tok", "evt-approve", "rejected", "Mint (U1)",
@@ -245,7 +245,7 @@ it("returns an expired-or-used reply when the pending command cannot be claimed"
   d.repo.claimPending = vi.fn().mockResolvedValue(null);
 
   await expect(resolveSoldout("approve", "tok", actor, "evt-approve", "corr", d))
-    .resolves.toEqual({ kind: "text", text: "คำยืนยันหมดอายุหรือถูกใช้แล้ว" });
+    .resolves.toEqual({ kind: "text", text: "⚠️ คำยืนยันหมดอายุหรือถูกใช้แล้ว" });
 
   expect(d.repo.resolvePending).not.toHaveBeenCalled();
   expect(d.inventory.findByProductId).not.toHaveBeenCalled();
@@ -265,7 +265,7 @@ it("rejects rather than overwrites Airtable values changed after preparation", a
   await expect(resolveSoldout("approve", "tok", actor, "evt-approve", "corr", d))
     .resolves.toEqual({
       kind: "text",
-      text: "ข้อมูลสินค้าเปลี่ยนแล้ว ไม่ได้เขียนทับ กรุณาตรวจ Airtable",
+      text: "⚠️ ข้อมูลสินค้าเปลี่ยนแล้ว ไม่ได้เขียนทับ กรุณาตรวจ Airtable",
     });
 
   expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();

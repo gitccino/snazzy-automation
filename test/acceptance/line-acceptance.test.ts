@@ -187,7 +187,7 @@ describe("LINE acceptance: exactly 30 cases", () => {
     const d = deps(product(original));
     vi.mocked(d.repo.claimPending).mockResolvedValue(null);
     const result = await resolveSoldout("approve", "used", actor(), "evt-approve", "corr", d);
-    expect(result).toEqual({ kind: "text", text: "คำยืนยันหมดอายุหรือถูกใช้แล้ว" });
+    expect(result).toEqual({ kind: "text", text: "⚠️ คำยืนยันหมดอายุหรือถูกใช้แล้ว" });
     expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
   });
 

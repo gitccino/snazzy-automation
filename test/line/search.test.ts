@@ -87,3 +87,44 @@ it("previews every upload case without invoking a pipeline or inventory lookup",
   expect(d.triggerDocs).not.toHaveBeenCalled();
   expect(d.inventory.findByProductId).not.toHaveBeenCalled();
 });
+
+it("previews search cards and errors without reading inventory or running pipelines", async () => {
+  const d = deps();
+  for (const suffix of ["", " 0", " 10", " abc", ...Array.from({ length: 9 }, (_, index) => ` ${index + 1}`)]) {
+    const parsed = parseLineCommand(`/testsearch${suffix}`);
+    if (!parsed.ok || parsed.command.type !== "testsearch") throw new Error("Expected search preview");
+    const reply = await handleReadOnlyCommand(parsed.command, d);
+    if (parsed.command.caseNumber !== null && parsed.command.caseNumber <= 5) {
+      expect(reply).toMatchObject({ kind: "flex", contents: { type: "bubble" } });
+      if (typeof reply === "string") throw new Error("Expected card");
+      expect(Boolean(reply.contents.hero)).toBe(parsed.command.caseNumber !== 3);
+      if (parsed.command.caseNumber === 4) expect(JSON.stringify(reply.contents)).toContain("Classic Card Holder");
+      if (parsed.command.caseNumber === 5) expect(JSON.stringify(reply.contents)).toContain("ไม่พบข้อมูล");
+    } else expect(typeof reply).toBe("string");
+  }
+  expect(d.inventory.findByProductId).not.toHaveBeenCalled();
+  expect(d.triggerUpload).not.toHaveBeenCalled();
+  expect(d.triggerDocs).not.toHaveBeenCalled();
+});
+
+it("previews soldout cases with safe confirmation buttons and no pipeline calls", async () => {
+  const d = deps();
+  for (const suffix of ["", " 0", " 17", " abc", ...Array.from({ length: 16 }, (_, index) => ` ${index + 1}`)]) {
+    const parsed = parseLineCommand(`/testsoldout${suffix}`);
+    if (!parsed.ok || parsed.command.type !== "testsoldout") throw new Error("Expected soldout preview");
+    const reply = await handleReadOnlyCommand(parsed.command, d);
+    if (parsed.command.caseNumber !== null && parsed.command.caseNumber <= 3) {
+      expect(reply).toMatchObject({ kind: "flex" });
+      if (typeof reply === "string") throw new Error("Expected Flex card");
+      if (parsed.command.caseNumber === 1) {
+        const card = JSON.stringify(reply.contents);
+        expect(card).not.toContain('"type":"postback"');
+        expect(card).toContain('"text":"/testsoldout 2"');
+        expect(card).toContain('"text":"/testsoldout 4"');
+      }
+    } else expect(typeof reply).toBe("string");
+  }
+  expect(d.inventory.findByProductId).not.toHaveBeenCalled();
+  expect(d.triggerUpload).not.toHaveBeenCalled();
+  expect(d.triggerDocs).not.toHaveBeenCalled();
+});

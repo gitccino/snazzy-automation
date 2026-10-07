@@ -10,6 +10,7 @@ import {
   alreadyOutText,
   notFoundText,
   parseErrorText,
+  soldoutMessages,
 } from "./messages";
 import type {
   InventoryProduct,
@@ -122,7 +123,7 @@ export async function prepareSoldout(
   const pending = await deps.repo.createPending(candidate)
     ?? await deps.repo.findPendingBySourceEvent(sourceEventId);
   if (pending === null) {
-    return { kind: "text", text: `มีคำสั่งสำหรับ ${input.productId} ที่รอยืนยันหรือกำลังดำเนินการอยู่` };
+    return { kind: "text", text: soldoutMessages.pending(input.productId) };
   }
 
   return confirmationEnabled
@@ -154,7 +155,7 @@ export async function resolveSoldout(
     nowIso,
   );
   if (pending === null) {
-    return { kind: "text", text: "คำยืนยันหมดอายุหรือถูกใช้แล้ว" };
+    return { kind: "text", text: soldoutMessages.expired };
   }
   if (pending.status === "approved" && pending.soldPrice !== null) {
     return saleReply(pending.productId, pending.soldPrice);
@@ -163,11 +164,11 @@ export async function resolveSoldout(
   const resolver = actorText(actor.displayName, actor.userId);
   if (decision === "reject") {
     await deps.repo.resolvePending(token, applyEventId, "rejected", resolver);
-    return { kind: "text", text: `ยกเลิกการขาย ${pending.productId}` };
+    return { kind: "text", text: soldoutMessages.cancelled(pending.productId) };
   }
   if (pending.soldPrice === null) {
     await deps.repo.resolvePending(token, applyEventId, "rejected", resolver);
-    return { kind: "text", text: "คำยืนยันราคาไม่ถูกต้อง" };
+    return { kind: "text", text: soldoutMessages.invalidConfirmationPrice };
   }
 
   const recoveringMutation = pending.after.soldAt !== null
@@ -199,7 +200,7 @@ export async function resolveSoldout(
       await deps.repo.resolvePending(token, applyEventId, "rejected", resolver);
       return {
         kind: "text",
-        text: "ข้อมูลสินค้าเปลี่ยนแล้ว ไม่ได้เขียนทับ กรุณาตรวจ Airtable",
+        text: soldoutMessages.changed,
       };
     }
 
