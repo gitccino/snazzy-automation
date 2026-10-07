@@ -3,16 +3,24 @@ import jsQR from "jsqr";
 
 export const MARKER_PAYLOAD = "SNAZZY_PRODUCT_START_V1";
 
-export function isMarkerImage(jpegBytes: Uint8Array): boolean {
+export type MarkerKind = "product_start" | "ignore_start" | "none";
+export const IGNORE_MARKER_PAYLOAD = "SNAZZY_IGNORE_START_V1";
+
+export function detectMarkerImage(jpegBytes: Uint8Array): MarkerKind {
   let decoded: jpeg.RawImageData<Uint8Array>;
   try {
     decoded = jpeg.decode(jpegBytes, { useTArray: true });
   } catch {
-    return false;
+    return "none";
   }
 
   const code = jsQR(new Uint8ClampedArray(decoded.data), decoded.width, decoded.height);
-  return code !== null && code.data === MARKER_PAYLOAD;
+  return code?.data === MARKER_PAYLOAD ? "product_start"
+    : code?.data === IGNORE_MARKER_PAYLOAD ? "ignore_start" : "none";
+}
+
+export function isMarkerImage(jpegBytes: Uint8Array): boolean {
+  return detectMarkerImage(jpegBytes) === "product_start";
 }
 
 export interface MarkerImageTransformer {
@@ -29,7 +37,7 @@ export interface MarkerImagesBinding {
 }
 
 export interface MarkerDetector {
-  detect(bytes: ArrayBuffer): Promise<boolean>;
+  detect(bytes: ArrayBuffer): Promise<MarkerKind>;
 }
 
 export function createMarkerDetector(
@@ -52,7 +60,7 @@ export function createMarkerDetector(
         })
         .output({ format: "image/jpeg" });
       const normalized = new Uint8Array(await result.response().arrayBuffer());
-      return isMarkerImage(normalized);
+      return detectMarkerImage(normalized);
     },
   };
 }

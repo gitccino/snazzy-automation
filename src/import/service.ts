@@ -152,7 +152,7 @@ export async function downloadAndGroupSnapshot(
     const response = await deps.imageSource.download(photo);
     const bytes = await response.arrayBuffer();
     const contentHash = await sha256Hex(bytes);
-    const isMarker = await deps.marker.detect(bytes);
+    const isMarker = (await deps.marker.detect(bytes)) === "product_start";
     const existingByHash = await deps.repo.findAssetByContentHash(contentHash);
     const r2Key =
       existingByHash?.r2Key ??

@@ -56,7 +56,7 @@ function stubImageSource(
 function stubMarker(): MarkerDetector {
   return {
     async detect(bytes) {
-      return new TextDecoder().decode(bytes).startsWith("marker-");
+      return new TextDecoder().decode(bytes).startsWith("marker-") ? "product_start" : "none";
     },
   };
 }
