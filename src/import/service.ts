@@ -140,65 +140,41 @@ export async function downloadAndGroupSnapshot(
             photo.captureAt >= firstImportCutoffDate,
         );
 
-  for (const photo of eligiblePhotos) {
-    const alreadyRecorded = await deps.repo.findAssetByApplePhotoId(
-      deps.sourceAlbumId,
-      photo.applePhotoId,
-    );
-    if (alreadyRecorded !== null) {
-      continue;
+  let ignoring = false;
+  const groupingPhotos: GroupingPhoto[] = [];
+  for (const photo of [...eligiblePhotos].sort((a, b) => a.position - b.position)) {
+    const asset = await deps.repo.findAssetByApplePhotoId(deps.sourceAlbumId, photo.applePhotoId);
+    let bytes: ArrayBuffer | undefined;
+    const loadBytes = async () => bytes ??= await (await deps.imageSource.download(photo)).arrayBuffer();
+    const markerKind = asset?.markerKind ?? await deps.marker.detect(await loadBytes());
+    if (markerKind === "product_start") ignoring = false;
+    if (markerKind === "ignore_start") ignoring = true;
+    let r2Key = asset?.r2Key ?? null;
+    if (asset === null || (!ignoring && r2Key === null)) {
+      const contentHash = await sha256Hex(await loadBytes());
+      if (asset !== null && contentHash !== asset.contentHash) {
+        throw new OperationalError("photo_asset_content_changed", "Skipped photo bytes changed before storage", false);
+      }
+      if (!ignoring) {
+        const existingByHash = await deps.repo.findAssetByContentHash(contentHash);
+        r2Key = existingByHash?.r2Key ?? (await deps.assets.putIfAbsent(
+          contentHash, extensionFor(photo.mediaType), await loadBytes(), photo.mediaType,
+        )).r2Key;
+      }
+      if (asset === null) {
+        await deps.repo.recordPhotoAsset({
+          id: deps.ids.next(), sourceAlbumId: deps.sourceAlbumId,
+          applePhotoId: photo.applePhotoId, contentHash, r2Key, position: photo.position,
+          isMarker: markerKind === "product_start", markerKind, importRunId,
+        });
+      } else {
+        await deps.repo.setAssetR2Key(deps.sourceAlbumId, photo.applePhotoId, r2Key!);
+      }
     }
-
-    const response = await deps.imageSource.download(photo);
-    const bytes = await response.arrayBuffer();
-    const contentHash = await sha256Hex(bytes);
-    const isMarker = (await deps.marker.detect(bytes)) === "product_start";
-    const existingByHash = await deps.repo.findAssetByContentHash(contentHash);
-    const r2Key =
-      existingByHash?.r2Key ??
-      (
-        await deps.assets.putIfAbsent(
-          contentHash,
-          extensionFor(photo.mediaType),
-          bytes,
-          photo.mediaType,
-        )
-      ).r2Key;
-
-    await deps.repo.recordPhotoAsset({
-      id: deps.ids.next(),
-      sourceAlbumId: deps.sourceAlbumId,
-      applePhotoId: photo.applePhotoId,
-      contentHash,
-      r2Key,
-      position: photo.position,
-      isMarker,
-      markerKind: isMarker ? "product_start" : "none",
-      importRunId,
-    });
+    groupingPhotos.push({ applePhotoId: photo.applePhotoId, position: photo.position,
+      markerKind, isMarker: markerKind === "product_start", r2Key });
   }
-
-  const allAssets = await deps.repo.listAssetsForAlbum(deps.sourceAlbumId);
-  const assetsByApplePhotoId = new Map(
-    allAssets.map((asset) => [asset.applePhotoId, asset]),
-  );
-  const groupingPhotos: GroupingPhoto[] = eligiblePhotos.map((photo) => {
-    const asset = assetsByApplePhotoId.get(photo.applePhotoId)!;
-    return {
-      applePhotoId: photo.applePhotoId,
-      position: photo.position,
-      isMarker: asset.isMarker,
-      r2Key: asset.r2Key!,
-    };
-  });
   const { groups, orphanPhotos } = groupByMarkers(groupingPhotos);
-  if (groups.some((group) => !group.photos.some((photo) => !photo.isMarker))) {
-    throw new OperationalError(
-      "empty_product_group",
-      "A marker must be followed by at least one product photo",
-      false,
-    );
-  }
 
   const pendingGroups: PersistedGroup[] = [];
   for (const group of groups) {
@@ -220,11 +196,13 @@ export async function downloadAndGroupSnapshot(
       ordinal: group.ordinal,
       markerPhotoId: group.markerPhotoId,
       attachablePhotos: group.photos
-        .filter((photo) => !photo.isMarker)
-        .map((photo) => ({
-          applePhotoId: photo.applePhotoId,
-          r2Key: photo.r2Key!,
-        })),
+        .filter((photo) => photo.markerKind === "none")
+        .map((photo) => {
+          if (photo.r2Key === null) {
+            throw new OperationalError("invalid_asset_key", "Product photo has no stored original", false);
+          }
+          return { applePhotoId: photo.applePhotoId, r2Key: photo.r2Key };
+        }),
     });
   }
 
@@ -273,6 +251,9 @@ export async function processProductGroupAttempt(
 
   let productId = current.productId;
   try {
+    if (group.attachablePhotos.length < 4) {
+      throw new OperationalError("insufficient_product_photos", "A product requires at least four photos", false);
+    }
     if (productId === null) {
       const nextNumber = await deps.sequences.allocateNext("product_id");
       productId = `${deps.productIdPrefix}-${nextNumber}`;

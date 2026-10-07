@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { NonRetryableError } from "cloudflare:workflows";
 import { testEnv } from "../helpers/env";
 import { fixedClock, sequentialIdGenerator } from "../helpers/fakes";
@@ -131,7 +131,7 @@ async function buildProcessDeps(
     ordinal: 0,
     groupHash,
     firstPhotoId: "m1",
-    lastPhotoId: "p2",
+    lastPhotoId: "p4",
   });
   return {
     deps: {
@@ -168,6 +168,8 @@ async function buildProcessDeps(
       attachablePhotos: [
         { applePhotoId: "p1", r2Key: "assets/p1.jpg" },
         { applePhotoId: "p2", r2Key: "assets/p2.jpg" },
+        { applePhotoId: "p3", r2Key: "assets/p3.jpg" },
+        { applePhotoId: "p4", r2Key: "assets/p4.jpg" },
       ],
     },
   };
@@ -601,7 +603,7 @@ describe("downloadAndGroupSnapshot", () => {
     ).toEqual(["m-new", "m-old", "p-new", "p-old"]);
   });
 
-  it("rejects adjacent markers before persisting any product groups", async () => {
+  it("persists adjacent markers as incomplete groups", async () => {
     const sourceAlbumId = `album-${crypto.randomUUID()}`;
     const importRunId = crypto.randomUUID();
     const snapshot: AlbumSnapshot = {
@@ -626,19 +628,15 @@ describe("downloadAndGroupSnapshot", () => {
       trigger: "cron",
     });
 
-    await expect(
-      downloadAndGroupSnapshot(deps, importRunId),
-    ).rejects.toMatchObject({
-      code: "empty_product_group",
-      retryable: false,
-    });
+    const result = await downloadAndGroupSnapshot(deps, importRunId);
+    expect(result.pendingGroups.map(group => group.attachablePhotos.length)).toEqual([1, 0, 1]);
     const groupCount = await testEnv()
       .DB.prepare(
         "SELECT COUNT(*) AS count FROM product_groups WHERE import_run_id = ?",
       )
       .bind(importRunId)
       .first<{ count: number }>();
-    expect(groupCount).toEqual({ count: 0 });
+    expect(groupCount).toEqual({ count: 3 });
   });
 });
 
@@ -989,7 +987,7 @@ describe("processProductGroupAttempt", () => {
         if (r2Key === "assets/p2.jpg") {
           return "https://assets.example/signed-p2.jpg?ttl=300";
         }
-        throw new Error(`unexpected asset key: ${r2Key}`);
+        return `https://assets.example/signed-${r2Key.slice(7)}?ttl=300`;
       },
     };
 
@@ -998,6 +996,8 @@ describe("processProductGroupAttempt", () => {
     expect(signingCalls).toEqual([
       { r2Key: "assets/p1.jpg", ttlSeconds: 300, variant: AIRTABLE_PREVIEW_VARIANT },
       { r2Key: "assets/p2.jpg", ttlSeconds: 300, variant: AIRTABLE_PREVIEW_VARIANT },
+      { r2Key: "assets/p3.jpg", ttlSeconds: 300, variant: AIRTABLE_PREVIEW_VARIANT },
+      { r2Key: "assets/p4.jpg", ttlSeconds: 300, variant: AIRTABLE_PREVIEW_VARIANT },
     ]);
     expect(submittedPayload).toEqual({
       productId: "A-501",
@@ -1012,6 +1012,8 @@ describe("processProductGroupAttempt", () => {
           url: "https://assets.example/signed-p2.jpg?ttl=300",
           filename: "p2.jpg",
         },
+        { url: "https://assets.example/signed-p3.jpg?ttl=300", filename: "p3.jpg" },
+        { url: "https://assets.example/signed-p4.jpg?ttl=300", filename: "p4.jpg" },
       ],
     });
     expect(verificationCalls).toEqual([
@@ -1021,7 +1023,7 @@ describe("processProductGroupAttempt", () => {
           productId: "A-501",
           systemGroupId: "task13-group-payload-contract",
           uploadDate: "2026-09-01",
-          imageCount: 2,
+          imageCount: 4,
         },
       },
     ]);
@@ -1238,7 +1240,7 @@ describe("processProductGroupAttempt", () => {
           productId: "A-777",
           systemGroupId: "task13-group-recovery",
           uploadDate: "2026-09-01",
-          imageCount: 2,
+          imageCount: 4,
         },
       },
     ]);
@@ -1632,4 +1634,81 @@ describe("finalizeImportRun", () => {
       expect(await repo.getCheckpoint(sourceAlbumId)).toBe(42);
     },
   );
+});
+
+
+describe("ignore marker storage and minimum photos", () => {
+  async function setup(ids: string[]) {
+    const sourceAlbumId = `ignore-${crypto.randomUUID()}`;
+    const snapshot: AlbumSnapshot = { sourceAlbumId, fetchedAt: "2026-10-08T00:00:00Z",
+      photos: ids.map((id, index) => ({ ...sourcePhoto(id, index + 1), sourceAlbumId })) };
+    const deps = await buildDeps(sourceAlbumId, snapshot, new Set(["m1", "m2"]));
+    const download = deps.imageSource.download;
+    deps.imageSource.download = async photo => new Response(`${new TextDecoder().decode(await (await download(photo)).arrayBuffer())}:${sourceAlbumId}`);
+    const runId = crypto.randomUUID();
+    await deps.repo.createImportRun({ id: runId, sourceAlbumId, trigger: "line" });
+    deps.marker.detect = async bytes => {
+      const label = new TextDecoder().decode(bytes);
+      return label.startsWith("product-ignore") ? "ignore_start" : label.startsWith("marker-") ? "product_start" : "none";
+    };
+    return { deps, runId, snapshot };
+  }
+
+  it("stores only product sections and retries cached ignore markers without downloading", async () => {
+    const { deps, runId } = await setup(["m1", "p1", "p2", "p3", "p4", "ignore", "extra", "m2", "q1", "q2", "q3", "q4"]);
+    const put = vi.spyOn(deps.assets, "putIfAbsent");
+    const download = vi.spyOn(deps.imageSource, "download");
+    const first = await downloadAndGroupSnapshot(deps, runId);
+    expect(first.pendingGroups.map(g => g.attachablePhotos.map(p => p.applePhotoId)))
+      .toEqual([["p1", "p2", "p3", "p4"], ["q1", "q2", "q3", "q4"]]);
+    expect((await deps.repo.findAssetByApplePhotoId(deps.sourceAlbumId, "extra"))?.r2Key).toBeNull();
+    expect(await deps.repo.findAssetByApplePhotoId(deps.sourceAlbumId, "ignore")).toMatchObject({ markerKind: "ignore_start", r2Key: null });
+    expect(put).toHaveBeenCalledTimes(10);
+    put.mockClear(); download.mockClear();
+    await downloadAndGroupSnapshot(deps, runId);
+    expect(put).not.toHaveBeenCalled(); expect(download).not.toHaveBeenCalled();
+  });
+
+  it("keeps newly appended photos ignored after a cached ignore marker", async () => {
+    const { deps, runId, snapshot } = await setup(["ignore", "extra"]);
+    expect(await downloadAndGroupSnapshot(deps, runId)).toMatchObject({ pendingGroups: [], orphanRange: null });
+    snapshot.photos.push({ ...sourcePhoto("appended", 3), sourceAlbumId: deps.sourceAlbumId });
+    await finalizeImportRun(deps.repo, runId, deps.sourceAlbumId, false, 0, 2);
+    const nextRun = crypto.randomUUID();
+    await deps.repo.createImportRun({ id: nextRun, sourceAlbumId: deps.sourceAlbumId, trigger: "line" });
+    const put = vi.spyOn(deps.assets, "putIfAbsent");
+    expect(await downloadAndGroupSnapshot(deps, nextRun)).toMatchObject({ pendingGroups: [], orphanRange: null });
+    expect(put).not.toHaveBeenCalled();
+    expect((await deps.repo.findAssetByApplePhotoId(deps.sourceAlbumId, "appended"))?.r2Key).toBeNull();
+  });
+
+  it.each([false, true])("promotes skipped originals only if downloaded bytes match (changed=%s)", async changed => {
+    const { deps, runId, snapshot } = await setup(["ignore", "extra"]);
+    await downloadAndGroupSnapshot(deps, runId);
+    snapshot.photos = ["m1", "p1", "p2", "p3", "extra"].map((id, index) => ({ ...sourcePhoto(id, index + 1), sourceAlbumId: deps.sourceAlbumId }));
+    // The source references the same mutable snapshot and preserves original bytes.
+    // m1 is already recognized by setup's marker IDs.
+    if (changed) {
+      const download = deps.imageSource.download;
+      deps.imageSource.download = photo => photo.applePhotoId === "extra" ? Promise.resolve(new Response("changed")) : download(photo);
+      await expect(downloadAndGroupSnapshot(deps, runId)).rejects.toMatchObject({ code: "photo_asset_content_changed", retryable: false });
+      expect((await deps.repo.findAssetByApplePhotoId(deps.sourceAlbumId, "extra"))?.r2Key).toBeNull();
+    } else {
+      const result = await downloadAndGroupSnapshot(deps, runId);
+      expect(result.pendingGroups[0]?.attachablePhotos.map(p => p.applePhotoId)).toContain("extra");
+      expect((await deps.repo.findAssetByApplePhotoId(deps.sourceAlbumId, "extra"))?.r2Key).toEqual(expect.any(String));
+    }
+  });
+
+  it.each([0, 1, 2, 3])("fails %s-photo products without allocating IDs or creating Airtable rows", async count => {
+    const { deps, group } = await buildProcessDeps();
+    group.attachablePhotos = Array.from({ length: count }, (_, i) => ({ applePhotoId: `p${i}`, r2Key: `assets/p${i}.jpg` }));
+    const allocate = vi.spyOn(deps.sequences, "allocateNext");
+    const create = vi.spyOn(deps.airtable, "createProduct");
+    const error = await processProductGroupAttempt(deps, group, "minimum-run").catch(error => error);
+    expect(error).toMatchObject({ code: "insufficient_product_photos", retryable: false });
+    expect(allocate).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled();
+    await recordExhaustedGroupFailure(deps, group, "minimum-run", error);
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({ state: "failed", productId: null, failureReason: "insufficient_product_photos" });
+  });
 });

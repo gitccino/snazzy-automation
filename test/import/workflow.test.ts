@@ -422,3 +422,28 @@ describe("runImportWorkflow", () => {
     });
   });
 });
+
+
+describe("ignore sections workflow outcomes", () => {
+  it.each([false, true])("finishes ignored-only or mixed incomplete/valid products (mixed=%s)", async mixed => {
+    const step = retryingStep();
+    const finalize = vi.fn().mockResolvedValue(undefined);
+    const notify = vi.fn().mockResolvedValue(undefined);
+    const process = vi.fn(async (_deps, current: PersistedGroup) => {
+      if (current.groupId === "incomplete") throw new OperationalError("insufficient_product_photos", "A product requires at least four photos", false);
+      return { outcome: "succeeded" as const, productId: "A-501" };
+    });
+    const record = vi.fn().mockResolvedValue({ productId: null, errorCode: "insufficient_product_photos" });
+    const result = await runImportWorkflow(processDeps(), { importRunId: "ignore-run", sourceAlbumId: "album-1", trigger: "line" }, step, {
+      retryLimit: 5,
+      downloadAndGroup: async () => ({ pendingGroups: mixed ? [group("incomplete", 0), group("valid", 1)] : [], orphanRange: null, checkpointPosition: 12 }),
+      recordRunFailure: vi.fn(), processGroupAttempt: process, recordExhaustedFailure: record, finalize, notify,
+    });
+    expect(result.succeededProductIds).toEqual(mixed ? ["A-501"] : []);
+    expect(result.failedGroups).toEqual(mixed ? [{ groupId: "row-incomplete", productId: null, errorCode: "insufficient_product_photos" }] : []);
+    expect(finalize).toHaveBeenCalledWith(mixed, 0, 12);
+    expect(notify).toHaveBeenCalledWith(result, null);
+    if (mixed) expect(step.calls.find(c => c.name === "process-group-row-incomplete")?.attempts).toBe(1);
+    else expect(process).not.toHaveBeenCalled();
+  });
+});
