@@ -263,6 +263,7 @@ describe("downloadAndGroupSnapshot", () => {
       r2Key: "assets/hash-m1.jpg",
       position: 1,
       isMarker: true,
+      markerKind: "product_start",
       importRunId: previousRunId,
     });
     await repo.finalizeImportRun({

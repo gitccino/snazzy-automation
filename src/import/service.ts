@@ -173,6 +173,7 @@ export async function downloadAndGroupSnapshot(
       r2Key,
       position: photo.position,
       isMarker,
+      markerKind: isMarker ? "product_start" : "none",
       importRunId,
     });
   }
@@ -187,7 +188,7 @@ export async function downloadAndGroupSnapshot(
       applePhotoId: photo.applePhotoId,
       position: photo.position,
       isMarker: asset.isMarker,
-      r2Key: asset.r2Key,
+      r2Key: asset.r2Key!,
     };
   });
   const { groups, orphanPhotos } = groupByMarkers(groupingPhotos);
