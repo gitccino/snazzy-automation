@@ -48,6 +48,18 @@ function extractPrices(text: string): { values: number[]; malformed: boolean; am
 
 export function parseLineCommand(input: string): ParseResult {
   const text = input.trim();
+  if (/^\/report(?:\s|$)/.test(text)) {
+    if (text === "/report") return { ok: true, command: { type: "report", page: 1 } };
+    const match = /^\/report\s+(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+([1-9]\d*))?$/.exec(text);
+    if (!match || Number(match[3]) === 0) return { ok: false, code: "invalid_report_command" };
+    const reportDate = `${match[3]}-${match[2]!.padStart(2, "0")}-${match[1]!.padStart(2, "0")}`;
+    const date = new Date(`${reportDate}T00:00:00Z`);
+    const page = match[4] === undefined ? 1 : Number(match[4]);
+    if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== reportDate || !Number.isSafeInteger(page)) {
+      return { ok: false, code: "invalid_report_command" };
+    }
+    return { ok: true, command: { type: "report", reportDate, page } };
+  }
   if (text === "/help") return { ok: true, command: { type: "help" } };
   if (text === "/testupload" || /^\/testupload\s/.test(text)) {
     const match = /^\/testupload(?:\s+([1-9]|10))?$/.exec(text);

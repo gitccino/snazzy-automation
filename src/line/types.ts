@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export type ParsedCommand =
   | { type: "help" }
+  | { type: "report"; reportDate?: string; page: number }
   | { type: "search"; productId: string }
   | { type: "upload" }
   | { type: "testupload"; caseNumber: number | null }
@@ -13,6 +14,7 @@ export type ParsedCommand =
   | { type: "revert" };
 
 export type ParseErrorCode =
+  | "invalid_report_command"
   | "unknown_command"
   | "missing_product_id"
   | "invalid_product_id"
@@ -129,4 +131,13 @@ export function parseSupportedLineEvents(value: unknown): SupportedLineEvent[] {
     const parsed = SupportedLineEventSchema.safeParse(event);
     return parsed.success ? [parsed.data] : [];
   });
+}
+
+export interface DailySaleProduct {
+  recordId: string;
+  productId: string;
+  brandName: string | null;
+  modelName: string | null;
+  soldPrice: number;
+  soldAt: string;
 }
