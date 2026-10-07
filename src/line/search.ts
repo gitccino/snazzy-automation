@@ -1,3 +1,5 @@
+import { dailySalesReportCard } from "./report-card";
+import { todayBangkokDate, type Clock } from "../shared/time";
 import { docsSuccessCard, docsValidationFailureCard, docsWorkflowFailureCard } from "./docs-summary-card";
 import { confirmationCard } from "./confirmation-card";
 import { buildImportSummaryCard, buildImportSummaryMessage } from "../import/notify";
@@ -29,7 +31,8 @@ export type DocsTriggerResult =
 
 export interface ReadOnlyDeps {
   publicBaseUrl: string;
-  inventory: Pick<InventoryClient, "findByProductId">;
+  inventory: Pick<InventoryClient, "findByProductId" | "listSalesForDay">;
+  clock: Clock;
   triggerUpload(): Promise<UploadTriggerResult>;
   triggerDocs(publicationDate?: string): Promise<DocsTriggerResult>;
 }
@@ -208,13 +211,28 @@ function testDocsReply(caseNumber: number | null, publicBaseUrl: string): string
 }
 
 export async function handleReadOnlyCommand(
-  command: Extract<ParsedCommand, { type: "help" | "search" | "upload" | "testupload" | "testsearch" | "testsoldout" | "testdocs" | "docs" }>,
+  command: Extract<ParsedCommand, { type: "report" | "help" | "search" | "upload" | "testupload" | "testsearch" | "testsoldout" | "testdocs" | "docs" }>,
   deps: ReadOnlyDeps,
 ): Promise<string | SearchCardReply> {
   if (command.type === "testupload") return testUploadReply(command.caseNumber, deps.publicBaseUrl);
   if (command.type === "testsearch") return testSearchReply(command.caseNumber, deps.publicBaseUrl);
   if (command.type === "testsoldout") return testSoldoutReply(command.caseNumber, deps.publicBaseUrl);
   if (command.type === "testdocs") return testDocsReply(command.caseNumber, deps.publicBaseUrl);
+  if (command.type === "report") {
+    const today = todayBangkokDate(deps.clock);
+    const date = command.reportDate ?? today;
+    try {
+      const products = await deps.inventory.listSalesForDay(date);
+      return dailySalesReportCard(products, date, command.page, date === today);
+    } catch (error) {
+      if (!(error instanceof OperationalError)) throw error;
+      if (["airtable_inventory_report_invalid_record", "sales_report_invalid_total"].includes(error.code)) {
+        return "⚠️ สรุปยอดขายไม่ได้ เพราะข้อมูลการขายใน Airtable ไม่ครบหรือไม่ถูกต้อง กรุณาตรวจสอบแล้วลอง /report อีกครั้ง";
+      }
+      if (!error.code.startsWith("airtable_inventory_")) throw error;
+      return "⚠️ ดึงข้อมูลยอดขายไม่สำเร็จ กรุณาลอง /report อีกครั้ง";
+    }
+  }
   if (command.type === "help") return helpCard(deps.publicBaseUrl);
   if (command.type === "search") {
     const product = await deps.inventory.findByProductId(command.productId);

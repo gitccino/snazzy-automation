@@ -37,6 +37,7 @@ function deps(): WebhookDeps {
     getGroupMemberProfile: vi.fn().mockResolvedValue({ userId: "U1", displayName: "Mint" }),
   } satisfies LineClient;
   const inventory = {
+    listSalesForDay: vi.fn().mockResolvedValue([]),
     findByProductId: vi.fn(),
     updateSaleValues: vi.fn(),
   } satisfies InventoryClient;
@@ -158,4 +159,12 @@ it.each([
     "reply-postback",
     "คำยืนยันไม่ถูกต้อง",
   );
+});
+
+it("delivers report Flex replies without inventory mutation or pipeline execution", async () => {
+  const d = deps();
+  await processLineEvents([{ ...event, message: { ...event.message, text: "/report" } }], d);
+  expect(d.line.replyFlex).toHaveBeenCalledWith("reply-1", expect.stringContaining("สรุปยอดขาย"), expect.objectContaining({ type: "bubble" }));
+  expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
+  expect(d.triggerUpload).not.toHaveBeenCalled(); expect(d.triggerDocs).not.toHaveBeenCalled();
 });

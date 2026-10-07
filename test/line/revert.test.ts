@@ -73,6 +73,7 @@ function revertPending(
 
 function deps(found: InventoryProduct | null = product(sold)) {
   const inventory = {
+    listSalesForDay: vi.fn().mockResolvedValue([]),
     findByProductId: vi.fn().mockResolvedValue(found),
     updateSaleValues: vi.fn().mockResolvedValue(undefined),
   } satisfies InventoryClient;

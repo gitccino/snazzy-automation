@@ -6,6 +6,7 @@ export function helpCard(publicBaseUrl: string): SearchCardReply {
     ["/search", "ตรวจเช็คสินค้า"],
     ["/revert", "ย้อนคำสั่งก่อนหน้า"],
     ["/upload", "ย้ายภาพขึ้น Airtable"],
+    ["/report", "สรุปยอดขายรายวัน"],
     ["/docs", "ดึงข้อมูลไปสร้าง google doc"],
   ];
   return commandListCard(publicBaseUrl, "/help", "คำสั่งที่ใช้ได้", "help-v1", commands);
