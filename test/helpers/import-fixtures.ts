@@ -3,11 +3,12 @@ import type {
   ImageSource,
   SourcePhoto,
 } from "../../src/icloud/types";
-import type { MarkerDetector } from "../../src/import/marker";
+import type { MarkerDetector, MarkerKind } from "../../src/import/marker";
 
 export interface BatchPhotoSpec {
   id: string;
   isMarker?: boolean;
+  markerKind?: MarkerKind;
   captureAt?: string | null;
 }
 
@@ -44,7 +45,7 @@ export class MutableBatchSource implements ImageSource {
     const spec = this.specs.find(
       (candidate) => candidate.id === photo.applePhotoId,
     );
-    const label = spec?.isMarker ? "marker" : "product";
+    const label = spec?.markerKind === "ignore_start" ? "ignore" : spec?.isMarker || spec?.markerKind === "product_start" ? "marker" : "product";
     return new Response(
       new TextEncoder().encode(`${label}-${photo.applePhotoId}`),
       { headers: { "content-type": "image/jpeg" } },
@@ -54,7 +55,8 @@ export class MutableBatchSource implements ImageSource {
 
 export const fakeMarkerDetector: MarkerDetector = {
   async detect(bytes) {
-    return new TextDecoder().decode(bytes).startsWith("marker-");
+    const label = new TextDecoder().decode(bytes);
+    return label.startsWith("marker-") ? "product_start" : label.startsWith("ignore-") ? "ignore_start" : "none";
   },
 };
 

@@ -238,7 +238,7 @@ describe("import-repository", () => {
     await r.createImportRun({ id: runId, sourceAlbumId: albumId, trigger: "cron" });
     await r.recordPhotoAsset({
       id: crypto.randomUUID(), sourceAlbumId: albumId, applePhotoId: "apple-1",
-      contentHash: "hash-1", r2Key: "assets/hash-1.jpg", position: 1, isMarker: false, importRunId: runId,
+      contentHash: "hash-1", r2Key: "assets/hash-1.jpg", position: 1, isMarker: false, markerKind: "none", importRunId: runId,
     });
 
     const byApple = await r.findAssetByApplePhotoId(albumId, "apple-1");
@@ -387,4 +387,33 @@ describe("import-repository", () => {
       failureReason: null,
     });
   });
+});
+
+it("persists skipped metadata and only reuses real R2 objects by hash", async () => {
+  const r = repo();
+  const sourceAlbumId = `album-${crypto.randomUUID()}`;
+  const importRunId = crypto.randomUUID();
+  const hash = crypto.randomUUID();
+  await r.createImportRun({ id: importRunId, sourceAlbumId, trigger: "line" });
+  await r.recordPhotoAsset({ id: crypto.randomUUID(), sourceAlbumId,
+    applePhotoId: "ignored", contentHash: hash, r2Key: null,
+    markerKind: "none", position: 1, isMarker: false, importRunId });
+  expect((await r.findAssetByApplePhotoId(sourceAlbumId, "ignored"))?.r2Key).toBeNull();
+  expect(await r.findAssetByContentHash(hash)).toBeNull();
+  await r.recordPhotoAsset({ id: crypto.randomUUID(), sourceAlbumId,
+    applePhotoId: "stored", contentHash: hash, r2Key: `assets/${hash}.jpg`,
+    markerKind: "none", position: 2, isMarker: false, importRunId });
+  expect((await r.findAssetByContentHash(hash))?.applePhotoId).toBe("stored");
+  await r.setAssetR2Key(sourceAlbumId, "ignored", `assets/${hash}.jpg`);
+  expect((await r.findAssetByApplePhotoId(sourceAlbumId, "ignored"))?.r2Key).toBe(`assets/${hash}.jpg`);
+  await expect(r.setAssetR2Key(sourceAlbumId, "missing", "assets/missing.jpg")).rejects.toThrow();
+});
+
+it.each([[1, "product_start"], [0, "none"]] as const)("reads old-worker rows with is_marker %s as %s", async (flag, kind) => {
+  const r = repo();
+  const sourceAlbumId = `album-${crypto.randomUUID()}`;
+  const importRunId = crypto.randomUUID();
+  await r.createImportRun({ id: importRunId, sourceAlbumId, trigger: "line" });
+  await testEnv().DB.prepare(`INSERT INTO photo_assets (id, source_album_id, apple_photo_id, content_hash, r2_key, position, is_marker, import_run_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(crypto.randomUUID(), sourceAlbumId, "legacy", crypto.randomUUID(), "assets/legacy.jpg", 1, flag, importRunId, "2026-10-08T00:00:00Z").run();
+  expect((await r.findAssetByApplePhotoId(sourceAlbumId, "legacy"))?.markerKind).toBe(kind);
 });

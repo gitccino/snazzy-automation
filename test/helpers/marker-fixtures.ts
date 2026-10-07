@@ -34,6 +34,10 @@ export function markerCleanJpegBytes(): Uint8Array {
   return qrJpeg(MARKER_PAYLOAD);
 }
 
+export function ignoreMarkerJpegBytes(): Uint8Array {
+  return qrJpeg("SNAZZY_IGNORE_START_V1");
+}
+
 export function wrongPayloadJpegBytes(): Uint8Array {
   return qrJpeg(WRONG_PAYLOAD);
 }

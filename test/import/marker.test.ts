@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createMarkerDetector,
+  detectMarkerImage,
   isMarkerImage,
   MARKER_PAYLOAD,
   type MarkerImagesBinding,
@@ -8,6 +9,7 @@ import {
 } from "../../src/import/marker";
 import {
   markerCleanJpegBytes,
+  ignoreMarkerJpegBytes,
   nonMarkerJpegBytes,
   wrongPayloadJpegBytes,
 } from "../helpers/marker-fixtures";
@@ -33,9 +35,9 @@ describe("isMarkerImage", () => {
 });
 
 describe("createMarkerDetector", () => {
-  it("normalizes source bytes through Cloudflare Images before QR detection", async () => {
+  it.each([[markerCleanJpegBytes, "product_start"], [ignoreMarkerJpegBytes, "ignore_start"]] as const)("normalizes source bytes before classifying %s as %s", async (fixture, kind) => {
     const calls: Array<{ op: string; value: unknown }> = [];
-    const normalized = markerCleanJpegBytes();
+    const normalized = fixture();
     let transformer: MarkerImageTransformer;
     transformer = {
       transform(options) {
@@ -59,7 +61,7 @@ describe("createMarkerDetector", () => {
 
     await expect(
       createMarkerDetector(images).detect(sourceBytes.slice().buffer),
-    ).resolves.toBe(true);
+    ).resolves.toBe(kind);
 
     expect(calls.map(({ op }) => op)).toEqual(["input", "transform", "output"]);
     const input = calls[0]!.value as ReadableStream<Uint8Array>;
@@ -79,3 +81,11 @@ describe("createMarkerDetector", () => {
     ]);
   });
 });
+
+ it("classifies both control payloads and leaves unrelated or unreadable photos ordinary", () => {
+  expect(detectMarkerImage(markerCleanJpegBytes())).toBe("product_start");
+  expect(detectMarkerImage(ignoreMarkerJpegBytes())).toBe("ignore_start");
+  expect(detectMarkerImage(wrongPayloadJpegBytes())).toBe("none");
+  expect(detectMarkerImage(nonMarkerJpegBytes())).toBe("none");
+  expect(detectMarkerImage(new Uint8Array([1, 2]))).toBe("none");
+ });

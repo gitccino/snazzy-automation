@@ -1,11 +1,12 @@
 import { z } from "zod";
+import type { MarkerKind } from "../import/marker";
 import type { Clock, IdGenerator } from "../env";
 
 export type ProductGroupState = "pending" | "importing" | "succeeded" | "failed";
 
 export interface PhotoAssetRow {
   id: string; sourceAlbumId: string; applePhotoId: string; contentHash: string;
-  r2Key: string; position: number; isMarker: boolean; importRunId: string; createdAt: string;
+  markerKind: MarkerKind; r2Key: string | null; position: number; isMarker: boolean; importRunId: string; createdAt: string;
 }
 
 export interface ProductGroupRow {
@@ -34,6 +35,7 @@ export interface ImportRepository {
   findAssetByContentHash(contentHash: string): Promise<PhotoAssetRow | null>;
   findAssetByApplePhotoId(sourceAlbumId: string, applePhotoId: string): Promise<PhotoAssetRow | null>;
   listAssetsForAlbum(sourceAlbumId: string): Promise<PhotoAssetRow[]>;
+  setAssetR2Key(sourceAlbumId: string, applePhotoId: string, r2Key: string): Promise<void>;
   recordPhotoAsset(input: Omit<PhotoAssetRow, "createdAt">): Promise<void>;
   findGroupByHash(groupHash: string): Promise<ProductGroupRow | null>;
   upsertPendingGroup(input: { id: string; importRunId: string; ordinal: number; groupHash: string; firstPhotoId: string; lastPhotoId: string }): Promise<ProductGroupRow>;
@@ -45,7 +47,8 @@ const PhotoAssetDbRowSchema = z.object({
   source_album_id: z.string().min(1),
   apple_photo_id: z.string().min(1),
   content_hash: z.string().min(1),
-  r2_key: z.string().min(1),
+  r2_key: z.string().min(1).nullable(),
+  marker_kind: z.enum(["product_start", "ignore_start", "none"]).nullable(),
   position: z.number().int().nonnegative(),
   is_marker: z.union([z.literal(0), z.literal(1)]),
   import_run_id: z.string().min(1),
@@ -77,7 +80,8 @@ function toAssetRow(input: unknown): PhotoAssetRow {
     contentHash: r.content_hash,
     r2Key: r.r2_key,
     position: r.position,
-    isMarker: r.is_marker === 1,
+    markerKind: r.marker_kind ?? (r.is_marker === 1 ? "product_start" : "none"),
+    isMarker: (r.marker_kind ?? (r.is_marker === 1 ? "product_start" : "none")) === "product_start",
     importRunId: r.import_run_id,
     createdAt: r.created_at,
   };
@@ -234,7 +238,7 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
     },
 
     async findAssetByContentHash(contentHash) {
-      const row = await db.prepare(`SELECT * FROM photo_assets WHERE content_hash = ? LIMIT 1`).bind(contentHash).first();
+      const row = await db.prepare(`SELECT * FROM photo_assets WHERE content_hash = ? AND r2_key IS NOT NULL LIMIT 1`).bind(contentHash).first();
       return row === null ? null : toAssetRow(row as Record<string, unknown>);
     },
 
@@ -254,13 +258,18 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
       return rows.results.map((r) => toAssetRow(r as Record<string, unknown>));
     },
 
+    async setAssetR2Key(sourceAlbumId, applePhotoId, r2Key) {
+      const result = await db.prepare(`UPDATE photo_assets SET r2_key = ? WHERE source_album_id = ? AND apple_photo_id = ?`).bind(r2Key, sourceAlbumId, applePhotoId).run();
+      if (result.meta.changes !== 1) throw new Error("Cached photo asset missing during R2 promotion");
+    },
+
     async recordPhotoAsset(input) {
       await db
         .prepare(
-          `INSERT INTO photo_assets (id, source_album_id, apple_photo_id, content_hash, r2_key, position, is_marker, import_run_id, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO photo_assets (id, source_album_id, apple_photo_id, content_hash, r2_key, position, is_marker, marker_kind, import_run_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .bind(input.id, input.sourceAlbumId, input.applePhotoId, input.contentHash, input.r2Key, input.position, input.isMarker ? 1 : 0, input.importRunId, clock.now().toISOString())
+        .bind(input.id, input.sourceAlbumId, input.applePhotoId, input.contentHash, input.r2Key, input.position, input.markerKind === "product_start" ? 1 : 0, input.markerKind, input.importRunId, clock.now().toISOString())
         .run();
     },
 
