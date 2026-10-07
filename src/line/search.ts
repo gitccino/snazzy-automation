@@ -1,8 +1,10 @@
+import { buildImportSummaryCard, buildImportSummaryMessage } from "../import/notify";
 import type { InventoryClient } from "./airtable-inventory";
 import { OperationalError } from "../shared/errors";
 import { notFoundText } from "./messages";
 import type { ParsedCommand } from "./types";
 import { helpCard } from "./help-card";
+import { uploadStartCard } from "./upload-card";
 import { searchCard, type SearchCardReply } from "./search-card";
 
 export type UploadTriggerResult =
@@ -30,19 +32,46 @@ export interface ReadOnlyDeps {
   triggerDocs(publicationDate?: string): Promise<DocsTriggerResult>;
 }
 
-function uploadResultText(result: UploadTriggerResult): string {
+function uploadResultReply(result: UploadTriggerResult, publicBaseUrl: string): string | SearchCardReply {
   switch (result.status) {
     case "started":
-      return `เริ่มนำเข้าแล้ว ${result.importRunId}`;
+      return uploadStartCard(result.importRunId, publicBaseUrl);
     case "already_running":
-      return "มีงานนำเข้ากำลังทำงานอยู่";
+      return "⚠️ มีงานนำเข้ากำลังทำงานอยู่";
     case "sequence_not_bootstrapped":
-      return "ยังเริ่มนำเข้าไม่ได้ เพราะยังไม่ได้ตั้งค่าลำดับรหัสสินค้า";
+      return "⚠️ ยังเริ่มนำเข้าไม่ได้ เพราะยังไม่ได้ตั้งค่าลำดับรหัสสินค้า";
     case "workflow_start_failed":
-      return "เริ่มงานนำเข้าไม่สำเร็จ กรุณาลอง /upload อีกครั้ง";
+      return "⚠️ เริ่มงานนำเข้าไม่สำเร็จ กรุณาลอง /upload อีกครั้ง";
     case "import_trigger_failed":
-      return "ระบบเริ่มงานนำเข้าขัดข้อง กรุณาลอง /upload อีกครั้ง";
+      return "⚠️ ระบบเริ่มงานนำเข้าขัดข้อง กรุณาลอง /upload อีกครั้ง";
   }
+}
+
+function testUploadReply(caseNumber: number | null, publicBaseUrl: string): string | SearchCardReply {
+  const labels = ["เริ่มนำเข้า", "มีงานกำลังทำงาน", "ยังไม่ได้ตั้งค่าลำดับรหัส", "เริ่ม Workflow ไม่สำเร็จ", "ระบบเริ่มงานขัดข้อง", "สำเร็จทั้งหมด", "สำเร็จบางรายการ", "ล้มเหลวทั้งหมด", "ไม่มีสินค้าใหม่", "ภาพก่อนมาร์กเกอร์"];
+  if (caseNumber === null) return "ตัวอย่างข้อความ /upload (ไม่มีการนำเข้าจริง)\n" + labels.map((label, index) => `/testupload ${index + 1} — ${label}`).join("\n");
+  let reply: string | SearchCardReply;
+  if (caseNumber <= 5) {
+    const outcomes: UploadTriggerResult[] = [
+      { status: "started", importRunId: "00000000-0000-4000-8000-000000000001" },
+      { status: "already_running" }, { status: "sequence_not_bootstrapped" },
+      { status: "workflow_start_failed" }, { status: "import_trigger_failed" },
+    ];
+    reply = uploadResultReply(outcomes[caseNumber - 1]!, publicBaseUrl);
+  } else {
+    const input = {
+      result: {
+        importRunId: "preview-only",
+        succeededProductIds: caseNumber === 6 ? ["A-29", "A-30"] : caseNumber === 7 ? ["A-29"] : [],
+        failedGroups: caseNumber === 7 || caseNumber === 8
+          ? [{ groupId: "preview-group", productId: "A-30", errorCode: "airtable_verification_failed" }] : [],
+      },
+      orphanRange: caseNumber === 10 ? { firstApplePhotoId: "preview-first", lastApplePhotoId: "preview-last", count: 3 } : null,
+      nowThaiText: "7 ตุลาคม 2569 14:30",
+    };
+    reply = { kind: "flex", text: buildImportSummaryMessage(input), contents: buildImportSummaryCard(input, publicBaseUrl) };
+  }
+  return reply;
 }
 
 function docsResultText(result: DocsTriggerResult, publicationDate?: string): string {
@@ -67,15 +96,16 @@ function docsResultText(result: DocsTriggerResult, publicationDate?: string): st
 }
 
 export async function handleReadOnlyCommand(
-  command: Extract<ParsedCommand, { type: "help" | "search" | "upload" | "docs" }>,
+  command: Extract<ParsedCommand, { type: "help" | "search" | "upload" | "testupload" | "docs" }>,
   deps: ReadOnlyDeps,
 ): Promise<string | SearchCardReply> {
+  if (command.type === "testupload") return testUploadReply(command.caseNumber, deps.publicBaseUrl);
   if (command.type === "help") return helpCard(deps.publicBaseUrl);
   if (command.type === "search") {
     const product = await deps.inventory.findByProductId(command.productId);
     return product ? searchCard(product, deps.publicBaseUrl) : notFoundText(command.productId);
   }
-  if (command.type === "upload") return uploadResultText(await deps.triggerUpload());
+  if (command.type === "upload") return uploadResultReply(await deps.triggerUpload(), deps.publicBaseUrl);
   try {
     const result = command.publicationDate
       ? await deps.triggerDocs(command.publicationDate)

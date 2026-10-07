@@ -258,7 +258,7 @@ export class ImportWorkflow extends WorkflowEntrypoint<
           result,
           orphanRange,
           nowThaiText: bangkokDateTimeThai(clock),
-        }),
+        }, config.publicBaseUrl),
     });
   }
 }

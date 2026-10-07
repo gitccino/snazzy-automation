@@ -1,3 +1,4 @@
+import { parseLineCommand } from "../../src/line/parser";
 import { expect, it, vi } from "vitest";
 import {
   handleReadOnlyCommand,
@@ -24,16 +25,33 @@ it("returns Thai not-found text for an unknown Product ID", async () => {
 });
 
 const uploadCases: Array<[UploadTriggerResult, string]> = [
-  [{ status: "started", importRunId: "import-1" }, "เริ่มนำเข้าแล้ว import-1"],
-  [{ status: "already_running" }, "มีงานนำเข้ากำลังทำงานอยู่"],
-  [{ status: "sequence_not_bootstrapped" }, "ยังเริ่มนำเข้าไม่ได้ เพราะยังไม่ได้ตั้งค่าลำดับรหัสสินค้า"],
-  [{ status: "workflow_start_failed" }, "เริ่มงานนำเข้าไม่สำเร็จ กรุณาลอง /upload อีกครั้ง"],
-  [{ status: "import_trigger_failed" }, "ระบบเริ่มงานนำเข้าขัดข้อง กรุณาลอง /upload อีกครั้ง"],
+  [{ status: "started", importRunId: "import-1" }, "เริ่มการนำเข้าสินค้า\nimport-1"],
+  [{ status: "already_running" }, "⚠️ มีงานนำเข้ากำลังทำงานอยู่"],
+  [{ status: "sequence_not_bootstrapped" }, "⚠️ ยังเริ่มนำเข้าไม่ได้ เพราะยังไม่ได้ตั้งค่าลำดับรหัสสินค้า"],
+  [{ status: "workflow_start_failed" }, "⚠️ เริ่มงานนำเข้าไม่สำเร็จ กรุณาลอง /upload อีกครั้ง"],
+  [{ status: "import_trigger_failed" }, "⚠️ ระบบเริ่มงานนำเข้าขัดข้อง กรุณาลอง /upload อีกครั้ง"],
 ];
 
 it.each(uploadCases)("maps upload result %j to its Thai reply", async (result, expected) => {
   const d = deps(result);
-  await expect(handleReadOnlyCommand({ type: "upload" }, d)).resolves.toBe(expected);
+  const reply = await handleReadOnlyCommand({ type: "upload" }, d);
+  if (result.status === "started") {
+    expect(reply).toMatchObject({
+      kind: "flex", text: expected,
+      contents: {
+        type: "bubble",
+        body: { contents: [
+          { contents: [
+            { type: "image", url: "https://worker.example/line/icons/image-v1.png" },
+            { contents: [{ text: "/upload" }, { text: "เริ่มการนำเข้าสินค้า", weight: "bold" }] },
+          ] },
+          { type: "text", text: "import-1", wrap: true },
+        ] },
+      },
+    });
+  } else {
+    expect(reply).toBe(expected);
+  }
   expect(d.triggerUpload).toHaveBeenCalledOnce();
 });
 
@@ -51,4 +69,21 @@ it.each(docsCases)("maps docs result %j to its Thai reply", async (result, expec
   const d = deps({ status: "already_running" }, result);
   await expect(handleReadOnlyCommand({ type: "docs" }, d)).resolves.toBe(expected);
   expect(d.triggerDocs).toHaveBeenCalledOnce();
+});
+
+it("previews every upload case without invoking a pipeline or inventory lookup", async () => {
+  const d = deps();
+  for (const suffix of ["", " 0", " 11", " abc", ...Array.from({ length: 10 }, (_, index) => ` ${index + 1}`)]) {
+    const parsed = parseLineCommand(`/testupload${suffix}`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok || parsed.command.type !== "testupload") throw new Error("Expected preview command");
+    const reply = await handleReadOnlyCommand(parsed.command, d);
+    const text = typeof reply === "string" ? reply : reply.text;
+    expect(text.length).toBeGreaterThan(0);
+    expect(text).not.toContain("ตัวอย่าง /testupload");
+    if (typeof reply !== "string") expect(JSON.stringify(reply.contents)).not.toContain("ตัวอย่าง /testupload");
+  }
+  expect(d.triggerUpload).not.toHaveBeenCalled();
+  expect(d.triggerDocs).not.toHaveBeenCalled();
+  expect(d.inventory.findByProductId).not.toHaveBeenCalled();
 });

@@ -217,7 +217,7 @@ async function buildHarness(
           result,
           orphanRange,
           nowThaiText: "2026-09-01 16:00 ICT",
-        }),
+        }, "https://worker.example"),
     });
   }
 
@@ -497,8 +497,8 @@ describe("import acceptance", () => {
       failedGroups: [{ groupId: "case-10-id-502", productId: "A-502", errorCode: "airtable_rate_limited" }],
     });
     expect(harness.push).toHaveBeenCalledTimes(1);
-    const expectedSummary = "นำเข้ารูปภาพ — 2026-09-01 16:00 ICT\nสำเร็จ 44 รายการ\nA-501, A-503, A-504, A-505, A-506, A-507, A-508, A-509, A-510, A-511, A-512, A-513, A-514, A-515, A-516, A-517, A-518, A-519, A-520, A-521, A-522, A-523, A-524, A-525, A-526, A-527, A-528, A-529, A-530, A-531, A-532, A-533, A-534, A-535, A-536, A-537, A-538, A-539, A-540, A-541, A-542, A-543, A-544, A-545\nล้มเหลว 1 รายการ\n- กลุ่ม case-10-id-502 (A-502): airtable_rate_limited\nแก้ไขแล้วพิมพ์ /upload เพื่อลองใหม่";
-    expect(harness.push).toHaveBeenCalledWith("CtestGroup", expectedSummary);
+    const expectedSummary = "นำเข้ารูปภาพ — 2026-09-01 16:00 ICT\nสำเร็จ 44 รายการ\nA-501, A-503, A-504, A-505, A-506, A-507, A-508, A-509, A-510, A-511, A-512, A-513, A-514, A-515, A-516, A-517, A-518, A-519, A-520, A-521, A-522, A-523, A-524, A-525, A-526, A-527, A-528, A-529, A-530, A-531, A-532, A-533, A-534, A-535, A-536, A-537, A-538, A-539, A-540, A-541, A-542, A-543, A-544, A-545\nล้มเหลว 1 รายการ\n- A-502: Airtable จำกัดจำนวนคำขอชั่วคราว\nแก้ไขแล้วพิมพ์ /upload เพื่อลองใหม่";
+    expect(harness.push).toHaveBeenCalledWith("CtestGroup", expectedSummary, expect.objectContaining({ type: "bubble" }));
     expect([...harness.created.values()].map((row) => row.productId)).toEqual(expectedSucceeded);
   });
 });
