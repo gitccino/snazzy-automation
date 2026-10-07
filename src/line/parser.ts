@@ -49,6 +49,10 @@ function extractPrices(text: string): { values: number[]; malformed: boolean; am
 export function parseLineCommand(input: string): ParseResult {
   const text = input.trim();
   if (text === "/help") return { ok: true, command: { type: "help" } };
+  if (text === "/testupload" || /^\/testupload\s/.test(text)) {
+    const match = /^\/testupload(?:\s+([1-9]|10))?$/.exec(text);
+    return { ok: true, command: { type: "testupload", caseNumber: match?.[1] ? Number(match[1]) : null } };
+  }
   if (text === "/upload") return { ok: true, command: { type: "upload" } };
   if (text === "/docs") return { ok: true, command: { type: "docs" } };
   if (/^\/docs\s/.test(text)) {

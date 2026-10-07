@@ -4,6 +4,7 @@ export type ParsedCommand =
   | { type: "help" }
   | { type: "search"; productId: string }
   | { type: "upload" }
+  | { type: "testupload"; caseNumber: number | null }
   | { type: "docs"; publicationDate?: string }
   | { type: "soldout"; productId: string; soldPrice: number }
   | { type: "revert" };

@@ -14,7 +14,7 @@ export interface LineButton {
 }
 
 export interface LineClient {
-  pushMessage(toGroupId: string, text: string): Promise<void>;
+  pushMessage(toGroupId: string, text: string, contents?: Record<string, unknown>): Promise<void>;
   replyFlex(replyToken: string, altText: string, contents: Record<string, unknown>): Promise<void>;
   replyText(replyToken: string, text: string): Promise<void>;
   replyButtons(replyToken: string, altText: string, text: string, buttons: LineButton[]): Promise<void>;
@@ -46,10 +46,12 @@ export function createLineClient(config: {
   }
 
   return {
-    pushMessage(toGroupId, text) {
+    pushMessage(toGroupId, text, contents) {
       return send(
         "https://api.line.me/v2/bot/message/push",
-        { to: toGroupId, messages: [{ type: "text", text }] },
+        { to: toGroupId, messages: [contents
+          ? { type: "flex", altText: text.slice(0, 1500).replace(/[\uD800-\uDBFF]$/, ""), contents }
+          : { type: "text", text }] },
         "line_push_failed",
       );
     },
