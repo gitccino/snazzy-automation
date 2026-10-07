@@ -24,12 +24,15 @@ export function revertSuccessCard(publicBaseUrl: string): Record<string, unknown
 export function confirmationCard(
   reply: Extract<CommandReply, { kind: "buttons" }>,
   publicBaseUrl: string,
+  previewActions?: { approveText: string; rejectText: string },
 ): Record<string, unknown> {
   const ink = "#2C2C2C";
   const muted = "#949494";
   const background = "#FFFFFF";
   const button = (label: string, data: string, outline = false) => {
-    const action = { type: "postback", label, data, displayText: label };
+    const action = previewActions
+      ? { type: "message", label, text: data === reply.approveData ? previewActions.approveText : previewActions.rejectText }
+      : { type: "postback", label, data, displayText: label };
     return outline ? {
       type: "box", layout: "vertical", flex: 1,
       borderWidth: "1px", borderColor: "#828282", cornerRadius: "8px",

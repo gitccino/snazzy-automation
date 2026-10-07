@@ -117,3 +117,11 @@ export function saleValuesText(values: SaleValues): string {
     `บันทึกโดย: ${oldValue(values.soldBy)}`,
   ].join("\n");
 }
+
+export const soldoutMessages = {
+  pending: (productId: string) => `⚠️ มีคำสั่งสำหรับ ${productId} ที่รอยืนยันหรือกำลังดำเนินการอยู่`,
+  cancelled: (productId: string) => `⚠️ ยกเลิกการขาย ${productId}`,
+  expired: "⚠️ คำยืนยันหมดอายุหรือถูกใช้แล้ว",
+  invalidConfirmationPrice: "⚠️ คำยืนยันราคาไม่ถูกต้อง",
+  changed: "⚠️ ข้อมูลสินค้าเปลี่ยนแล้ว ไม่ได้เขียนทับ กรุณาตรวจ Airtable",
+};

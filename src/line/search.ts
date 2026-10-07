@@ -1,11 +1,12 @@
+import { confirmationCard } from "./confirmation-card";
 import { buildImportSummaryCard, buildImportSummaryMessage } from "../import/notify";
 import type { InventoryClient } from "./airtable-inventory";
 import { OperationalError } from "../shared/errors";
-import { notFoundText } from "./messages";
-import type { ParsedCommand } from "./types";
+import { notFoundText, parseErrorText, soldoutMessages } from "./messages";
+import type { InventoryProduct, ParsedCommand } from "./types";
 import { helpCard } from "./help-card";
 import { uploadStartCard } from "./upload-card";
-import { searchCard, type SearchCardReply } from "./search-card";
+import { alreadyOutCard, saleSuccessCard, searchCard, type SearchCardReply } from "./search-card";
 
 export type UploadTriggerResult =
   | { status: "started"; importRunId: string }
@@ -74,6 +75,69 @@ function testUploadReply(caseNumber: number | null, publicBaseUrl: string): stri
   return reply;
 }
 
+function testSearchReply(caseNumber: number | null, publicBaseUrl: string): string | SearchCardReply {
+  const labels = ["สินค้า In พร้อมภาพ", "สินค้า Out พร้อมภาพ", "ไม่มีภาพ", "แสดงรุ่นแทนแบรนด์", "ข้อมูลสินค้าไม่ครบ", "ไม่พบสินค้า", "ไม่พบรหัสสินค้า", "รหัสไม่ถูกต้อง", "หลายรหัสสินค้า"];
+  if (caseNumber === null) return "ตัวอย่างข้อความ /search (ไม่มีการค้นหาจริง)\n" + labels.map((label, index) => `/testsearch ${index + 1} — ${label}`).join("\n");
+  if (caseNumber === 6) return notFoundText("A-999");
+  if (caseNumber === 7) return parseErrorText("missing_product_id");
+  if (caseNumber === 8) return parseErrorText("invalid_product_id");
+  if (caseNumber === 9) return parseErrorText("multiple_product_ids");
+  const product: InventoryProduct = {
+    recordId: "preview-only", productId: "A-22", inventoryStatus: caseNumber === 2 ? "Out" : "In",
+    soldPrice: caseNumber === 2 ? 12000 : null,
+    soldAt: caseNumber === 2 ? "2026-10-07T07:30:00.000Z" : null,
+    soldBy: caseNumber === 2 ? "S" : null,
+    uploadDate: caseNumber === 5 ? null : "2026-09-26",
+    airtableUrl: "https://airtable.com",
+    // Use LINE's public sample image; previewing never reads real product attachments.
+    imageUrl: caseNumber === 3 ? null : "https://scdn.line-apps.com/n/channel_devcenter/img/fx/01_1_cafe.png",
+    brandName: caseNumber === 4 || caseNumber === 5 ? null : "CHANEL",
+    modelName: caseNumber === 5 ? null : "Classic Card Holder",
+  };
+  return searchCard(product, publicBaseUrl);
+}
+
+function testSoldoutReply(caseNumber: number | null, publicBaseUrl: string): string | SearchCardReply {
+  const labels = ["ยืนยันการขาย", "บันทึกขายสำเร็จ", "ขายแล้ว", "ยกเลิกการขาย", "ไม่พบรหัสสินค้า", "รหัสไม่ถูกต้อง", "หลายรหัสสินค้า", "ไม่พบราคาขาย", "ราคาไม่ถูกต้อง", "หลายยอดเงิน", "ไม่รู้จักคำสั่ง", "ไม่พบสินค้า", "มีคำสั่งรอยืนยัน", "คำยืนยันหมดอายุหรือถูกใช้แล้ว", "คำยืนยันราคาไม่ถูกต้อง", "ข้อมูลสินค้าเปลี่ยนแล้ว"];
+  if (caseNumber === null) return "ตัวอย่างข้อความ /soldout (ไม่มีการขายจริง)\n" + labels.map((label, index) => `/testsoldout ${index + 1} — ${label}`).join("\n");
+  const productId = "A-22";
+  const soldPrice = 12000;
+  if (caseNumber === 1) {
+    const reply = {
+      kind: "buttons" as const, sale: { productId, soldPrice },
+      text: `ยืนยันขาย ${productId} ราคา ${soldPrice.toLocaleString("en-US")} บาท`,
+      approveData: "preview-approve", rejectData: "preview-reject",
+    };
+    return { kind: "flex", text: reply.text, contents: confirmationCard(reply, publicBaseUrl, { approveText: "/testsoldout 2", rejectText: "/testsoldout 4" }) };
+  }
+  if (caseNumber === 2 || caseNumber === 3) {
+    const product: InventoryProduct = {
+      recordId: "preview-only", productId, inventoryStatus: "Out", soldPrice,
+      soldAt: "2026-10-07T07:30:00.000Z", soldBy: "S", uploadDate: "2026-09-26",
+      airtableUrl: "https://airtable.com",
+      imageUrl: "https://scdn.line-apps.com/n/channel_devcenter/img/fx/01_1_cafe.png",
+      brandName: "CHANEL", modelName: "Classic Card Holder",
+    };
+    return caseNumber === 2 ? saleSuccessCard(productId, soldPrice, publicBaseUrl, product) : alreadyOutCard(product, publicBaseUrl);
+  }
+  switch (caseNumber) {
+    case 4: return soldoutMessages.cancelled(productId);
+    case 5: return parseErrorText("missing_product_id");
+    case 6: return parseErrorText("invalid_product_id");
+    case 7: return parseErrorText("multiple_product_ids");
+    case 8: return parseErrorText("missing_price");
+    case 9: return parseErrorText("invalid_price");
+    case 10: return parseErrorText("multiple_prices");
+    case 11: return parseErrorText("unknown_command");
+    case 12: return notFoundText("A-999");
+    case 13: return soldoutMessages.pending(productId);
+    case 14: return soldoutMessages.expired;
+    case 15: return soldoutMessages.invalidConfirmationPrice;
+    case 16: return soldoutMessages.changed;
+    default: return testSoldoutReply(null, publicBaseUrl);
+  }
+}
+
 function docsResultText(result: DocsTriggerResult, publicationDate?: string): string {
   switch (result.status) {
     case "regenerating":
@@ -96,10 +160,12 @@ function docsResultText(result: DocsTriggerResult, publicationDate?: string): st
 }
 
 export async function handleReadOnlyCommand(
-  command: Extract<ParsedCommand, { type: "help" | "search" | "upload" | "testupload" | "docs" }>,
+  command: Extract<ParsedCommand, { type: "help" | "search" | "upload" | "testupload" | "testsearch" | "testsoldout" | "docs" }>,
   deps: ReadOnlyDeps,
 ): Promise<string | SearchCardReply> {
   if (command.type === "testupload") return testUploadReply(command.caseNumber, deps.publicBaseUrl);
+  if (command.type === "testsearch") return testSearchReply(command.caseNumber, deps.publicBaseUrl);
+  if (command.type === "testsoldout") return testSoldoutReply(command.caseNumber, deps.publicBaseUrl);
   if (command.type === "help") return helpCard(deps.publicBaseUrl);
   if (command.type === "search") {
     const product = await deps.inventory.findByProductId(command.productId);

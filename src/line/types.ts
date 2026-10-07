@@ -5,6 +5,8 @@ export type ParsedCommand =
   | { type: "search"; productId: string }
   | { type: "upload" }
   | { type: "testupload"; caseNumber: number | null }
+  | { type: "testsearch"; caseNumber: number | null }
+  | { type: "testsoldout"; caseNumber: number | null }
   | { type: "docs"; publicationDate?: string }
   | { type: "soldout"; productId: string; soldPrice: number }
   | { type: "revert" };
