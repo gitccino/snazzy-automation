@@ -203,7 +203,7 @@ describe("publication stages", () => {
     expect(deps.notify).not.toHaveBeenCalled();
     if (outcome.kind !== "validation_failed") throw new Error("expected validation failure");
     await notifyPublicationValidationFailure(deps, "rec-run-1", outcome.thaiDate, outcome.validation);
-    expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining("A-1001: Description\nA-1002: Size"));
+    expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining("A-1001: Description\nA-1002: Size"), expect.objectContaining({ type: "bubble" }));
     expect(await job()).toMatchObject({ state: "validation_failed" });
   });
 
@@ -457,7 +457,7 @@ describe("publication stages", () => {
     expect(fetcher).toHaveBeenCalledTimes(4);
     expect(deps.notify).not.toHaveBeenCalled();
     await notifyPublicationSuccess(deps, prepared, result);
-    expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining(result.googleDocUrl));
+    expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining(result.googleDocUrl), expect.objectContaining({ type: "bubble" }));
     await failPublicationAfterExhaustion(deps, "rec-run-1", "Google unavailable", prepared.thaiDate);
     expect(fetcher).toHaveBeenCalledTimes(4);
   });
@@ -470,7 +470,7 @@ describe("publication stages", () => {
     expect(fetcher.mock.calls[1]![1]?.method).toBe("DELETE");
     expect(JSON.parse(String(fetcher.mock.calls[2]![1]?.body)).fields).toEqual({ Status: "Failed", "Error Summary": "Google unavailable" });
     expect(await job()).toMatchObject({ state: "failed", temp_doc_id: null });
-    expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining("2 กันยายน 2569"));
+    expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining("2 กันยายน 2569"), expect.objectContaining({ type: "bubble" }));
   });
 
   it("discovers and deletes an orphan copy during exhaustion cleanup", async () => {
@@ -482,7 +482,7 @@ describe("publication stages", () => {
     expect(String(fetcher.mock.calls[2]![0])).toBe("https://www.googleapis.com/drive/v3/files/orphan-doc");
     expect(fetcher.mock.calls[2]![1]?.method).toBe("DELETE");
     expect(await job()).toMatchObject({ state: "failed", temp_doc_id: null });
-    expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining("ไม่สามารถอ่านวันที่รายการได้"));
+    expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining("ไม่สามารถอ่านวันที่รายการได้"), expect.objectContaining({ type: "bubble" }));
   });
 
   it("retains the temp ID when deletion fails so cleanup can safely retry", async () => {

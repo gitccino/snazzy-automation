@@ -1,3 +1,4 @@
+import { docsSuccessCard, docsValidationFailureCard, docsWorkflowFailureCard } from "../line/docs-summary-card";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import type { AppConfig } from "../config";
@@ -25,10 +26,6 @@ import {
 import type { PublicationProduct, PublicationResult, PublicationRun, PublicationFinalizationIntent } from "./types";
 import { publicationWorkflowId } from "./types";
 import { formatValidationErrorSummary, validateRunCompleteness, type ValidationResult } from "./validator";
-import {
-  buildPublicationSuccessMessage, buildPublicationValidationFailureMessage,
-  buildPublicationWorkflowFailureMessage,
-} from "../line/messages";
 
 export interface PublicationServiceDeps {
   db: D1Database;
@@ -41,7 +38,7 @@ export interface PublicationServiceDeps {
   config: AppConfig;
   airtableToken: string;
   googleOAuthCredentials: GoogleOAuthCredentials;
-  notify(text: string): Promise<void>;
+  notify(text: string, contents?: Record<string, unknown>): Promise<void>;
 }
 
 export interface ValidatedPublication {
@@ -153,9 +150,10 @@ export async function notifyPublicationValidationFailure(
   displayDate: string,
   validation: ValidationResult,
 ): Promise<void> {
-  await deps.notify(buildPublicationValidationFailureMessage({
+  const card = docsValidationFailureCard({
     thaiDate: displayDate, validation, airtableRunUrl: airtableRunUrl(deps.config, publicationRunId),
-  }));
+  }, deps.config.publicBaseUrl);
+  await deps.notify(card.text, card.contents);
 }
 
 async function ensureCollage(deps: PublicationServiceDeps, runId: string, product: PublicationProduct, generation: number): Promise<string> {
@@ -321,7 +319,8 @@ export async function recoverPublicationFinalization(deps: PublicationServiceDep
 export async function notifyPublicationSuccess(deps: PublicationServiceDeps, prepared: Pick<PreparedPublication, "thaiDate" | "generation">, result: PublicationResult): Promise<void> {
   const job = await readJob(deps, result.publicationRunId);
   if (job.generation !== (prepared.generation ?? 1)) throw new OperationalError("publication_generation_stale", "Publication generation is stale", false);
-  await deps.notify(buildPublicationSuccessMessage({ thaiDate: prepared.thaiDate, productIds: result.productIds, googleDocUrl: result.googleDocUrl }));
+  const card = docsSuccessCard({ thaiDate: prepared.thaiDate, productIds: result.productIds, googleDocUrl: result.googleDocUrl }, deps.config.publicBaseUrl);
+  await deps.notify(card.text, card.contents);
 }
 
 /** Called only by the owning Workflow after exhaustion, with a sanitized human-readable reason. */
@@ -350,8 +349,9 @@ export async function failPublicationAfterExhaustion(
   }
   await setJobState(deps.db, deps.clock, publicationRunId, "failed", undefined, generation);
   await markRunFailed(deps.fetcher, deps.config, deps.airtableToken, publicationRunId, reason);
-  await deps.notify(buildPublicationWorkflowFailureMessage({
+  const card = docsWorkflowFailureCard({
     thaiDate: displayDate ?? (job.finalizationJson ? parseFinalizationIntent(job).thaiDate : "ไม่สามารถอ่านวันที่รายการได้"), reason,
     airtableRunUrl: airtableRunUrl(deps.config, publicationRunId),
-  }));
+  }, deps.config.publicBaseUrl);
+  await deps.notify(card.text, card.contents);
 }

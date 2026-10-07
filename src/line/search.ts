@@ -1,3 +1,4 @@
+import { docsSuccessCard, docsValidationFailureCard, docsWorkflowFailureCard } from "./docs-summary-card";
 import { confirmationCard } from "./confirmation-card";
 import { buildImportSummaryCard, buildImportSummaryMessage } from "../import/notify";
 import type { InventoryClient } from "./airtable-inventory";
@@ -5,7 +6,7 @@ import { OperationalError } from "../shared/errors";
 import { notFoundText, parseErrorText, soldoutMessages } from "./messages";
 import type { InventoryProduct, ParsedCommand } from "./types";
 import { helpCard } from "./help-card";
-import { uploadStartCard } from "./upload-card";
+import { docsStartCard, uploadStartCard } from "./upload-card";
 import { alreadyOutCard, saleSuccessCard, searchCard, type SearchCardReply } from "./search-card";
 
 export type UploadTriggerResult =
@@ -149,23 +150,71 @@ function docsResultText(result: DocsTriggerResult, publicationDate?: string): st
     case "resumed":
       return `ทำงานสร้างเอกสารต่อแล้ว ${result.publicationRunId}`;
     case "already_running":
-      return `มีงานสร้างเอกสารกำลังทำงานอยู่ ${result.publicationRunId}`;
+      return `⚠️ มีงานสร้างเอกสารกำลังทำงานอยู่ ${result.publicationRunId}`;
     case "already_generated":
-      return `สร้างเอกสารของ Publication Run นี้แล้ว ${result.publicationRunId}\nหากต้องการสร้างเวอร์ชันใหม่ ตั้งสถานะเป็น Ready แล้วส่งคำสั่ง /docs${publicationDate ? ` ${publicationDate.split("-").reverse().join("/")}` : ""} อีกครั้ง`;
+      return `⚠️ สร้างเอกสารของ Publication Run นี้แล้ว ${result.publicationRunId}\nหากต้องการสร้างเวอร์ชันใหม่ ตั้งสถานะเป็น Ready แล้วส่งคำสั่ง /docs${publicationDate ? ` ${publicationDate.split("-").reverse().join("/")}` : ""} อีกครั้ง`;
     case "no_runnable_run":
       return publicationDate
-        ? `ยังไม่มี Publication Run ที่พร้อมสำหรับวันที่ ${publicationDate.split("-").reverse().join("/")} กรุณาตั้งสถานะเป็น Ready`
-        : "ยังไม่มี Publication Run ที่พร้อมวันนี้";
+        ? `⚠️ ยังไม่มี Publication Run ที่พร้อมสำหรับวันที่ ${publicationDate.split("-").reverse().join("/")} กรุณาตั้งสถานะเป็น Ready`
+        : "⚠️ ยังไม่มี Publication Run ที่พร้อมวันนี้";
+  }
+}
+
+function docsResultReply(result: DocsTriggerResult, publicBaseUrl: string, publicationDate?: string): string | SearchCardReply {
+  const text = docsResultText(result, publicationDate);
+  switch (result.status) {
+    case "started":
+    case "regenerating":
+    case "restarted":
+    case "resumed":
+      return { ...docsStartCard(result.publicationRunId, publicBaseUrl, text.slice(0, -(result.publicationRunId.length + 1))), text };
+    default: return text;
+  }
+}
+
+function duplicatePublicationDateText(publicationDate?: string): string {
+  return `⚠️ พบวันที่ซ้ำใน Publication Runs กรุณาแก้ให้มีเพียง 1 รอบต่อวัน แล้วลอง /docs${publicationDate ? ` ${publicationDate.split("-").reverse().join("/")}` : ""} อีกครั้ง`;
+}
+
+function testDocsReply(caseNumber: number | null, publicBaseUrl: string): string | SearchCardReply {
+  const labels = ["เริ่มสร้างเอกสาร", "เริ่มสร้างเวอร์ชัน v2", "เริ่มสร้างใหม่", "ทำงานต่อ", "กำลังทำงานอยู่", "สร้างเอกสารแล้ว", "ไม่มีรอบพร้อมวันนี้", "ไม่มีรอบพร้อมสำหรับวันที่เลือก", "วันที่ไม่ถูกต้อง", "วันที่ซ้ำ", "สร้างเอกสารสำเร็จ", "ข้อมูลสินค้าไม่ครบ", "Workflow ล้มเหลว"];
+  if (caseNumber === null) return "ตัวอย่างข้อความ /docs (ไม่มีการสร้างเอกสารจริง)\n" + labels.map((label, index) => `/testdocs ${index + 1} — ${label}`).join("\n");
+  const publicationRunId = "recPreviewOnly";
+  const thaiDate = "7 ตุลาคม 2569";
+  if (caseNumber <= 7) {
+    const results: DocsTriggerResult[] = [
+      { status: "started", publicationRunId },
+      { status: "regenerating", publicationRunId, generation: 2 },
+      { status: "restarted", publicationRunId },
+      { status: "resumed", publicationRunId },
+      { status: "already_running", publicationRunId },
+      { status: "already_generated", publicationRunId },
+      { status: "no_runnable_run" },
+    ];
+    return docsResultReply(results[caseNumber - 1]!, publicBaseUrl);
+  }
+  switch (caseNumber) {
+    case 8: return docsResultText({ status: "no_runnable_run" }, "2026-10-08");
+    case 9: return parseErrorText("invalid_publication_date");
+    case 10: return duplicatePublicationDateText("2026-10-08");
+    case 11: return docsSuccessCard({ thaiDate, productIds: ["A-29", "A-30"], googleDocUrl: "https://docs.google.com/document/" }, publicBaseUrl);
+    case 12: return docsValidationFailureCard({
+      thaiDate, airtableRunUrl: "https://airtable.com",
+      validation: { valid: false, productsMissingFields: [{ productId: "A-30", missingFields: ["Product Images (needs at least 4)", "IG Price"] }] },
+    }, publicBaseUrl);
+    case 13: return docsWorkflowFailureCard({ thaiDate, reason: "Google token exchange failed with status 400", airtableRunUrl: "https://airtable.com" }, publicBaseUrl);
+    default: return testDocsReply(null, publicBaseUrl);
   }
 }
 
 export async function handleReadOnlyCommand(
-  command: Extract<ParsedCommand, { type: "help" | "search" | "upload" | "testupload" | "testsearch" | "testsoldout" | "docs" }>,
+  command: Extract<ParsedCommand, { type: "help" | "search" | "upload" | "testupload" | "testsearch" | "testsoldout" | "testdocs" | "docs" }>,
   deps: ReadOnlyDeps,
 ): Promise<string | SearchCardReply> {
   if (command.type === "testupload") return testUploadReply(command.caseNumber, deps.publicBaseUrl);
   if (command.type === "testsearch") return testSearchReply(command.caseNumber, deps.publicBaseUrl);
   if (command.type === "testsoldout") return testSoldoutReply(command.caseNumber, deps.publicBaseUrl);
+  if (command.type === "testdocs") return testDocsReply(command.caseNumber, deps.publicBaseUrl);
   if (command.type === "help") return helpCard(deps.publicBaseUrl);
   if (command.type === "search") {
     const product = await deps.inventory.findByProductId(command.productId);
@@ -176,9 +225,9 @@ export async function handleReadOnlyCommand(
     const result = command.publicationDate
       ? await deps.triggerDocs(command.publicationDate)
       : await deps.triggerDocs();
-    return docsResultText(result, command.publicationDate);
+    return docsResultReply(result, deps.publicBaseUrl, command.publicationDate);
   } catch (error) {
     if (!(error instanceof OperationalError) || error.code !== "airtable_duplicate_publication_date") throw error;
-    return `พบวันที่ซ้ำใน Publication Runs กรุณาแก้ให้มีเพียง 1 รอบต่อวัน แล้วลอง /docs${command.publicationDate ? ` ${command.publicationDate.split("-").reverse().join("/")}` : ""} อีกครั้ง`;
+    return duplicatePublicationDateText(command.publicationDate);
   }
 }

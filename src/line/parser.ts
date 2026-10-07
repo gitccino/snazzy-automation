@@ -61,6 +61,10 @@ export function parseLineCommand(input: string): ParseResult {
     const match = /^\/testsoldout(?:\s+([1-9]|1[0-6]))?$/.exec(text);
     return { ok: true, command: { type: "testsoldout", caseNumber: match?.[1] ? Number(match[1]) : null } };
   }
+  if (text === "/testdocs" || /^\/testdocs\s/.test(text)) {
+    const match = /^\/testdocs(?:\s+([1-9]|1[0-3]))?$/.exec(text);
+    return { ok: true, command: { type: "testdocs", caseNumber: match?.[1] ? Number(match[1]) : null } };
+  }
   if (text === "/upload") return { ok: true, command: { type: "upload" } };
   if (text === "/docs") return { ok: true, command: { type: "docs" } };
   if (/^\/docs\s/.test(text)) {
