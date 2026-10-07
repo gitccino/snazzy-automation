@@ -8,9 +8,13 @@ export function helpCard(publicBaseUrl: string): SearchCardReply {
     ["/upload", "ย้ายภาพขึ้น Airtable"],
     ["/docs", "ดึงข้อมูลไปสร้าง google doc"],
   ];
+  return commandListCard(publicBaseUrl, "/help", "คำสั่งที่ใช้ได้", "help-v1", commands);
+}
+
+export function commandListCard(publicBaseUrl: string, commandLabel: string, title: string, icon: string, commands: string[][]): SearchCardReply {
   return {
     kind: "flex",
-    text: ["คำสั่งที่ใช้ได้", ...commands.map(([command, description]) => `${command}: ${description}`)].join("\n"),
+    text: [title, ...commands.map(([command, description]) => `${command}: ${description}`)].join("\n"),
     contents: {
       type: "bubble", size: "giga",
       body: {
@@ -19,12 +23,12 @@ export function helpCard(publicBaseUrl: string): SearchCardReply {
           {
             type: "box", layout: "horizontal", spacing: "md", alignItems: "center",
             contents: [
-              { type: "image", url: new URL("/line/icons/help-v1.png", publicBaseUrl).toString(), size: "40px", aspectRatio: "1:1", flex: 0 },
+              { type: "image", url: new URL(`/line/icons/${icon}.png`, publicBaseUrl).toString(), size: "40px", aspectRatio: "1:1", flex: 0 },
               {
                 type: "box", layout: "vertical", spacing: "none", flex: 1,
                 contents: [
-                  { type: "text", text: "/help", color: "#949494", size: "xs" },
-                  { type: "text", text: "คำสั่งที่ใช้ได้", color: "#2C2C2C", size: "lg", weight: "bold", wrap: true },
+                  { type: "text", text: commandLabel, color: "#949494", size: "xs" },
+                  { type: "text", text: title, color: "#2C2C2C", size: "lg", weight: "bold", wrap: true },
                 ],
               },
             ],
