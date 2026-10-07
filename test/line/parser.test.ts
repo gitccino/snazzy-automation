@@ -42,3 +42,12 @@ describe("parseLineCommand", () => {
     ["/unknown", "unknown_command"],
   ])("rejects %s", (text, code) => expect(parseLineCommand(text)).toEqual({ ok: false, code }));
 });
+
+ it("parses report dates/pages and rejects impossible dates or unsafe pages", () => {
+  expect(parseLineCommand("/report")).toEqual({ ok: true, command: { type: "report", page: 1 } });
+  expect(parseLineCommand(" /report 7/10/2026 2 ")).toEqual({ ok: true, command: { type: "report", reportDate: "2026-10-07", page: 2 } });
+  expect(parseLineCommand("/report 29/2/2028")).toEqual({ ok: true, command: { type: "report", reportDate: "2028-02-29", page: 1 } });
+  for (const input of ["/report 29/2/2026", "/report 31/4/2026", "/report 7/10/0000", "/report 7/10/2026 0", "/report 7/10/2026 -1", "/report 7/10/2026 1.5", "/report 7/10/2026 9007199254740992", "/report 7/10/2026 2 extra", "/report 2"]) {
+    expect(parseLineCommand(input)).toEqual({ ok: false, code: "invalid_report_command" });
+  }
+});

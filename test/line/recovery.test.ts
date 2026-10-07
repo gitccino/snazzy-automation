@@ -21,6 +21,7 @@ function setup(legacy: Partial<SaleValues> = {}) {
   };
   const writes: SaleValues[] = [];
   const inventory = {
+    listSalesForDay: vi.fn().mockResolvedValue([]),
     findByProductId: vi.fn(async () => ({ ...state })),
     updateSaleValues: vi.fn(async (_recordId: string, values: SaleValues) => {
       writes.push(values);

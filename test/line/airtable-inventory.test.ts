@@ -115,3 +115,50 @@ describe("inventory Airtable client", () => {
     expect(matchesSaleValues(sold, changed)).toBe(false);
   });
 });
+
+it("reads every daily-sales page with Bangkok boundaries and requested fields", async () => {
+  const calls: URL[] = [];
+  const client = createInventoryClient({ ...config, fetch: async input => {
+    const url = new URL(String(input)); calls.push(url);
+    return response(url.searchParams.has("offset")
+      ? { records: [{ id: "rec2", fields: { "Product ID": "A-2", "Inventory Status": "Out", "Sold Price": 14000, "Sold At": "2026-10-07T16:59:59.999Z" } }] }
+      : { records: [{ id: "rec1", fields: { "Product ID": "A-1", "Inventory Status": "Out", "Sold Price": 12000, "Sold At": "2026-10-06T17:00:00Z" } }], offset: "page2" });
+  } });
+  expect(await client.listSalesForDay("2026-10-07")).toHaveLength(2);
+  expect(calls[1]!.searchParams.get("offset")).toBe("page2");
+  expect(calls[0]!.searchParams.get("filterByFormula")).toContain("2026-10-06T17:00:00.000Z");
+  expect(calls[0]!.searchParams.get("filterByFormula")).toContain("2026-10-07T17:00:00.000Z");
+  expect(calls[0]!.searchParams.getAll("fields[]")).toEqual(["Product ID", "Inventory Status", "Brand Name", "Model Name", "Sold Price", "Sold At"]);
+});
+
+it.each(["repeated offset", "second page fails", "duplicate product", "duplicate record", "missing price", "In", "invalid timestamp", "end boundary", "before start", "network", "bad date", "malformed response"])("rejects daily report %s without a partial result", async scenario => {
+  let call = 0;
+  const fields: Record<string, unknown> = { "Product ID": "A-1", "Inventory Status": "Out", "Sold Price": 100, "Sold At": "2026-10-07T07:00:00Z" };
+  if (scenario === "missing price") delete fields["Sold Price"];
+  if (scenario === "In") fields["Inventory Status"] = "In";
+  if (scenario === "invalid timestamp") fields["Sold At"] = "bad-date";
+  if (scenario === "end boundary") fields["Sold At"] = "2026-10-07T17:00:00Z";
+  if (scenario === "before start") fields["Sold At"] = "2026-10-06T16:59:59.999Z";
+  const client = createInventoryClient({ ...config, fetch: async () => {
+    call++;
+    if (scenario === "network") throw new TypeError("network failed");
+    if (scenario === "malformed response") return response({ nope: [] });
+    if (call > 1 && scenario === "second page fails") return new Response("", { status: 500 });
+    if (call > 1 && scenario === "repeated offset") return response({ records: [], offset: "same" });
+    const records = [{ id: "rec1", fields }];
+    if (scenario === "duplicate product") records.push({ id: "rec2", fields });
+    if (scenario === "duplicate record") records.push({ id: "rec1", fields: { ...fields, "Product ID": "A-2" } });
+    return response({ records, ...(["repeated offset", "second page fails"].includes(scenario) ? { offset: "same" } : {}) });
+  } });
+  await expect(client.listSalesForDay(scenario === "bad date" ? "2026-02-30" : "2026-10-07")).rejects.toMatchObject({ name: "OperationalError" });
+  if (scenario === "bad date") expect(call).toBe(0);
+});
+
+it.each(["2026-01-01", "2028-03-01"])("uses correct rollover boundaries for daily report %s", async date => {
+  let formula = "";
+  const client = createInventoryClient({ ...config, fetch: async input => { formula = new URL(String(input)).searchParams.get("filterByFormula")!; return response({ records: [] }); } });
+  expect(await client.listSalesForDay(date)).toEqual([]);
+  const start = new Date(`${date}T00:00:00+07:00`);
+  expect(formula).toContain(start.toISOString());
+  expect(formula).toContain(new Date(start.getTime() + 86400000).toISOString());
+});

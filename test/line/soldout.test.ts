@@ -61,6 +61,7 @@ function soldoutPending(
 
 function deps(found: InventoryProduct | null = product) {
   const inventory = {
+    listSalesForDay: vi.fn().mockResolvedValue([]),
     findByProductId: vi.fn().mockResolvedValue(found),
     updateSaleValues: vi.fn().mockResolvedValue(undefined),
   } satisfies InventoryClient;
