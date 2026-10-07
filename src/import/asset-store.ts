@@ -7,9 +7,12 @@ export interface AssetPutResult {
   created: boolean;
 }
 
+export const AIRTABLE_PREVIEW_VARIANT = "airtable-preview-v1";
+export type AssetVariant = typeof AIRTABLE_PREVIEW_VARIANT;
+
 export interface AssetStore {
   putIfAbsent(contentHash: string, extension: string, body: ArrayBuffer, contentType: string): Promise<AssetPutResult>;
-  signUrl(r2Key: string, ttlSeconds: number): Promise<string>;
+  signUrl(r2Key: string, ttlSeconds: number, variant?: AssetVariant): Promise<string>;
 }
 
 async function hmacHex(secret: string, payload: string): Promise<string> {
@@ -42,16 +45,20 @@ export function createAssetStore(bucket: R2Bucket, config: { signingSecret: stri
       return { r2Key, created: true };
     },
 
-    async signUrl(r2Key, ttlSeconds) {
+    async signUrl(r2Key, ttlSeconds, variant) {
       if (!isFiniteInteger(ttlSeconds) || ttlSeconds <= 0) {
         throw new RangeError("ttlSeconds must be a positive finite integer");
       }
+      if (variant !== undefined && variant !== AIRTABLE_PREVIEW_VARIANT) {
+        throw new RangeError("unsupported asset variant");
+      }
       const expiresAt = Math.floor(clock.now().getTime() / 1000) + ttlSeconds;
-      const payload = `${r2Key}:${expiresAt}`;
+      const payload = `${r2Key}:${expiresAt}${variant ? `:${variant}` : ""}`;
       const signature = await hmacHex(config.signingSecret, payload);
       const url = new URL(`/assets/${encodeURIComponent(r2Key)}`, config.publicBaseUrl);
       url.searchParams.set("exp", String(expiresAt));
       url.searchParams.set("sig", signature);
+      if (variant) url.searchParams.set("variant", variant);
       return url.toString();
     },
   };
@@ -62,15 +69,17 @@ export async function verifyAssetToken(
   expiresAtEpochSeconds: number,
   signatureHex: string,
   signingSecret: string,
-  nowEpochSeconds: number
+  nowEpochSeconds: number,
+  variant?: AssetVariant,
 ): Promise<boolean> {
+  if (variant !== undefined && variant !== AIRTABLE_PREVIEW_VARIANT) return false;
   if (!isFiniteInteger(expiresAtEpochSeconds) || !isFiniteInteger(nowEpochSeconds)) {
     return false;
   }
   if (nowEpochSeconds > expiresAtEpochSeconds) {
     return false;
   }
-  const expected = await hmacHex(signingSecret, `${r2Key}:${expiresAtEpochSeconds}`);
+  const expected = await hmacHex(signingSecret, `${r2Key}:${expiresAtEpochSeconds}${variant ? `:${variant}` : ""}`);
   if (expected.length !== signatureHex.length) {
     return false;
   }
