@@ -161,6 +161,30 @@ Add an ignore-first/repeated-ignore test with shuffled input and no product mark
 
 - [ ] Run `npx vitest run test/import/grouping.test.ts` to see the new assertions fail.
 - [ ] Replace the first-marker slicing algorithm with one ordered scan. Keep `currentMarkerPhotoId`, `currentPhotos`, and `ignoring`. Flush a group only when a product marker is active. On `product_start`, flush and begin `[photo]`, setting `ignoring=false`. On `ignore_start`, flush and clear the active product, setting `ignoring=true`, and add the marker to `ignoredPhotos`. Ordinary photos route to the active group, ignored list, or orphan list. Flush an active group at the end. `computeGroupHash` remains unchanged.
+```ts
+const groups: GroupedProduct[] = [], orphanPhotos: GroupingPhoto[] = [], ignoredPhotos: GroupingPhoto[] = [];
+let currentMarkerPhotoId: string | null = null;
+let currentPhotos: GroupingPhoto[] = [];
+let ignoring = false;
+const flush = () => {
+  if (currentMarkerPhotoId !== null) groups.push({ ordinal: groups.length, markerPhotoId: currentMarkerPhotoId, photos: currentPhotos });
+  currentMarkerPhotoId = null;
+  currentPhotos = [];
+};
+for (const photo of [...photos].sort((a, b) => a.position - b.position)) {
+  const kind = photo.markerKind ?? (photo.isMarker ? "product_start" : "none");
+  if (kind === "product_start") {
+    flush(); ignoring = false; currentMarkerPhotoId = photo.applePhotoId; currentPhotos = [photo];
+  } else if (kind === "ignore_start") {
+    flush(); ignoring = true; ignoredPhotos.push(photo);
+  } else if (ignoring) ignoredPhotos.push(photo);
+  else if (currentMarkerPhotoId !== null) currentPhotos.push(photo);
+  else orphanPhotos.push(photo);
+}
+flush();
+return { groups, orphanPhotos, ignoredPhotos };
+```
+
 - [ ] Run grouping tests and commit `feat: skip ignored sections during product grouping`.
 
 ## Task 4: Skip R2 storage and reject incomplete groups before allocating IDs
@@ -253,6 +277,17 @@ expect(svg).not.toContain("SNAZZY_PRODUCT_START_V1");
 Keep the existing no-kind test to pin product default. Invalid CLI `--kind` values must exit nonzero rather than silently produce the product marker.
 - [ ] Run `npx vitest run test/scripts/generate-marker.test.ts` before implementation.
 - [ ] Select the payload from kind using constants imported from `src/import/marker.ts`. Use the existing SVG layout and payload label. Validate CLI input, map `product`/`ignore` to the typed kind, and default the ignore output to `docs/runbooks/ignore-marker-card.svg` when no `--out` is supplied.
+Use these selections inside the existing generator and CLI (with exported payload constants imported):
+
+```ts
+const payload = kind === "ignore_start" ? IGNORE_MARKER_PAYLOAD : MARKER_PAYLOAD;
+const kindIndex = args.indexOf("--kind");
+const selected = kindIndex < 0 ? "product" : args[kindIndex + 1];
+if (selected !== "product" && selected !== "ignore") throw new Error("Use --kind product or --kind ignore");
+const kind = selected === "ignore" ? "ignore_start" : "product_start";
+const defaultOut = selected === "ignore" ? "docs/runbooks/ignore-marker-card.svg" : "docs/runbooks/marker-card.svg";
+```
+
 - [ ] Run generator tests, then generate the committed card:
 
 ```sh
