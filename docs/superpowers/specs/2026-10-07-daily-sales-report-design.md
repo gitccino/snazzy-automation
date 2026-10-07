@@ -1,6 +1,6 @@
 # Daily sales report through LINE
 
-Status: Draft for user review. No implementation is authorized by this document alone.
+Status: Approved by the user on 2026-10-07; implementation completed on `feat/daily-sales-report`. Deployment and live LINE validation are pending.
 
 ## Intent and agreed requirements
 

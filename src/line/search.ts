@@ -1,3 +1,4 @@
+import { createLogger } from "../shared/logger";
 import { dailySalesReportCard } from "./report-card";
 import { todayBangkokDate, type Clock } from "../shared/time";
 import { docsSuccessCard, docsValidationFailureCard, docsWorkflowFailureCard } from "./docs-summary-card";
@@ -226,6 +227,7 @@ export async function handleReadOnlyCommand(
       return dailySalesReportCard(products, date, command.page, date === today);
     } catch (error) {
       if (!(error instanceof OperationalError)) throw error;
+      createLogger({ component: "line_report" }).error("Daily sales report failed", { code: error.code, detail: error.message, retryable: error.retryable, reportDate: date });
       if (["airtable_inventory_report_invalid_record", "sales_report_invalid_total"].includes(error.code)) {
         return "⚠️ สรุปยอดขายไม่ได้ เพราะข้อมูลการขายใน Airtable ไม่ครบหรือไม่ถูกต้อง กรุณาตรวจสอบแล้วลอง /report อีกครั้ง";
       }

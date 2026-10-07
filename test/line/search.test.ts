@@ -181,3 +181,15 @@ it("does not swallow unexpected programming errors in reports", async () => {
   vi.mocked(d.inventory.listSalesForDay).mockRejectedValue(new Error("unexpected"));
   await expect(handleReadOnlyCommand({ type: "report", page: 1 }, d)).rejects.toThrow("unexpected");
 });
+
+it("preserves sanitized report diagnostics while delivering a friendly warning", async () => {
+  const d = deps();
+  const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    vi.mocked(d.inventory.listSalesForDay).mockRejectedValue(new OperationalError("airtable_inventory_report_failed", "Airtable inventory report failed with status 429", true));
+    const reply = await handleReadOnlyCommand({ type: "report", page: 1 }, d);
+    expect(reply).toContain("⚠️ ดึงข้อมูลยอดขาย");
+    expect(errorLog).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(errorLog.mock.calls[0]![0]))).toMatchObject({ code: "airtable_inventory_report_failed", reportDate: "2026-10-07", retryable: true, detail: "Airtable inventory report failed with status 429" });
+  } finally { errorLog.mockRestore(); }
+});
