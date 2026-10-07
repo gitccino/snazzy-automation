@@ -27,6 +27,7 @@ const InventoryFieldsSchema = z.object({
 });
 
 const DailySaleFieldsSchema = z.object({
+  "Product Cost": z.number().nonnegative().refine(value => Number.isSafeInteger(Math.round(value * 100)) && Math.abs(value * 100 - Math.round(value * 100)) < 0.000001).nullish(),
   "Product ID": z.string().regex(/^A-[1-9]\d*$/),
   "Inventory Status": z.literal("Out"),
   "Sold Price": z.number().int().positive().refine(Number.isSafeInteger),
@@ -103,7 +104,7 @@ export function createInventoryClient(config: {
         const url = new URL(baseUrl);
         url.searchParams.set("filterByFormula", formula);
         url.searchParams.set("pageSize", "100");
-        for (const field of ["Product ID", "Inventory Status", "Brand Name", "Model Name", "Sold Price", "Sold At"]) url.searchParams.append("fields[]", field);
+        for (const field of ["Product ID", "Inventory Status", "Brand Name", "Model Name", "Sold Price", "Sold At", "Product Cost"]) url.searchParams.append("fields[]", field);
         if (offset) url.searchParams.set("offset", offset);
         let response: Response;
         try { response = await config.fetch(url.toString(), { headers }); }
@@ -120,7 +121,7 @@ export function createInventoryClient(config: {
           }
           productIds.add(fields["Product ID"]); recordIds.add(record.id);
           const name = (field: string) => typeof record.fields[field] === "string" ? record.fields[field].trim() || null : null;
-          products.push({ recordId: record.id, productId: fields["Product ID"], soldPrice: fields["Sold Price"], soldAt: fields["Sold At"], brandName: name("Brand Name"), modelName: name("Model Name") });
+          products.push({ productCost: fields["Product Cost"] ?? null, recordId: record.id, productId: fields["Product ID"], soldPrice: fields["Sold Price"], soldAt: fields["Sold At"], brandName: name("Brand Name"), modelName: name("Model Name") });
         }
         offset = body.offset;
         if (offset !== undefined) {

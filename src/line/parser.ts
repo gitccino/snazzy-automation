@@ -73,6 +73,11 @@ export function parseLineCommand(input: string): ParseResult {
     const match = /^\/testsoldout(?:\s+([1-9]|1[0-6]))?$/.exec(text);
     return { ok: true, command: { type: "testsoldout", caseNumber: match?.[1] ? Number(match[1]) : null } };
   }
+  if (text === "/testreport" || /^\/testreport\s/.test(text)) {
+    const match = /^\/testreport(?:\s+([1-9]|1[0-2])(?:\s+([1-3]))?)?$/.exec(text);
+    const valid = match && (!match[2] || match[1] === "9");
+    return { ok: true, command: { type: "testreport", caseNumber: valid && match[1] ? Number(match[1]) : null, page: valid && match[2] ? Number(match[2]) : 2 } };
+  }
   if (text === "/testdocs" || /^\/testdocs\s/.test(text)) {
     const match = /^\/testdocs(?:\s+([1-9]|1[0-3]))?$/.exec(text);
     return { ok: true, command: { type: "testdocs", caseNumber: match?.[1] ? Number(match[1]) : null } };

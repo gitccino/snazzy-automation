@@ -7,7 +7,7 @@ import { buildImportSummaryCard, buildImportSummaryMessage } from "../import/not
 import type { InventoryClient } from "./airtable-inventory";
 import { OperationalError } from "../shared/errors";
 import { notFoundText, parseErrorText, soldoutMessages } from "./messages";
-import type { InventoryProduct, ParsedCommand } from "./types";
+import type { DailySaleProduct, InventoryProduct, ParsedCommand } from "./types";
 import { commandListCard, helpCard } from "./help-card";
 import { docsStartCard, uploadStartCard } from "./upload-card";
 import { alreadyOutCard, saleSuccessCard, searchCard, type SearchCardReply } from "./search-card";
@@ -211,10 +211,37 @@ function testDocsReply(caseNumber: number | null, publicBaseUrl: string): string
   }
 }
 
+const reportDataWarning = "⚠️ สรุปยอดขายไม่ได้ เพราะข้อมูลการขายใน Airtable ไม่ครบหรือไม่ถูกต้อง กรุณาตรวจสอบแล้วลอง /report อีกครั้ง";
+const reportFetchWarning = "⚠️ ดึงข้อมูลยอดขายไม่สำเร็จ กรุณาลอง /report อีกครั้ง";
+
+function testReportReply(caseNumber: number | null, page: number, publicBaseUrl: string): string | SearchCardReply {
+  const labels = ["สินค้าเดียวมีกำไร", "หลายสินค้ามีกำไร", "กำไรและขาดทุน รวมเป็นกำไร", "กำไรและขาดทุน รวมเป็นขาดทุน", "เท่าทุน", "ยังไม่ได้ระบุต้นทุน", "ไม่มีรายการขายวันนี้", "ไม่มีรายการขายวันที่เลือก", "รายงานหลายหน้า", "วันที่หรือคำสั่งไม่ถูกต้อง", "ข้อมูลการขายไม่ถูกต้อง", "ดึงข้อมูลไม่สำเร็จ"];
+  if (caseNumber === null) return commandListCard(publicBaseUrl, "/testreport", "ตัวอย่างข้อความ /report", "setting-yellow-v1", labels.map((label, index) => [String(index + 1), label]));
+  if (caseNumber === 10) return parseErrorText("invalid_report_command");
+  if (caseNumber === 11) return reportDataWarning;
+  if (caseNumber === 12) return reportFetchWarning;
+  const first: DailySaleProduct = { recordId: "recPreview16", productId: "A-16", brandName: "Louis Vuitton", modelName: "LV Iconic Strass Necklace", soldPrice: 12000, productCost: 10000, soldAt: "2026-10-07T10:00:00+07:00" };
+  const second: DailySaleProduct = { recordId: "recPreview17", productId: "A-17", brandName: "Louis Vuitton", modelName: "Blooming Pearls Monogram Bracelet", soldPrice: 17000, productCost: 9500, soldAt: "2026-10-07T11:00:00+07:00" };
+  let products: DailySaleProduct[];
+  switch (caseNumber) {
+    case 1: products = [first]; break;
+    case 2: products = [first, second]; break;
+    case 3: products = [{ ...first, productCost: 14000 }, second]; break;
+    case 4: products = [{ ...first, productCost: 20000 }, second]; break;
+    case 5: products = [{ ...first, productCost: first.soldPrice }]; break;
+    case 6: products = [first, { ...second, productCost: null }]; break;
+    case 7: case 8: products = []; break;
+    case 9: products = Array.from({ length: 21 }, (_, index) => ({ ...first, recordId: `recPreview${index + 1}`, productId: `A-${index + 1}` })); break;
+    default: return testReportReply(null, 2, publicBaseUrl);
+  }
+  return dailySalesReportCard(products, "2026-10-07", caseNumber === 9 ? page : 1, caseNumber !== 8, publicBaseUrl, target => `/testreport 9 ${target}`);
+}
+
 export async function handleReadOnlyCommand(
-  command: Extract<ParsedCommand, { type: "report" | "help" | "search" | "upload" | "testupload" | "testsearch" | "testsoldout" | "testdocs" | "docs" }>,
+  command: Extract<ParsedCommand, { type: "report" | "help" | "search" | "upload" | "testupload" | "testsearch" | "testsoldout" | "testdocs" | "testreport" | "docs" }>,
   deps: ReadOnlyDeps,
 ): Promise<string | SearchCardReply> {
+  if (command.type === "testreport") return testReportReply(command.caseNumber, command.page, deps.publicBaseUrl);
   if (command.type === "testupload") return testUploadReply(command.caseNumber, deps.publicBaseUrl);
   if (command.type === "testsearch") return testSearchReply(command.caseNumber, deps.publicBaseUrl);
   if (command.type === "testsoldout") return testSoldoutReply(command.caseNumber, deps.publicBaseUrl);
@@ -224,15 +251,15 @@ export async function handleReadOnlyCommand(
     const date = command.reportDate ?? today;
     try {
       const products = await deps.inventory.listSalesForDay(date);
-      return dailySalesReportCard(products, date, command.page, date === today);
+      return dailySalesReportCard(products, date, command.page, date === today, deps.publicBaseUrl);
     } catch (error) {
       if (!(error instanceof OperationalError)) throw error;
       createLogger({ component: "line_report" }).error("Daily sales report failed", { code: error.code, detail: error.message, retryable: error.retryable, reportDate: date });
       if (["airtable_inventory_report_invalid_record", "sales_report_invalid_total"].includes(error.code)) {
-        return "⚠️ สรุปยอดขายไม่ได้ เพราะข้อมูลการขายใน Airtable ไม่ครบหรือไม่ถูกต้อง กรุณาตรวจสอบแล้วลอง /report อีกครั้ง";
+        return reportDataWarning;
       }
       if (!error.code.startsWith("airtable_inventory_")) throw error;
-      return "⚠️ ดึงข้อมูลยอดขายไม่สำเร็จ กรุณาลอง /report อีกครั้ง";
+      return reportFetchWarning;
     }
   }
   if (command.type === "help") return helpCard(deps.publicBaseUrl);

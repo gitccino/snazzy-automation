@@ -8,6 +8,7 @@ export type ParsedCommand =
   | { type: "testupload"; caseNumber: number | null }
   | { type: "testsearch"; caseNumber: number | null }
   | { type: "testsoldout"; caseNumber: number | null }
+  | { type: "testreport"; caseNumber: number | null; page: number }
   | { type: "testdocs"; caseNumber: number | null }
   | { type: "docs"; publicationDate?: string }
   | { type: "soldout"; productId: string; soldPrice: number }
@@ -134,6 +135,7 @@ export function parseSupportedLineEvents(value: unknown): SupportedLineEvent[] {
 }
 
 export interface DailySaleProduct {
+  productCost: number | null;
   recordId: string;
   productId: string;
   brandName: string | null;
