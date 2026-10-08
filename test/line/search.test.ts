@@ -193,3 +193,10 @@ it("preserves sanitized report diagnostics while delivering a friendly warning",
     expect(JSON.parse(String(errorLog.mock.calls[0]![0]))).toMatchObject({ code: "airtable_inventory_report_failed", reportDate: "2026-10-07", retryable: true, detail: "Airtable inventory report failed with status 429" });
   } finally { errorLog.mockRestore(); }
 });
+
+it("lets durable processing retry temporary report failures instead of returning a final warning", async () => {
+  const d = deps();
+  const error = new OperationalError("airtable_inventory_report_failed", "Unavailable", true);
+  vi.mocked(d.inventory.listSalesForDay).mockRejectedValue(error);
+  await expect(handleReadOnlyCommand({ type: "report", page: 1 }, { ...d, retryTransientErrors: true })).rejects.toBe(error);
+});

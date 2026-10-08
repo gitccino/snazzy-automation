@@ -66,7 +66,7 @@ async function actorFor(event: SupportedLineEvent, line: LineClient): Promise<Li
   };
 }
 
-async function send(replyToken: string, reply: CommandReply, line: LineClient, publicBaseUrl: string): Promise<void> {
+export async function sendCommandReply(replyToken: string, reply: CommandReply, line: LineClient, publicBaseUrl: string): Promise<void> {
   if (reply.kind === "flex") {
     await line.replyFlex(replyToken, reply.text, reply.contents);
     return;
@@ -102,6 +102,27 @@ async function send(replyToken: string, reply: CommandReply, line: LineClient, p
   ]);
 }
 
+export async function prepareLineReply(event: SupportedLineEvent, deps: WebhookDeps, correlationId = event.webhookEventId): Promise<CommandReply> {
+  if (event.type === "message") {
+    const parsed = parseLineCommand(event.message.text);
+    if (!parsed.ok) return { kind: "text", text: parseErrorText(parsed.code) };
+    const actor = await actorFor(event, deps.line);
+    if (parsed.command.type !== "soldout" && parsed.command.type !== "revert") {
+      const reply = await handleReadOnlyCommand(parsed.command, deps);
+      return typeof reply === "string" ? { kind: "text", text: reply } : reply;
+    }
+    return parsed.command.type === "soldout"
+      ? prepareSoldout(parsed.command, actor, event.webhookEventId, deps.confirmationEnabled, deps)
+      : prepareRevert(actor, event.webhookEventId, deps);
+  }
+  const postback = parsePostback(event.postback.data);
+  if (postback === null) return { kind: "text", text: "คำยืนยันไม่ถูกต้อง" };
+  const actor = await actorFor(event, deps.line);
+  return postback.action === "soldout"
+    ? resolveSoldout(postback.decision, postback.token, actor, event.webhookEventId, correlationId, deps)
+    : resolveRevert(postback.decision, postback.token, actor, event.webhookEventId, correlationId, deps);
+}
+
 export async function processLineEvents(
   events: SupportedLineEvent[],
   deps: WebhookDeps,
@@ -126,66 +147,14 @@ export async function processLineEvents(
 
       const savedReply = await deps.repo.findEventReply(event.webhookEventId);
       if (savedReply !== null) {
-        await send(event.replyToken, savedReply, deps.line, deps.publicBaseUrl);
+        await sendCommandReply(event.replyToken, savedReply, deps.line, deps.publicBaseUrl);
         continue;
       }
       const deliver = async (reply: CommandReply) => {
         await deps.repo.saveEventReply(event.webhookEventId, reply);
-        await send(event.replyToken, reply, deps.line, deps.publicBaseUrl);
+        await sendCommandReply(event.replyToken, reply, deps.line, deps.publicBaseUrl);
       };
-      const actor = await actorFor(event, deps.line);
-      if (event.type === "postback") {
-        const postback = parsePostback(event.postback.data);
-        if (postback === null) {
-          await deliver({ kind: "text", text: "คำยืนยันไม่ถูกต้อง" });
-          continue;
-        }
-        const reply = postback.action === "soldout"
-          ? await resolveSoldout(
-            postback.decision,
-            postback.token,
-            actor,
-            event.webhookEventId,
-            correlationId,
-            deps,
-          )
-          : await resolveRevert(
-            postback.decision,
-            postback.token,
-            actor,
-            event.webhookEventId,
-            correlationId,
-            deps,
-          );
-        await deliver(reply);
-        continue;
-      }
-
-      const parsed = parseLineCommand(event.message.text);
-      if (!parsed.ok) {
-        await deliver({ kind: "text", text: parseErrorText(parsed.code) });
-        continue;
-      }
-      if (parsed.command.type === "soldout") {
-        await deliver(
-          await prepareSoldout(
-            parsed.command,
-            actor,
-            event.webhookEventId,
-            deps.confirmationEnabled,
-            deps,
-          ),
-        );
-        continue;
-      }
-      if (parsed.command.type === "revert") {
-        await deliver(
-          await prepareRevert(actor, event.webhookEventId, deps),
-        );
-        continue;
-      }
-      const reply = await handleReadOnlyCommand(parsed.command, deps);
-      await deliver(typeof reply === "string" ? { kind: "text", text: reply } : reply);
+      await deliver(await prepareLineReply(event, deps, correlationId));
     } catch (error) {
       failures.push(error);
       if (claimed) {

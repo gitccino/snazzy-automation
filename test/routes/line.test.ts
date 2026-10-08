@@ -151,3 +151,29 @@ it.each([
 ] as const)("preserves publication trigger status %#", (result, expected) => {
   expect(toLineDocsTriggerResult(result)).toEqual(expected);
 });
+
+it("persists before acknowledging, deduplicates IDs, and returns 503 if persistence fails", async () => {
+  const { createTestEnv } = await import("../helpers/env");
+  const body = new TextEncoder().encode(JSON.stringify({ events: [{
+    type: "message", webhookEventId: "evt-durable", replyToken: "reply",
+    source: { type: "group", groupId: "CtestGroup", userId: "U1" },
+    message: { type: "text", id: "msg", text: "/help" },
+  }] }));
+  const signature = await sign(body, "secret");
+  const request = () => new Request("https://worker/line/webhook", {
+    method: "POST", headers: { "x-line-signature": signature }, body,
+  });
+  let finish!: () => void;
+  const createBatch = vi.fn().mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }))
+    .mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("unavailable"));
+  const env = { ...testEnv(), ...createTestEnv(), LINE_CHANNEL_SECRET: "secret", LINE_COMMAND_WORKFLOW: { createBatch } } as unknown as import("../../src/env").Env;
+  let acknowledged = false;
+  const first = handleLineRoute(request(), env, immediateContext).then(response => { acknowledged = true; return response; });
+  await vi.waitFor(() => expect(createBatch).toHaveBeenCalledTimes(1));
+  expect(acknowledged).toBe(false);
+  finish();
+  expect((await first).status).toBe(200);
+  expect((await handleLineRoute(request(), env, immediateContext)).status).toBe(200);
+  expect(createBatch.mock.calls[0]![0]).toEqual(createBatch.mock.calls[1]![0]);
+  expect((await handleLineRoute(request(), env, immediateContext)).status).toBe(503);
+});

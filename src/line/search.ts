@@ -32,6 +32,7 @@ export type DocsTriggerResult =
 
 export interface ReadOnlyDeps {
   publicBaseUrl: string;
+  retryTransientErrors?: boolean;
   inventory: Pick<InventoryClient, "findByProductId" | "listSalesForDay">;
   clock: Clock;
   triggerUpload(): Promise<UploadTriggerResult>;
@@ -253,7 +254,7 @@ export async function handleReadOnlyCommand(
       const products = await deps.inventory.listSalesForDay(date);
       return dailySalesReportCard(products, date, command.page, date === today, deps.publicBaseUrl);
     } catch (error) {
-      if (!(error instanceof OperationalError)) throw error;
+      if (!(error instanceof OperationalError) || (deps.retryTransientErrors && error.retryable)) throw error;
       createLogger({ component: "line_report" }).error("Daily sales report failed", { code: error.code, detail: error.message, retryable: error.retryable, reportDate: date });
       if (["airtable_inventory_report_invalid_record", "sales_report_invalid_total"].includes(error.code)) {
         return reportDataWarning;
@@ -267,7 +268,13 @@ export async function handleReadOnlyCommand(
     const product = await deps.inventory.findByProductId(command.productId);
     return product ? searchCard(product, deps.publicBaseUrl) : notFoundText(command.productId);
   }
-  if (command.type === "upload") return uploadResultReply(await deps.triggerUpload(), deps.publicBaseUrl);
+  if (command.type === "upload") {
+    const result = await deps.triggerUpload();
+    if (deps.retryTransientErrors && (result.status === "workflow_start_failed" || result.status === "import_trigger_failed")) {
+      throw new OperationalError(result.status, "Import trigger failed", true);
+    }
+    return uploadResultReply(result, deps.publicBaseUrl);
+  }
   try {
     const result = command.publicationDate
       ? await deps.triggerDocs(command.publicationDate)

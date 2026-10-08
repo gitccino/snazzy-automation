@@ -237,3 +237,21 @@ describe("line client", () => {
     });
   });
 });
+
+it("delivers delayed replies by push with a retry key and accepts an already-accepted request", async () => {
+  let requestUrl: unknown;
+  let requestInit: RequestInit | undefined;
+  const client = createLineClient({
+    channelAccessToken: "token",
+    pushReplies: { groupId: "C1", retryKey: "11111111-1111-4111-8111-111111111111" },
+    fetch: async (url, init) => {
+      requestUrl = url;
+      requestInit = init;
+      return new Response(null, { status: 409, headers: { "x-line-accepted-request-id": "accepted" } });
+    },
+  });
+  await client.replyText("expired-reply-token", "success");
+  expect(requestUrl).toBe("https://api.line.me/v2/bot/message/push");
+  expect(new Headers(requestInit?.headers).get("X-Line-Retry-Key")).toBe("11111111-1111-4111-8111-111111111111");
+  expect(JSON.parse(String(requestInit?.body))).toEqual({ to: "C1", messages: [{ type: "text", text: "success" }] });
+});

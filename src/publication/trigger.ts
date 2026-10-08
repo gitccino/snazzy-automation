@@ -34,10 +34,11 @@ export async function handleDocsTrigger(
   trigger: "cron" | "line" | "admin",
   clock: Clock = { now: () => new Date() },
   publicationDate?: string,
+  fetcher: typeof fetch = fetch.bind(globalThis),
 ): Promise<DocsTriggerResult> {
   const config = parseConfig(env.APP_CONFIG_JSON);
   const run = await findPublicationRunForDate(
-    fetch.bind(globalThis), config, env.AIRTABLE_TOKEN, publicationDate ?? todayBangkokDate(clock),
+    fetcher, config, env.AIRTABLE_TOKEN, publicationDate ?? todayBangkokDate(clock),
   );
   if (!run || (run.status !== "Ready" && run.status !== "Failed")) {
     if (run && trigger === "line" && run.status === "Generated") return { status: "already_generated", publicationRunId: run.airtableRunId };
