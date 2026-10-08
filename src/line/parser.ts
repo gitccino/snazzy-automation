@@ -9,19 +9,26 @@ const PRICE = new RegExp(
 const PRICE_LABEL = /(?<![A-Za-z])(?:THB|baht)(?![A-Za-z])|บาท|ราคา/i;
 const SALE_PRICE = new RegExp(`^ราคาขาย\\s*(${PRICE_NUMBER})(?:\\s*${PRICE_CURRENCY})?(?=\\s|$)`, "i");
 
-function extractProductIds(text: string): { values: string[]; malformed: boolean } {
-  // Ignore emoji decoration at token edges; emoji inside an ID remains invalid.
-  const undecorated = text.replace(/(?<!\S)[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\uFE0F\u200D]+|[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\uFE0F\u200D]+(?!\S)/gu, "");
+function extractProductIds(text: string): { values: string[]; malformed: boolean; priceText: string } {
+  // Ignore edge emoji while preserving positions; emoji inside an ID remains invalid.
+  const undecorated = text.replace(/(?<!\S)[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\uFE0F\u200D]+|[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\uFE0F\u200D]+(?!\S)/gu, decoration => " ".repeat(decoration.length));
   // Validate entire ID candidates, including additional malformed IDs, not numeric prefixes.
-  const candidates = Array.from(undecorated.matchAll(/(?<!\S)A(?:-\S*|\d\S*|\s+\d\S*)|รหัส(?:สินค้า)?\s+\S+/gi), match => match[0]);
+  const candidates = Array.from(undecorated.matchAll(/(?<!\S)A(?:-\S*|\d\S*|\s+\d\S*)|รหัส(?:สินค้า)?\s+\S+/gi));
   const values: string[] = [];
   let malformed = false;
+  let priceText = text;
   for (const candidate of candidates) {
-    const match = /^(?:A-?([1-9]\d*)|รหัส(?:สินค้า)?\s+(?:A-?)?([1-9]\d*))$/i.exec(candidate);
+    const match = /^(?:A-?([1-9]\d*)|รหัส(?:สินค้า)?\s+(?:A-?)?([1-9]\d*))$/i.exec(candidate[0]);
     if (match === null) malformed = true;
-    else values.push(`A-${match[1] ?? match[2]}`);
+    else {
+      values.push(`A-${match[1] ?? match[2]}`);
+      // Mask only this occurrence: an equal number elsewhere may be the price.
+      priceText = priceText.slice(0, candidate.index)
+        + " ".repeat(candidate[0].length)
+        + priceText.slice(candidate.index + candidate[0].length);
+    }
   }
-  return { values, malformed };
+  return { values, malformed, priceText };
 }
 
 function extractPrices(text: string): { values: number[]; malformed: boolean; ambiguous: boolean } {
@@ -113,7 +120,7 @@ export function parseLineCommand(input: string): ParseResult {
     if (ids.malformed) return { ok: false, code: "invalid_product_id" };
     if (ids.values.length === 0) return { ok: false, code: "missing_product_id" };
     if (ids.values.length > 1) return { ok: false, code: "multiple_product_ids" };
-    const prices = extractPrices(body);
+    const prices = extractPrices(ids.priceText);
     if (prices.malformed) return { ok: false, code: "invalid_price" };
     if (prices.ambiguous) return { ok: false, code: "multiple_prices" };
     if (prices.values.length === 0) return { ok: false, code: "missing_price" };
