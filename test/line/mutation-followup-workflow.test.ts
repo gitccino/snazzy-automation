@@ -25,3 +25,18 @@ it('records unresolved monitoring and attempts only one diagnostic notification'
     markEnded:async state=>{calls.push(state);},now:()=>0});
   expect(calls).toEqual(['unresolved','notice']);
 });
+
+it('continues after an exhausted check failure and uses the original registration time', async () => {
+  let currentTime=90000;
+  let checks=0;
+  const dates:number[]=[];
+  const step={do:async (_n:string,o:unknown,f?:()=>unknown)=>await(typeof o==='function'?o():f!()),sleepUntil:async (_n:string,date:Date)=>{dates.push(date.getTime());currentTime=Math.max(currentTime,date.getTime());}};
+  const markEnded=vi.fn();
+  await runMutationFollowup(step as unknown as WorkflowStep,{
+    registeredAt:0,now:()=>currentTime,check:async()=>{checks++;if(checks===1)throw Error('exhausted outage');return {status:'unchanged'};},
+    notify:vi.fn(),markEnded,
+  });
+  expect(dates).toEqual([30000,60000,300000]);
+  expect(checks).toBe(3);
+  expect(markEnded).toHaveBeenCalledWith('ended');
+});
