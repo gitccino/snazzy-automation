@@ -17,11 +17,12 @@ export interface LineRepository {
   finalizeAction(input: Omit<ReversibleLineAction, "id" | "createdAt" | "revertedByActionId"> & {
     applyEventId: string;
     targetActionId: string | null;
+    recoveryWorkflowId?: string;
   }): Promise<ReversibleLineAction>;
   latestReversible(groupId: string): Promise<ReversibleLineAction | null>;
 }
 
-function parsePending(row: Record<string, unknown>): PendingLineCommand {
+export function parsePending(row: Record<string, unknown>): PendingLineCommand {
   return {
     token: String(row.token), sourceEventId: String(row.source_event_id), applyEventId: row.apply_event_id === null ? null : String(row.apply_event_id),
     kind: row.kind as PendingLineCommand["kind"], status: row.status as PendingLineCommand["status"],
@@ -32,7 +33,7 @@ function parsePending(row: Record<string, unknown>): PendingLineCommand {
   };
 }
 
-function parseAction(row: Record<string, unknown>): ReversibleLineAction {
+export function parseAction(row: Record<string, unknown>): ReversibleLineAction {
   return {
     id: String(row.id), pendingToken: String(row.pending_token), groupId: String(row.group_id), productId: String(row.product_id), kind: row.kind as "soldout" | "revert",
     before: JSON.parse(String(row.before_json)) as SaleValues, after: JSON.parse(String(row.after_json)) as SaleValues,
@@ -83,9 +84,10 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
           .bind(nowIso, command.productId, nowIso),
         db.prepare(`INSERT OR IGNORE INTO pending_line_commands
         (token, source_event_id, apply_event_id, kind, status, requester_user_id, group_id, product_id, sold_price, before_json, after_json, target_action_id, expires_at, created_at)
-        VALUES (?, ?, NULL, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        SELECT ?, ?, NULL, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE NOT EXISTS (SELECT 1 FROM line_product_control WHERE product_id = ?)`)
         .bind(command.token, command.sourceEventId, command.kind, command.requesterUserId, command.groupId, command.productId, command.soldPrice,
-          JSON.stringify(command.before), JSON.stringify(command.after), command.targetActionId, command.expiresAt, nowIso),
+          JSON.stringify(command.before), JSON.stringify(command.after), command.targetActionId, command.expiresAt, nowIso, command.productId),
       ]);
       return result!.meta.changes === 1 ? { ...command, status: "pending", applyEventId: null } : null;
     },
@@ -102,6 +104,7 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
         .bind(nowIso, token, groupId, kind, nowIso).run();
       const row = await db.prepare(`UPDATE pending_line_commands SET status = 'applying', apply_event_id = ?
         WHERE token = ? AND group_id = ? AND kind = ?
+          AND NOT EXISTS (SELECT 1 FROM line_product_control WHERE product_id = pending_line_commands.product_id)
           AND ((status = 'applying' AND apply_event_id = ?)
             OR (status = 'pending' AND expires_at > ?
               AND (kind != 'revert' OR target_action_id = (
@@ -190,8 +193,11 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
           `INSERT INTO line_actions
              (id, pending_token, group_id, product_id, kind,
               before_json, after_json, actor, correlation_id,
-              created_at, reverted_by_action_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+              created_at, reverted_by_action_id, commit_seq)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
+             (SELECT COALESCE(MAX(commit_seq),0) + 1 FROM line_actions)
+           WHERE EXISTS (SELECT 1 FROM pending_line_commands WHERE token = ? AND status = 'applying' AND apply_event_id = ?)
+             AND NOT EXISTS (SELECT 1 FROM line_product_control WHERE product_id = ? AND owner_workflow_id != ?)`,
         ).bind(
           action.id,
           action.pendingToken,
@@ -202,24 +208,24 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
           JSON.stringify(action.after),
           action.actor,
           action.correlationId,
-          action.createdAt,
+          action.createdAt, action.pendingToken, input.applyEventId, action.productId, input.recoveryWorkflowId ?? "",
         ),
         db.prepare(
           `UPDATE pending_line_commands
            SET status = 'approved', resolved_at = ?, resolver_actor = ?
            WHERE token = ? AND status = 'applying'
-             AND apply_event_id = ?`,
+             AND apply_event_id = ? AND EXISTS (SELECT 1 FROM line_actions WHERE id = ?)`,
         ).bind(
           action.createdAt,
           action.actor,
           action.pendingToken,
-          input.applyEventId,
+          input.applyEventId, action.id,
         ),
         db.prepare(
           `INSERT INTO audit_events
              (id, correlation_id, actor, action,
               before_value, after_value, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM line_actions WHERE id = ?)`,
         ).bind(
           ids.next(),
           action.correlationId,
@@ -229,7 +235,7 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
             : "line_revert",
           JSON.stringify(action.before),
           JSON.stringify(action.after),
-          action.createdAt,
+          action.createdAt, action.id,
         ),
       ];
       if (pending.targetActionId !== null) {
@@ -239,11 +245,11 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
           db.prepare(
             `UPDATE line_actions SET reverted_by_action_id = ?
              WHERE id = ? AND group_id = ?
-               AND reverted_by_action_id IS NULL`,
+               AND reverted_by_action_id IS NULL AND EXISTS (SELECT 1 FROM line_actions WHERE id = ?)`,
           ).bind(
             action.id,
             pending.targetActionId,
-            pending.groupId,
+            pending.groupId, action.id,
           ),
         );
       }
@@ -256,7 +262,9 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
         if (concurrent) return parseAction(concurrent);
         throw error;
       }
-      return action;
+      const saved = await db.prepare("SELECT * FROM line_actions WHERE pending_token = ?").bind(input.pendingToken).first<Record<string, unknown>>();
+      if (!saved) throw new Error("pending command is not owned by this event");
+      return parseAction(saved);
     },
     async latestReversible(groupId) {
       const row = await db.prepare(`SELECT * FROM line_actions WHERE group_id = ? AND kind = 'soldout' AND reverted_by_action_id IS NULL ORDER BY created_at DESC, rowid DESC LIMIT 1`)
