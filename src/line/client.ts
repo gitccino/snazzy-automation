@@ -24,6 +24,7 @@ export interface LineClient {
 export function createLineClient(config: {
   channelAccessToken: string;
   fetch: Fetcher;
+  pushReplies?: { groupId: string; retryKey: string };
 }): LineClient {
   const headers = {
     Authorization: `Bearer ${config.channelAccessToken}`,
@@ -31,11 +32,17 @@ export function createLineClient(config: {
   };
 
   async function send(url: string, body: unknown, code: string): Promise<void> {
+    if (config.pushReplies && url.endsWith("/reply")) {
+      url = "https://api.line.me/v2/bot/message/push";
+      body = { to: config.pushReplies.groupId, messages: (body as { messages: unknown }).messages };
+    }
+    const retryKey = config.pushReplies?.retryKey;
     const response = await config.fetch(url, {
       method: "POST",
-      headers,
+      headers: retryKey ? { ...headers, "X-Line-Retry-Key": retryKey } : headers,
       body: JSON.stringify(body),
     });
+    if (retryKey && response.status === 409 && response.headers.has("x-line-accepted-request-id")) return;
     if (!response.ok) {
       throw new OperationalError(
         code,

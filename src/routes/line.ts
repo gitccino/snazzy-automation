@@ -8,7 +8,8 @@ import { createLineClient } from "../line/client";
 import type { DocsTriggerResult, UploadTriggerResult } from "../line/search";
 import { verifyLineSignature } from "../line/signature";
 import { parseSupportedLineEvents, type SupportedLineEvent } from "../line/types";
-import { processLineEvents } from "../line/webhook";
+import type { WebhookDeps } from "../line/webhook";
+import { OperationalError } from "../shared/errors";
 import {
   handleDocsTrigger,
   type DocsTriggerResult as PublicationDocsTriggerResult,
@@ -62,14 +63,42 @@ export async function handleLineRoute(
   }
 
   const config = parseConfig(env.APP_CONFIG_JSON);
+  const accepted = events.filter(event => event.source.groupId === config.lineAllowedGroupId);
+  try {
+    // createBatch is idempotent while an instance is retained. Persist before acknowledging LINE.
+    for (let offset = 0; offset < accepted.length; offset += 100) {
+      const batch = await Promise.all(accepted.slice(offset, offset + 100).map(async event => {
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(event.webhookEventId));
+        const id = "line-" + Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+        return { id, params: { event } };
+      }));
+      await env.LINE_COMMAND_WORKFLOW.createBatch(batch);
+    }
+  } catch {
+    return new Response("command persistence failed", { status: 503 });
+  }
+  return new Response("ok");
+}
+
+export const fetchForLineCommand: typeof fetch = async (input, init) => {
+  try {
+    const timeout = AbortSignal.timeout(15_000);
+    return await fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout });
+  } catch {
+    throw new OperationalError("line_command_network_failed", "Provider network request failed", true);
+  }
+};
+
+export function createWebhookDeps(env: Env, requestId?: string): WebhookDeps {
+  const config = parseConfig(env.APP_CONFIG_JSON);
   const clock = { now: () => new Date() };
   const ids = { next: () => crypto.randomUUID() };
-  const fetcher = fetch.bind(globalThis);
+  const fetcher = fetchForLineCommand;
   const line = createLineClient({
     channelAccessToken: env.LINE_CHANNEL_ACCESS_TOKEN,
     fetch: fetcher,
   });
-  ctx.waitUntil(processLineEvents(events, {
+  return {
     publicBaseUrl: config.publicBaseUrl,
     allowedGroupId: config.lineAllowedGroupId,
     confirmationEnabled: config.soldoutConfirmationEnabled,
@@ -86,12 +115,11 @@ export async function handleLineRoute(
       now: clock.now,
     }),
     async triggerUpload() {
-      const response = await handleUploadTrigger(env, "line");
+      const response = await handleUploadTrigger(env, "line", requestId);
       return parseUploadTriggerResponse(await response.json());
     },
     triggerDocs(publicationDate) {
-      return handleDocsTrigger(env, "line", clock, publicationDate);
+      return handleDocsTrigger(env, "line", clock, publicationDate, fetcher);
     },
-  }));
-  return new Response("ok");
+  };
 }

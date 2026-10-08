@@ -14,6 +14,11 @@
       "name": "snazzy-publication-workflow-local",
       "binding": "PUBLICATION_WORKFLOW",
       "class_name": "PublicationWorkflow"
+    },
+    {
+      "binding": "LINE_COMMAND_WORKFLOW",
+      "name": "snazzy-line-command-local",
+      "class_name": "LineCommandWorkflow"
     }
   ],
   "d1_databases": [
@@ -70,6 +75,11 @@
           "binding": "PUBLICATION_WORKFLOW",
           "name": "snazzy-publication-staging",
           "class_name": "PublicationWorkflow"
+        },
+        {
+          "binding": "LINE_COMMAND_WORKFLOW",
+          "name": "snazzy-line-command-staging",
+          "class_name": "LineCommandWorkflow"
         }
       ]
     },
@@ -102,6 +112,11 @@
           "binding": "PUBLICATION_WORKFLOW",
           "name": "snazzy-publication-production",
           "class_name": "PublicationWorkflow"
+        },
+        {
+          "binding": "LINE_COMMAND_WORKFLOW",
+          "name": "snazzy-line-command-production",
+          "class_name": "LineCommandWorkflow"
         }
       ]
     }
