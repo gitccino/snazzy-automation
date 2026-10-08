@@ -12,9 +12,9 @@ Do not restart an old Workflow while another Workflow is recovering or repairing
 
 A PATCH attempt is saved as unknown before transmission. A 2xx response acknowledges it. Known rejection responses record rejected. A timeout, connection failure, ambiguous server error, or crash leaves unknown. Existing operations without attempt evidence are also uncertain.
 
-Before releasing an uncertain old operation, the Worker durably registers a follow-up Workflow. It checks at 30 seconds, 1 minute, and 5 minutes from registration. New successfully committed sales/reverts also attempt an immediate check. Later scheduled checks continue after an early unchanged result.
+Before releasing an uncertain old operation (including one reconciled as approved), the Worker durably registers a follow-up Workflow. It checks at 30 seconds, 1 minute, and 5 minutes from registration. New successfully committed sales/reverts also attempt an immediate check. Later scheduled checks continue after an early unchanged result.
 
-A repair occurs only when Airtable exactly matches a superseded operation's saved intended tuple and a newer committed action exists. Repair restores that newer action's entire tuple, including its original actor and date. It records request evidence and an audit entry, without creating another sale/revert action. Pending/applying confirmations or mutations exclude repair. Unresolved monitoring sends one warning using a persisted LINE retry key.
+A repair occurs only when Airtable exactly matches a monitored operation's intended tuple or an uncertain repair request's intended tuple, and a newer committed action exists. Each request captures the current action sequence before transmission. Repair restores that newer action's entire tuple, including its original actor and date. It records request evidence and an audit entry, without creating another sale/revert action. Pending/applying confirmations or mutations exclude repair. Unresolved monitoring sends one warning using a persisted LINE retry key. Registration keeps its Workflow ID in D1; recovery creates a fresh generation when the previous monitor has finished. An older generation cannot repair, end, or notify for its replacement.
 
 ## Read-only inspection
 
@@ -22,10 +22,10 @@ Use the relevant environment's D1 database. Replace the example token and Produc
 
 ```sql
 SELECT token, status, apply_event_id, workflow_id, mutation_actor,
-       resolution_reason, resolution_action_seq, monitoring_state
+       resolution_reason, resolution_action_seq, monitoring_state, monitor_workflow_id
 FROM pending_line_commands WHERE product_id = 'A-16' ORDER BY rowid;
 
-SELECT id, outcome, started_at, completed_at, response_category, intended_json
+SELECT id, outcome, started_at, completed_at, response_category, intended_action_seq, intended_json
 FROM line_mutation_attempts WHERE pending_token = 'example-token' ORDER BY rowid;
 
 SELECT * FROM line_product_control WHERE product_id = 'A-16';

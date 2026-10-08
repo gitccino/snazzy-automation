@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createLineMutationRepository } from "../db/line-mutation-repository";
-import { createMutationCoordinator, executionStatus, lineCommandWorkflowId } from "../line/mutation-recovery";
+import { createMutationCoordinator, registerMutationFollowup, executionStatus, lineCommandWorkflowId } from "../line/mutation-recovery";
 import { parseConfig } from "../config";
 import { createAuditLog } from "../db/audit";
 import { createLineRepository } from "../db/line-repository";
@@ -101,16 +101,23 @@ export function createWebhookDeps(env: Env, requestId?: string): WebhookDeps {
   });
   const repo = createLineRepository(env.DB,ids,clock);
   const inventory = createInventoryClient({baseId:config.airtableBaseId,tableId:config.airtableProductsTableId,token:env.AIRTABLE_TOKEN,fetch:fetcher,now:clock.now});
+  const mutationRepo = createLineMutationRepository(env.DB,clock);
   const mutation = createMutationCoordinator(requestId ?? "legacy-no-workflow",{
-    repo, inventory, ids, mutationRepo:createLineMutationRepository(env.DB,clock),
+    repo, inventory, ids, mutationRepo,
     async status(id) {
       if (id === "legacy-no-workflow") return "unknown";
       try { return executionStatus((await (await env.LINE_COMMAND_WORKFLOW.get(id)).status()).status); }
       catch { try { return executionStatus((await (await env.LINE_MUTATION_FOLLOWUP_WORKFLOW.get(id)).status()).status); } catch { return "unknown"; } }
     },
     async registerFollowup(params) {
-      const id = (await lineCommandWorkflowId(params.pendingToken)).replace("line-","line-followup-");
-      await env.LINE_MUTATION_FOLLOWUP_WORKFLOW.createBatch([{id,params:{...params,registeredAt:clock.now().getTime()}}]);
+      await registerMutationFollowup(params,{
+        mutationRepo,ids,now:()=>clock.now().getTime(),
+        async status(id) {
+          try { return executionStatus((await (await env.LINE_MUTATION_FOLLOWUP_WORKFLOW.get(id)).status()).status); }
+          catch { return "unknown"; }
+        },
+        create:(id,params)=>env.LINE_MUTATION_FOLLOWUP_WORKFLOW.createBatch([{id,params}]),
+      });
     },
   });
   return {

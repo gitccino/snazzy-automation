@@ -103,7 +103,7 @@ export async function sendCommandReply(replyToken: string, reply: CommandReply, 
     await line.replyFlex(replyToken, reply.text, addRecoveryWarning(confirmationCard(reply, publicBaseUrl),reply.recoveryWarning));
     return;
   }
-  await line.replyButtons(replyToken, reply.text, reply.text, [
+  await line.replyButtons(replyToken, reply.text, reply.recoveryWarning ? `${reply.recoveryWarning}\n${reply.text}` : reply.text, [
     { label: "ยืนยัน", data: reply.approveData, style: "primary" },
     { label: "ยกเลิก", data: reply.rejectData, style: "secondary" },
   ]);

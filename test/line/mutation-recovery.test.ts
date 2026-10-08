@@ -47,7 +47,7 @@ it.each(['intended', 'original', 'conflict', 'missing'] as const)('recovers term
   const row = await db.prepare('SELECT status,resolution_reason FROM pending_line_commands WHERE token = ?').bind(pending.token).first();
   expect(row).toEqual({status: mode === 'intended' ? 'approved' : 'failed', resolution_reason: mode === 'intended' ? null : mode === 'original' ? 'replaced' : mode === 'missing' ? 'missing_product' : 'conflict'});
   expect(inventory.updateSaleValues).not.toHaveBeenCalled();
-  expect(monitorRegistered).toBe(mode !== 'intended');
+  expect(monitorRegistered).toBe(true);
   expect(await mutations.control(pending.productId)).toBeNull();
   if (mode === 'intended') expect(await db.prepare('SELECT actor,correlation_id FROM line_actions WHERE pending_token = ?').bind(pending.token).first()).toEqual({actor:'Mint (U1)',correlation_id:'original-corr'});
 });
@@ -202,4 +202,50 @@ it('reconciles a successful PATCH even when saving its acknowledgement failed', 
   await recoverAbandonedMutation(pending.productId,'C1','recover',{mutationRepo:mutations,repo,inventory,ids:sequentialIdGenerator('recover'),status:async()=>'terminal',registerFollowup:vi.fn()});
   expect((await mutations.operation(pending.token))?.status).toBe('approved');
   expect((await db.prepare('SELECT COUNT(*) AS n FROM line_actions WHERE pending_token = ?').bind(pending.token).first<{n:number}>())?.n).toBe(1);
+});
+
+
+it('recognizes a delayed repair PATCH after a newer confirmed revert', async () => {
+  const {pending,mutations,repo,owner} = await mutationFixture();
+  await mutations.setOperationOwner(pending.token,owner,'Mint (U1)','old');
+  await mutations.acquire(pending.productId,'recovery','recovery',pending.token);
+  await mutations.markMonitoring(pending.token,'registered');
+  await mutations.failOwned(pending.token,'recovery','replaced');
+  await mutations.release(pending.productId,'recovery');
+  const sale = {...pending,token:pending.token+'sale',sourceEventId:pending.sourceEventId+'sale',after:{...pending.after,soldPrice:13000}};
+  await repo.createPending(sale);
+  await repo.claimPending(sale.token,'C1','soldout','sale','2026-10-09T07:00:00.000Z');
+  const action=await repo.finalizeAction({pendingToken:sale.token,applyEventId:'sale',targetActionId:null,groupId:'C1',productId:pending.productId,kind:'soldout',before:sale.before,after:sale.after,actor:'Beam',correlationId:'sale'});
+  let current:InventoryProduct={...pending.after,productId:pending.productId,recordId:'rec16',uploadDate:null,airtableUrl:'https://airtable.example'};
+  let rejectRepair=true;
+  const deps={repo,mutationRepo:mutations,ids:sequentialIdGenerator(pending.token+'repair'),status:async()=>'terminal' as const,registerFollowup:vi.fn(),
+    inventory:{findByProductId:async()=>current,listSalesForDay:vi.fn(),updateSaleValues:async (_id:string,values:typeof pending.after)=>{if(rejectRepair)throw Error('timeout');current={...current,...values};}}};
+  await expect(checkLateMutation({pendingToken:pending.token,productId:pending.productId},'monitor',deps)).rejects.toThrow('timeout');
+  await mutations.release(pending.productId,'monitor');
+  const revert={...pending,token:pending.token+'revert',sourceEventId:pending.sourceEventId+'revert',kind:'revert' as const,targetActionId:action.id,before:sale.after,after:pending.before,soldPrice:null};
+  await repo.createPending(revert);
+  await repo.claimPending(revert.token,'C1','revert','revert','2026-10-09T07:00:00.000Z');
+  await repo.finalizeAction({pendingToken:revert.token,applyEventId:'revert',targetActionId:action.id,groupId:'C1',productId:pending.productId,kind:'revert',before:revert.before,after:revert.after,actor:'Beam',correlationId:'revert'});
+  current={...current,...sale.after}; // The timed-out repair arrives after the confirmed revert.
+  rejectRepair=false;
+  expect((await checkLateMutation({pendingToken:pending.token,productId:pending.productId},'next-monitor',deps)).status).toBe('repaired');
+  expect(current.inventoryStatus).toBe('In');
+});
+
+it('keeps approved uncertain requests recognizable after a newer revert', async () => {
+  const {pending,mutations,repo,owner}=await mutationFixture();
+  await mutations.setOperationOwner(pending.token,owner,'Mint','original');
+  let current:InventoryProduct={...pending.after,productId:pending.productId,recordId:'rec16',uploadDate:null,airtableUrl:'https://airtable.example'};
+  const registerFollowup=vi.fn();
+  const deps={repo,mutationRepo:mutations,ids:sequentialIdGenerator(pending.token+'approved'),status:async()=>'terminal' as const,registerFollowup,
+    inventory:{findByProductId:async()=>current,listSalesForDay:vi.fn(),updateSaleValues:async (_id:string,values:typeof pending.after)=>{current={...current,...values};}}};
+  await recoverAbandonedMutation(pending.productId,'C1','recover',deps);
+  expect(registerFollowup).toHaveBeenCalledOnce();
+  const sale=(await mutations.latestConfirmed(pending.productId))!;
+  const revert={...pending,token:pending.token+'revert',sourceEventId:pending.sourceEventId+'revert',kind:'revert' as const,targetActionId:sale.id,before:pending.after,after:pending.before,soldPrice:null};
+  await repo.createPending(revert);
+  await repo.claimPending(revert.token,'C1','revert','revert','2026-10-09T07:00:00.000Z');
+  await repo.finalizeAction({pendingToken:revert.token,applyEventId:'revert',targetActionId:sale.id,groupId:'C1',productId:pending.productId,kind:'revert',before:revert.before,after:revert.after,actor:'Beam',correlationId:'revert'});
+  expect((await checkLateMutation({pendingToken:pending.token,productId:pending.productId},'monitor',deps)).status).toBe('repaired');
+  expect(current.inventoryStatus).toBe('In');
 });

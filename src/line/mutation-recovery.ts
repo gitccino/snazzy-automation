@@ -21,7 +21,7 @@ export async function writeTrackedSale(pending: PendingLineCommand, recordId: st
 
 import type { LineRepository } from '../db/line-repository';
 import { matchesSaleValues } from './airtable-inventory';
-export type FollowupParams = { pendingToken: string; productId: string; registeredAt?: number };
+export type FollowupParams = { pendingToken: string; productId: string; registeredAt?: number; monitorId?: string };
 export type RecoveryResult = { status: 'ready'; warning?: string } | { status: 'busy' };
 export type ExecutionStatus = 'active' | 'terminal' | 'unknown';
 export interface RecoveryDeps {
@@ -31,6 +31,27 @@ export interface RecoveryDeps {
   ids: IdGenerator;
   status(workflowId: string): Promise<ExecutionStatus>;
   registerFollowup(params: FollowupParams): Promise<void>;
+}
+
+export async function registerMutationFollowup(params: FollowupParams, deps: {
+  mutationRepo: LineMutationRepository; ids: IdGenerator; now(): number;
+  status(id:string): Promise<ExecutionStatus>; create(id:string,params:FollowupParams):Promise<unknown>;
+}) {
+  const context = await deps.mutationRepo.context(params.pendingToken);
+  if (!context) throw new OperationalError('line_monitor_operation_missing','Cannot register missing operation',false);
+  let id = context.monitor_workflow_id;
+  if (!id || await deps.status(id) === 'terminal') {
+    const next = 'line-followup-' + deps.ids.next();
+    if (!await deps.mutationRepo.setMonitor(params.pendingToken,id,next)) {
+      throw new OperationalError('line_monitor_owner_changed','Monitor generation changed',true);
+    }
+    id = next;
+  }
+  // createBatch is idempotent for this persisted ID, including a failed first registration.
+  await deps.create(id,{...params,monitorId:id,registeredAt:deps.now()});
+  if (await deps.status(id) !== 'active') {
+    throw new OperationalError('line_monitor_execution_unknown','Cannot verify live monitor',true);
+  }
 }
 
 export async function lineCommandWorkflowId(eventId: string) {
@@ -75,6 +96,10 @@ export async function recoverAbandonedMutation(productId: string, groupId: strin
   if (!await acquireControl(productId, owner, 'recovery', pending.token, deps)) return { status: 'busy' };
   const current = await deps.inventory.findByProductId(productId);
   let warning: string | undefined;
+  if (await deps.mutationRepo.hasUnknownAttempt(pending.token)) {
+    await deps.registerFollowup({pendingToken:pending.token,productId});
+    await deps.mutationRepo.markMonitoring(pending.token, 'registered');
+  }
   if (current && validSaleValues(pending.after) && matchesSaleValues(current, pending.after)) {
     const actor = context?.mutation_actor ?? (pending.kind === 'soldout' ? pending.after.soldBy : null);
     if (!actor) throw new OperationalError('line_recovery_actor_unknown', 'Original mutation actor is unknown', false);
@@ -84,10 +109,6 @@ export async function recoverAbandonedMutation(productId: string, groupId: strin
       correlationId: context?.mutation_correlation_id ?? pending.applyEventId, recoveryWorkflowId: owner });
   } else {
     const reason = !current ? 'missing_product' : matchesSaleValues(current, pending.before) ? 'replaced' : 'conflict';
-    if (await deps.mutationRepo.hasUnknownAttempt(pending.token)) {
-      await deps.registerFollowup({pendingToken:pending.token,productId});
-      await deps.mutationRepo.markMonitoring(pending.token, 'registered');
-    }
     if (!await deps.mutationRepo.failOwned(pending.token, owner, reason)) throw new OperationalError('line_recovery_owner_changed', 'Recovery owner changed', true);
     await deps.mutationRepo.audit(pending.token, 'line_mutation_' + reason, pending.before, pending.after, pending.token + '-recovery');
     if (reason === 'conflict') warning = recoveryConflictText(productId);
@@ -98,11 +119,13 @@ export async function recoverAbandonedMutation(productId: string, groupId: strin
 
 export type RepairResult = { status: 'unchanged' | 'repaired' | 'busy' | 'unresolved' };
 export async function checkLateMutation(params: FollowupParams, owner: string, deps: RecoveryDeps): Promise<RepairResult> {
+  if (params.monitorId && (await deps.mutationRepo.context(params.pendingToken))?.monitor_workflow_id !== params.monitorId) return {status:'unchanged'};
   if (!await acquireControl(params.productId, owner, 'repair', params.pendingToken, deps)) return {status:'busy'};
   const current = await deps.inventory.findByProductId(params.productId);
   const latest = await deps.mutationRepo.latestConfirmed(params.productId);
   const superseded = await deps.mutationRepo.superseded(params.productId);
-  const late = current && superseded.find(old => validSaleValues(old.after) && matchesSaleValues(current,old.after));
+  const intents = [...await deps.mutationRepo.uncertainIntents(params.productId), ...superseded];
+  const late = current && intents.find(old => validSaleValues(old.after) && matchesSaleValues(current,old.after));
   if (!current || (!late && !(latest && matchesSaleValues(current,latest.after)) && !superseded.some(old=>matchesSaleValues(current,old.before)))) {
     await deps.mutationRepo.release(params.productId,owner);
     return {status:'unresolved'};
@@ -138,6 +161,10 @@ export function createMutationCoordinator(owner: string, deps: RecoveryDeps): Mu
     recover: (productId,groupId) => recoverAbandonedMutation(productId,groupId,owner,deps),
     async write(pending,recordId,actor,correlationId) {
       await deps.mutationRepo.setOperationOwner(pending.token,owner,actor,correlationId);
+      if (await deps.mutationRepo.hasUnknownAttempt(pending.token,false)) {
+        await deps.registerFollowup({pendingToken:pending.token,productId:pending.productId});
+        await deps.mutationRepo.markMonitoring(pending.token,'registered');
+      }
       await writeTrackedSale(pending,recordId,owner,deps);
     },
     async committed(productId) {

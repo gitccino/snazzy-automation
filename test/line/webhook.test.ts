@@ -170,3 +170,12 @@ it("delivers report Flex replies without inventory mutation or pipeline executio
   expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
   expect(d.triggerUpload).not.toHaveBeenCalled(); expect(d.triggerDocs).not.toHaveBeenCalled();
 });
+
+it('retains a recovery conflict warning in the long confirmation reply', async()=>{
+  const {sendCommandReply}=await import('../../src/line/webhook');
+  const d=deps();
+  const text='x'.repeat(2001);
+  const warning='⚠️ ตรวจสอบข้อมูลสินค้า';
+  await sendCommandReply('reply',{kind:'buttons',text,approveData:'approve',rejectData:'reject',recoveryWarning:warning},d.line,'https://example.com');
+  expect(d.line.replyButtons).toHaveBeenCalledWith('reply',text,warning+'\n'+text,expect.any(Array));
+});

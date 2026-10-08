@@ -48,9 +48,12 @@ export class LineMutationFollowupWorkflow extends WorkflowEntrypoint<Env, Follow
         },
         registerFollowup:async()=>{throw new Error('Follow-up cannot register another monitor');},
       }),
-      markEnded:state=>mutationRepo.markMonitoring(event.payload.pendingToken,state),
-      notify:key=>createLineClient({channelAccessToken:this.env.LINE_CHANNEL_ACCESS_TOKEN,fetch:fetchForLineCommand,pushReplies:{groupId:config.lineAllowedGroupId,retryKey:key}})
-        .pushMessage(config.lineAllowedGroupId,recoveryConflictText(event.payload.productId)),
+      markEnded:state=>mutationRepo.markMonitoring(event.payload.pendingToken,state,event.instanceId),
+      notify:async key=>{
+        if ((await mutationRepo.context(event.payload.pendingToken))?.monitor_workflow_id !== event.instanceId) return;
+        await createLineClient({channelAccessToken:this.env.LINE_CHANNEL_ACCESS_TOKEN,fetch:fetchForLineCommand,pushReplies:{groupId:config.lineAllowedGroupId,retryKey:key}})
+        .pushMessage(config.lineAllowedGroupId,recoveryConflictText(event.payload.productId));
+      },
     });
   }
 }

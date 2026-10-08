@@ -7,7 +7,7 @@ CREATE TABLE pending_line_commands_recovery (
   before_json TEXT NOT NULL, after_json TEXT NOT NULL, target_action_id TEXT,
   expires_at TEXT NOT NULL, created_at TEXT NOT NULL, resolved_at TEXT, resolver_actor TEXT,
   workflow_id TEXT, mutation_actor TEXT, mutation_correlation_id TEXT,
-  resolution_reason TEXT, resolution_action_seq INTEGER, monitoring_state TEXT CHECK(monitoring_state IN ('registered','ended','unresolved'))
+  monitor_workflow_id TEXT, resolution_reason TEXT, resolution_action_seq INTEGER, monitoring_state TEXT CHECK(monitoring_state IN ('registered','ended','unresolved'))
 );
 INSERT INTO pending_line_commands_recovery
   (rowid, token, source_event_id, apply_event_id, kind, status, requester_user_id, group_id,
@@ -27,7 +27,7 @@ UPDATE line_actions SET commit_seq = rowid;
 CREATE UNIQUE INDEX idx_line_action_commit_sequence ON line_actions(product_id,commit_seq);
 CREATE TABLE line_mutation_attempts (
   id TEXT PRIMARY KEY, pending_token TEXT NOT NULL, record_id TEXT NOT NULL,
-  intended_json TEXT NOT NULL, outcome TEXT NOT NULL DEFAULT 'unknown'
+  intended_action_seq INTEGER NOT NULL DEFAULT 0, intended_json TEXT NOT NULL, outcome TEXT NOT NULL DEFAULT 'unknown'
     CHECK(outcome IN ('unknown','acknowledged','rejected')),
   started_at TEXT NOT NULL, completed_at TEXT, response_category TEXT
 );

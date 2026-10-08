@@ -15,8 +15,8 @@ export function createLineMutationRepository(db: D1Database, clock: Clock) {
       return row ? parsePending(row) : null;
     },
     async context(token: string) {
-      return db.prepare('SELECT workflow_id, mutation_actor, mutation_correlation_id, monitoring_state FROM pending_line_commands WHERE token = ?')
-        .bind(token).first<{ workflow_id: string | null; mutation_actor: string | null; mutation_correlation_id: string | null; monitoring_state: string | null }>();
+      return db.prepare('SELECT workflow_id, mutation_actor, mutation_correlation_id, monitoring_state, monitor_workflow_id FROM pending_line_commands WHERE token = ?')
+        .bind(token).first<{ workflow_id: string | null; mutation_actor: string | null; mutation_correlation_id: string | null; monitoring_state: string | null; monitor_workflow_id: string | null }>();
     },
     async setOperationOwner(token: string, owner: string, actor?: string, correlationId?: string) {
       const result = await db.prepare(`UPDATE pending_line_commands SET workflow_id = ?,
@@ -56,17 +56,18 @@ export function createLineMutationRepository(db: D1Database, clock: Clock) {
     },
     async beginAttempt(input: { id: string; token: string; recordId: string; intended: SaleValues; owner: string; repair?: boolean }) {
       await this.assertWritable(input.token, input.owner, input.repair);
-      await db.prepare(`INSERT INTO line_mutation_attempts (id,pending_token,record_id,intended_json,started_at) VALUES (?,?,?,?,?)`)
-        .bind(input.id, input.token, input.recordId, JSON.stringify(input.intended), now()).run();
+      await db.prepare(`INSERT INTO line_mutation_attempts (id,pending_token,record_id,intended_json,started_at,intended_action_seq)
+        SELECT ?,?,?,?,?,COALESCE(MAX(a.commit_seq),0) FROM line_actions a WHERE a.product_id = (SELECT product_id FROM pending_line_commands WHERE token = ?)`)
+        .bind(input.id, input.token, input.recordId, JSON.stringify(input.intended), now(), input.token).run();
     },
     async finishAttempt(id: string, outcome: 'acknowledged' | 'rejected', category: string) {
       await db.prepare("UPDATE line_mutation_attempts SET outcome = ?, completed_at = ?, response_category = ? WHERE id = ? AND outcome = 'unknown'")
         .bind(outcome, now(), category, id).run();
     },
-    async hasUnknownAttempt(token: string) {
+    async hasUnknownAttempt(token: string, legacy = true) {
       const row = await db.prepare("SELECT COUNT(*) AS total, SUM(outcome = 'unknown') AS uncertain FROM line_mutation_attempts WHERE pending_token = ?")
         .bind(token).first<{total:number;uncertain:number|null}>();
-      return !row?.total || !!row.uncertain;
+      return (legacy && !row?.total) || !!row?.uncertain;
     },
     async failOwned(token: string, owner: string, reason: string) {
       return (await db.prepare(`UPDATE pending_line_commands SET status = 'failed', resolution_reason = ?, resolved_at = ?,
@@ -80,15 +81,26 @@ export function createLineMutationRepository(db: D1Database, clock: Clock) {
       return row ? { ...parseAction(row), commitSeq: Number(row.commit_seq) } : null;
     },
     async superseded(productId: string) {
-      const rows = await db.prepare("SELECT * FROM pending_line_commands WHERE product_id = ? AND status = 'failed' AND monitoring_state IS NOT NULL ORDER BY rowid")
+      const rows = await db.prepare("SELECT p.*, COALESCE(a.commit_seq,p.resolution_action_seq,0) AS baseline_seq FROM pending_line_commands p LEFT JOIN line_actions a ON a.pending_token = p.token WHERE p.product_id = ? AND p.status IN ('failed','approved') AND p.monitoring_state IS NOT NULL ORDER BY p.rowid")
         .bind(productId).all<Record<string, unknown>>();
-      return rows.results.map(row => ({ ...parsePending(row), resolutionSeq: Number(row.resolution_action_seq ?? 0) }));
+      return rows.results.map(row => ({ ...parsePending(row), resolutionSeq: Number(row.baseline_seq) }));
+    },
+    async uncertainIntents(productId: string) {
+      const rows = await db.prepare(`SELECT a.intended_json,a.intended_action_seq,p.* FROM line_mutation_attempts a
+        JOIN pending_line_commands p ON p.token = a.pending_token WHERE p.product_id = ? AND a.outcome = 'unknown'
+        AND p.status IN ('failed','approved') AND p.monitoring_state IS NOT NULL`)
+        .bind(productId).all<Record<string,unknown>>();
+      return rows.results.map(row=>({...parsePending(row),after:JSON.parse(String(row.intended_json)) as SaleValues,resolutionSeq:Number(row.intended_action_seq)}));
+    },
+    async setMonitor(token: string, expected: string | null, id: string) {
+      return (await db.prepare(`UPDATE pending_line_commands SET monitor_workflow_id = ?, monitoring_state = 'registered'
+        WHERE token = ? AND monitor_workflow_id IS ?`).bind(id,token,expected).run()).meta.changes === 1;
     },
     async monitors(productId: string) {
       return (await db.prepare("SELECT token FROM pending_line_commands WHERE product_id = ? AND monitoring_state = 'registered'").bind(productId).all<{token:string}>()).results;
     },
-    async markMonitoring(token: string, state: 'registered' | 'ended' | 'unresolved') {
-      await db.prepare('UPDATE pending_line_commands SET monitoring_state = ? WHERE token = ?').bind(state, token).run();
+    async markMonitoring(token: string, state: 'registered' | 'ended' | 'unresolved', monitorId?: string) {
+      await db.prepare('UPDATE pending_line_commands SET monitoring_state = ? WHERE token = ? AND (? IS NULL OR monitor_workflow_id = ?)').bind(state, token, monitorId ?? null, monitorId ?? null).run();
     },
     async audit(token: string, action: string, before: SaleValues, after: SaleValues, id: string) {
       await db.prepare(`INSERT OR IGNORE INTO audit_events (id,correlation_id,actor,action,before_value,after_value,created_at) VALUES (?,?, 'system',?,?,?,?)`)
