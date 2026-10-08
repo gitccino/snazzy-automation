@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { lineCommandWorkflowId } from "../line/mutation-recovery";
 import { parseConfig } from "../config";
 import { createAuditLog } from "../db/audit";
 import { createLineRepository } from "../db/line-repository";
@@ -68,8 +69,7 @@ export async function handleLineRoute(
     // createBatch is idempotent while an instance is retained. Persist before acknowledging LINE.
     for (let offset = 0; offset < accepted.length; offset += 100) {
       const batch = await Promise.all(accepted.slice(offset, offset + 100).map(async event => {
-        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(event.webhookEventId));
-        const id = "line-" + Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+        const id = await lineCommandWorkflowId(event.webhookEventId);
         return { id, params: { event } };
       }));
       await env.LINE_COMMAND_WORKFLOW.createBatch(batch);

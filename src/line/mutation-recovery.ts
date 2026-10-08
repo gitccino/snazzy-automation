@@ -18,3 +18,80 @@ export async function writeTrackedSale(pending: PendingLineCommand, recordId: st
   }
   await deps.mutationRepo.finishAttempt(id, 'acknowledged', 'http_2xx');
 }
+
+import type { LineRepository } from '../db/line-repository';
+import { matchesSaleValues } from './airtable-inventory';
+export type FollowupParams = { pendingToken: string; productId: string };
+export type RecoveryResult = { status: 'ready'; warning?: string } | { status: 'busy' };
+export type ExecutionStatus = 'active' | 'terminal' | 'unknown';
+export interface RecoveryDeps {
+  mutationRepo: LineMutationRepository;
+  repo: LineRepository;
+  inventory: InventoryClient;
+  ids: IdGenerator;
+  status(workflowId: string): Promise<ExecutionStatus>;
+  registerFollowup(params: FollowupParams): Promise<void>;
+}
+
+export async function lineCommandWorkflowId(eventId: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(eventId));
+  return 'line-' + Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+export function executionStatus(status: string): ExecutionStatus {
+  return ['complete', 'errored', 'terminated'].includes(status) ? 'terminal' : 'active';
+}
+export const recoveryConflictText = (productId: string) => `⚠️ ข้อมูลสินค้า ${productId} ไม่ตรงกับรายการที่ระบบยืนยันล่าสุด กรุณาตรวจสอบ Airtable`;
+
+async function acquireControl(productId: string, owner: string, mode: 'recovery' | 'repair', token: string, deps: RecoveryDeps) {
+  const control = await deps.mutationRepo.control(productId);
+  if (control && control.owner_workflow_id !== owner) {
+    const state = await deps.status(control.owner_workflow_id);
+    if (state === 'unknown') throw new OperationalError('line_recovery_owner_unknown', 'Cannot verify prior execution', true);
+    if (state === 'active') return false;
+    // Reclaim only the exact observed terminal owner; another command may win.
+    if (!await deps.mutationRepo.reclaim(productId, control.owner_workflow_id, owner)) return false;
+    await deps.mutationRepo.release(productId, owner);
+  }
+  return deps.mutationRepo.acquire(productId, owner, mode, token);
+}
+
+export async function recoverAbandonedMutation(productId: string, groupId: string, owner: string, deps: RecoveryDeps): Promise<RecoveryResult> {
+  const pending = await deps.mutationRepo.findApplying(productId);
+  if (!pending) {
+    const control = await deps.mutationRepo.control(productId);
+    if (!control) return { status: 'ready' };
+    if (!await acquireControl(productId, owner, 'recovery', control.pending_token, deps)) return { status: 'busy' };
+    await deps.mutationRepo.release(productId, owner);
+    return { status: 'ready' };
+  }
+  if (pending.groupId !== groupId || !pending.applyEventId) return { status: 'busy' };
+  const context = await deps.mutationRepo.context(pending.token);
+  const oldOwner = context?.workflow_id ?? await lineCommandWorkflowId(pending.applyEventId);
+  // The current command's own durable retry must resume, not supersede itself.
+  if (oldOwner === owner && !await deps.mutationRepo.control(productId)) return { status: 'ready' };
+  const state = await deps.status(oldOwner);
+  if (state === 'unknown') throw new OperationalError('line_recovery_owner_unknown', 'Cannot verify prior execution', true);
+  if (state === 'active') return { status: 'busy' };
+  if (!await acquireControl(productId, owner, 'recovery', pending.token, deps)) return { status: 'busy' };
+  const current = await deps.inventory.findByProductId(productId);
+  let warning: string | undefined;
+  if (current && validSaleValues(pending.after) && matchesSaleValues(current, pending.after)) {
+    const actor = context?.mutation_actor ?? (pending.kind === 'soldout' ? pending.after.soldBy : null);
+    if (!actor) throw new OperationalError('line_recovery_actor_unknown', 'Original mutation actor is unknown', false);
+    await deps.repo.finalizeAction({ pendingToken: pending.token, applyEventId: pending.applyEventId,
+      targetActionId: pending.targetActionId, groupId: pending.groupId, productId, kind: pending.kind,
+      before: pending.before, after: pending.after, actor,
+      correlationId: context?.mutation_correlation_id ?? pending.applyEventId, recoveryWorkflowId: owner });
+  } else {
+    const reason = !current ? 'missing_product' : matchesSaleValues(current, pending.before) ? 'replaced' : 'conflict';
+    if (await deps.mutationRepo.hasUnknownAttempt(pending.token)) {
+      await deps.registerFollowup({pendingToken:pending.token,productId});
+      await deps.mutationRepo.markMonitoring(pending.token, 'registered');
+    }
+    if (!await deps.mutationRepo.failOwned(pending.token, owner, reason)) throw new OperationalError('line_recovery_owner_changed', 'Recovery owner changed', true);
+    await deps.mutationRepo.audit(pending.token, 'line_mutation_' + reason, pending.before, pending.after, pending.token + '-recovery');
+    if (reason === 'conflict') warning = recoveryConflictText(productId);
+  }
+  await deps.mutationRepo.release(productId, owner);
+  return {status:'ready', ...(warning ? {warning} : {})};
+}
