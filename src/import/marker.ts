@@ -7,12 +7,7 @@ export type MarkerKind = "product_start" | "ignore_start" | "none";
 export const IGNORE_MARKER_PAYLOAD = "SNAZZY_IGNORE_START_V1";
 
 export function detectMarkerImage(jpegBytes: Uint8Array): MarkerKind {
-  let decoded: jpeg.RawImageData<Uint8Array>;
-  try {
-    decoded = jpeg.decode(jpegBytes, { useTArray: true });
-  } catch {
-    return "none";
-  }
+  const decoded = jpeg.decode(jpegBytes, { useTArray: true });
 
   const code = jsQR(new Uint8ClampedArray(decoded.data), decoded.width, decoded.height);
   return code?.data === MARKER_PAYLOAD ? "product_start"
