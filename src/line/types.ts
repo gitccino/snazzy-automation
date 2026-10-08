@@ -53,7 +53,7 @@ export interface InventoryProduct extends SaleValues {
 }
 
 export type PendingCommandKind = "soldout" | "revert";
-export type PendingCommandStatus = "pending" | "applying" | "approved" | "rejected" | "expired";
+export type PendingCommandStatus = "pending" | "applying" | "approved" | "rejected" | "expired" | "failed";
 
 export interface PendingLineCommand {
   token: string;

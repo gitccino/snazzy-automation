@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { createLineMutationRepository } from "../db/line-mutation-repository";
+import { createMutationCoordinator, registerMutationFollowup, executionStatus, lineCommandWorkflowId } from "../line/mutation-recovery";
 import { parseConfig } from "../config";
 import { createAuditLog } from "../db/audit";
 import { createLineRepository } from "../db/line-repository";
@@ -68,8 +70,7 @@ export async function handleLineRoute(
     // createBatch is idempotent while an instance is retained. Persist before acknowledging LINE.
     for (let offset = 0; offset < accepted.length; offset += 100) {
       const batch = await Promise.all(accepted.slice(offset, offset + 100).map(async event => {
-        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(event.webhookEventId));
-        const id = "line-" + Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+        const id = await lineCommandWorkflowId(event.webhookEventId);
         return { id, params: { event } };
       }));
       await env.LINE_COMMAND_WORKFLOW.createBatch(batch);
@@ -98,22 +99,38 @@ export function createWebhookDeps(env: Env, requestId?: string): WebhookDeps {
     channelAccessToken: env.LINE_CHANNEL_ACCESS_TOKEN,
     fetch: fetcher,
   });
+  const repo = createLineRepository(env.DB,ids,clock);
+  const inventory = createInventoryClient({baseId:config.airtableBaseId,tableId:config.airtableProductsTableId,token:env.AIRTABLE_TOKEN,fetch:fetcher,now:clock.now});
+  const mutationRepo = createLineMutationRepository(env.DB,clock);
+  const mutation = createMutationCoordinator(requestId ?? "legacy-no-workflow",{
+    repo, inventory, ids, mutationRepo,
+    async status(id) {
+      if (id === "legacy-no-workflow") return "unknown";
+      try { return executionStatus((await (await env.LINE_COMMAND_WORKFLOW.get(id)).status()).status); }
+      catch { try { return executionStatus((await (await env.LINE_MUTATION_FOLLOWUP_WORKFLOW.get(id)).status()).status); } catch { return "unknown"; } }
+    },
+    async registerFollowup(params) {
+      await registerMutationFollowup(params,{
+        mutationRepo,ids,now:()=>clock.now().getTime(),
+        async status(id) {
+          try { return executionStatus((await (await env.LINE_MUTATION_FOLLOWUP_WORKFLOW.get(id)).status()).status); }
+          catch { return "unknown"; }
+        },
+        create:(id,params)=>env.LINE_MUTATION_FOLLOWUP_WORKFLOW.createBatch([{id,params}]),
+      });
+    },
+  });
   return {
+    mutation,
     publicBaseUrl: config.publicBaseUrl,
     allowedGroupId: config.lineAllowedGroupId,
     confirmationEnabled: config.soldoutConfirmationEnabled,
     line,
     clock,
     ids,
-    repo: createLineRepository(env.DB, ids, clock),
+    repo,
     audit: createAuditLog(env.DB, ids, clock),
-    inventory: createInventoryClient({
-      baseId: config.airtableBaseId,
-      tableId: config.airtableProductsTableId,
-      token: env.AIRTABLE_TOKEN,
-      fetch: fetcher,
-      now: clock.now,
-    }),
+    inventory,
     async triggerUpload() {
       const response = await handleUploadTrigger(env, "line", requestId);
       return parseUploadTriggerResponse(await response.json());

@@ -1,3 +1,4 @@
+import { fakeMutationCoordinator } from "../helpers/mutation";
 import { expect, it, vi } from "vitest";
 import type { LineRepository } from "../../src/db/line-repository";
 import type { InventoryClient } from "../../src/line/airtable-inventory";
@@ -80,6 +81,7 @@ function deps(found: InventoryProduct | null = product) {
     latestReversible: vi.fn(),
   } satisfies LineRepository;
   return {
+    mutation: fakeMutationCoordinator(inventory),
     inventory,
     repo,
     clock: {

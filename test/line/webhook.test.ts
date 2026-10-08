@@ -1,3 +1,4 @@
+import { fakeMutationCoordinator } from "../helpers/mutation";
 import { expect, it, vi } from "vitest";
 import type { AuditLog } from "../../src/db/audit";
 import type { LineRepository } from "../../src/db/line-repository";
@@ -43,6 +44,7 @@ function deps(): WebhookDeps {
   } satisfies InventoryClient;
   const audit = { record: vi.fn().mockResolvedValue(undefined) } satisfies AuditLog;
   return {
+    mutation: fakeMutationCoordinator(inventory),
     publicBaseUrl: "https://worker.example",
     allowedGroupId: "C1",
     confirmationEnabled: true,
@@ -167,4 +169,13 @@ it("delivers report Flex replies without inventory mutation or pipeline executio
   expect(d.line.replyFlex).toHaveBeenCalledWith("reply-1", expect.stringContaining("สรุปยอดขาย"), expect.objectContaining({ type: "bubble" }));
   expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
   expect(d.triggerUpload).not.toHaveBeenCalled(); expect(d.triggerDocs).not.toHaveBeenCalled();
+});
+
+it('retains a recovery conflict warning in the long confirmation reply', async()=>{
+  const {sendCommandReply}=await import('../../src/line/webhook');
+  const d=deps();
+  const text='x'.repeat(2001);
+  const warning='⚠️ ตรวจสอบข้อมูลสินค้า';
+  await sendCommandReply('reply',{kind:'buttons',text,approveData:'approve',rejectData:'reject',recoveryWarning:warning},d.line,'https://example.com');
+  expect(d.line.replyButtons).toHaveBeenCalledWith('reply',text,warning+'\n'+text,expect.any(Array));
 });

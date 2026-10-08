@@ -1,3 +1,4 @@
+import type { MutationCoordinator } from "./mutation-recovery";
 import type { LineRepository } from "../db/line-repository";
 import type { IdGenerator } from "../shared/ids";
 import type { Clock } from "../shared/time";
@@ -20,7 +21,7 @@ import type {
 } from "./types";
 import type { SearchCardReply } from "./search-card";
 
-export type CommandReply =
+export type CommandReply = (
   | SearchCardReply
   | { kind: "text"; text: string; saleSuccess?: { productId: string; soldPrice: number; product?: InventoryProduct }; revertSuccess?: boolean; alreadyOut?: InventoryProduct }
   | {
@@ -30,9 +31,12 @@ export type CommandReply =
       rejectData: string;
       sale?: { productId: string; soldPrice: number };
       revert?: { productId: string; before: SaleValues; after: SaleValues };
-    };
+    }
+
+) & { recoveryWarning?: string };
 
 export interface SoldoutDeps {
+  mutation: MutationCoordinator;
   inventory: InventoryClient;
   repo: LineRepository;
   clock: Clock;
@@ -74,6 +78,7 @@ export async function prepareSoldout(
 
   const existing = await deps.repo.findPendingBySourceEvent(sourceEventId);
   if (existing !== null) {
+    if (['failed','rejected','expired'].includes(existing.status)) return {kind:'text',text:soldoutMessages.expired};
     return confirmationEnabled
       ? confirmationReply(existing)
       : resolveSoldout(
@@ -86,12 +91,14 @@ export async function prepareSoldout(
         );
   }
 
+  const recovery = await deps.mutation.recover(input.productId,requester.groupId);
+  if (recovery.status === 'busy') return {kind:'text',text:`⚠️ มีงานปรับปรุงสินค้า ${input.productId} กำลังทำงานอยู่ กรุณาลองอีกครั้งภายหลัง`};
   const product = await deps.inventory.findByProductId(input.productId);
   if (product === null) {
     return { kind: "text", text: notFoundText(input.productId) };
   }
   if (product.inventoryStatus === "Out") {
-    return { kind: "text", text: alreadyOutText(product), alreadyOut: product };
+    return { kind: "text", text: alreadyOutText(product), alreadyOut: product, recoveryWarning: recovery.warning };
   }
 
   const before: SaleValues = {
@@ -126,9 +133,9 @@ export async function prepareSoldout(
     return { kind: "text", text: soldoutMessages.pending(input.productId) };
   }
 
-  return confirmationEnabled
+  const reply = confirmationEnabled
     ? confirmationReply(pending)
-    : resolveSoldout(
+    : await resolveSoldout(
         "approve",
         pending.token,
         requester,
@@ -136,6 +143,7 @@ export async function prepareSoldout(
         sourceEventId,
         deps,
       );
+  return {...reply,recoveryWarning:recovery.warning};
 }
 
 export async function resolveSoldout(
@@ -146,6 +154,8 @@ export async function resolveSoldout(
   correlationId: string,
   deps: SoldoutDeps,
 ): Promise<CommandReply> {
+  const recovery = await deps.mutation.recoverToken(token,actor.groupId);
+  if (recovery.status === 'busy') return {kind:'text',text:'⚠️ มีงานปรับปรุงสินค้ากำลังทำงานอยู่ กรุณาลองอีกครั้งภายหลัง'};
   const nowIso = deps.clock.now().toISOString();
   const pending = await deps.repo.claimPending(
     token,
@@ -195,7 +205,7 @@ export async function resolveSoldout(
     }
 
     if (matchesSaleValues(product, pending.before)) {
-      await deps.inventory.updateSaleValues(product.recordId, after);
+      await deps.mutation.write({...pending,after},product.recordId,resolver,correlationId);
     } else if (!recoveringMutation || !matchesSaleValues(product, after)) {
       await deps.repo.resolvePending(token, applyEventId, "rejected", resolver);
       return {
@@ -216,7 +226,8 @@ export async function resolveSoldout(
       actor: resolver,
       correlationId,
     });
-    return saleReply(pending.productId, pending.soldPrice, { ...product, ...after });
+    await deps.mutation.committed(pending.productId);
+    return {...saleReply(pending.productId, pending.soldPrice, { ...product, ...after }),recoveryWarning:recovery.warning};
   } catch (error) {
     if (!mutationIntentPersisted) {
       await deps.repo.resetPending(token, applyEventId);
