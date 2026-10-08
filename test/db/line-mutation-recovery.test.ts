@@ -72,3 +72,12 @@ it('finalizes recovered history under its recovery owner and orders same-clock c
   expect((await mutations.latestConfirmed(pending.productId))?.id).toBe(reverted.id);
   expect(await repo.latestReversible('C1')).not.toMatchObject({ id: first.id });
 });
+
+it('does not acquire stale recovery ownership over a newly created confirmation', async () => {
+  const {mutations,pending,repo}=await mutationFixture();
+  await mutations.acquire(pending.productId,'winner','recovery',pending.token);
+  await mutations.failOwned(pending.token,'winner','replaced');
+  await mutations.release(pending.productId,'winner');
+  await repo.createPending({...pending,token:pending.token+'-new',sourceEventId:pending.sourceEventId+'-new'});
+  expect(await mutations.acquire(pending.productId,'loser','recovery',pending.token)).toBe(false);
+});

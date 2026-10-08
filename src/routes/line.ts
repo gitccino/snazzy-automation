@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { lineCommandWorkflowId } from "../line/mutation-recovery";
+import { createLineMutationRepository } from "../db/line-mutation-repository";
+import { createMutationCoordinator, executionStatus, lineCommandWorkflowId } from "../line/mutation-recovery";
 import { parseConfig } from "../config";
 import { createAuditLog } from "../db/audit";
 import { createLineRepository } from "../db/line-repository";
@@ -98,22 +99,31 @@ export function createWebhookDeps(env: Env, requestId?: string): WebhookDeps {
     channelAccessToken: env.LINE_CHANNEL_ACCESS_TOKEN,
     fetch: fetcher,
   });
+  const repo = createLineRepository(env.DB,ids,clock);
+  const inventory = createInventoryClient({baseId:config.airtableBaseId,tableId:config.airtableProductsTableId,token:env.AIRTABLE_TOKEN,fetch:fetcher,now:clock.now});
+  const mutation = createMutationCoordinator(requestId ?? "legacy-no-workflow",{
+    repo, inventory, ids, mutationRepo:createLineMutationRepository(env.DB,clock),
+    async status(id) {
+      if (id === "legacy-no-workflow") return "unknown";
+      try { return executionStatus((await (await env.LINE_COMMAND_WORKFLOW.get(id)).status()).status); }
+      catch { try { return executionStatus((await (await env.LINE_MUTATION_FOLLOWUP_WORKFLOW.get(id)).status()).status); } catch { return "unknown"; } }
+    },
+    async registerFollowup(params) {
+      const id = (await lineCommandWorkflowId(params.pendingToken)).replace("line-","line-followup-");
+      await env.LINE_MUTATION_FOLLOWUP_WORKFLOW.createBatch([{id,params:{...params,registeredAt:clock.now().getTime()}}]);
+    },
+  });
   return {
+    mutation,
     publicBaseUrl: config.publicBaseUrl,
     allowedGroupId: config.lineAllowedGroupId,
     confirmationEnabled: config.soldoutConfirmationEnabled,
     line,
     clock,
     ids,
-    repo: createLineRepository(env.DB, ids, clock),
+    repo,
     audit: createAuditLog(env.DB, ids, clock),
-    inventory: createInventoryClient({
-      baseId: config.airtableBaseId,
-      tableId: config.airtableProductsTableId,
-      token: env.AIRTABLE_TOKEN,
-      fetch: fetcher,
-      now: clock.now,
-    }),
+    inventory,
     async triggerUpload() {
       const response = await handleUploadTrigger(env, "line", requestId);
       return parseUploadTriggerResponse(await response.json());

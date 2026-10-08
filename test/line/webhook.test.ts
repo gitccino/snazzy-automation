@@ -1,3 +1,4 @@
+import { fakeMutationCoordinator } from "../helpers/mutation";
 import { expect, it, vi } from "vitest";
 import type { AuditLog } from "../../src/db/audit";
 import type { LineRepository } from "../../src/db/line-repository";
@@ -43,6 +44,7 @@ function deps(): WebhookDeps {
   } satisfies InventoryClient;
   const audit = { record: vi.fn().mockResolvedValue(undefined) } satisfies AuditLog;
   return {
+    mutation: fakeMutationCoordinator(inventory),
     publicBaseUrl: "https://worker.example",
     allowedGroupId: "C1",
     confirmationEnabled: true,

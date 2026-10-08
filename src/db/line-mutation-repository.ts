@@ -6,6 +6,10 @@ import { parseAction, parsePending } from './line-repository';
 export function createLineMutationRepository(db: D1Database, clock: Clock) {
   const now = () => clock.now().toISOString();
   return {
+    async operation(token: string) {
+      const row = await db.prepare('SELECT * FROM pending_line_commands WHERE token = ?').bind(token).first<Record<string, unknown>>();
+      return row ? parsePending(row) : null;
+    },
     async findApplying(productId: string) {
       const row = await db.prepare("SELECT * FROM pending_line_commands WHERE product_id = ? AND status = 'applying'").bind(productId).first<Record<string, unknown>>();
       return row ? parsePending(row) : null;
@@ -29,9 +33,9 @@ export function createLineMutationRepository(db: D1Database, clock: Clock) {
     async acquire(productId: string, owner: string, mode: 'recovery' | 'repair', token: string) {
       const result = await db.prepare(`INSERT OR IGNORE INTO line_product_control
         (product_id, owner_workflow_id, mode, pending_token, acquired_at)
-        SELECT ?, ?, ?, ?, ? WHERE ? = 'recovery' OR NOT EXISTS (
+        SELECT ?, ?, ?, ?, ? WHERE (? = 'recovery' AND EXISTS (SELECT 1 FROM pending_line_commands WHERE token = ? AND product_id = ? AND status = 'applying')) OR NOT EXISTS (
           SELECT 1 FROM pending_line_commands WHERE product_id = ? AND status IN ('pending','applying'))`)
-        .bind(productId, owner, mode, token, now(), mode, productId).run();
+        .bind(productId, owner, mode, token, now(), mode, token, productId, productId).run();
       if (result.meta.changes) return true;
       const existing = await db.prepare('SELECT owner_workflow_id, mode, pending_token FROM line_product_control WHERE product_id = ?').bind(productId).first<{owner_workflow_id:string;mode:string;pending_token:string}>();
       return existing?.owner_workflow_id === owner && existing.mode === mode && existing.pending_token === token;
@@ -65,7 +69,8 @@ export function createLineMutationRepository(db: D1Database, clock: Clock) {
       return !row?.total || !!row.uncertain;
     },
     async failOwned(token: string, owner: string, reason: string) {
-      return (await db.prepare(`UPDATE pending_line_commands SET status = 'failed', resolution_reason = ?, resolved_at = ?
+      return (await db.prepare(`UPDATE pending_line_commands SET status = 'failed', resolution_reason = ?, resolved_at = ?,
+        resolution_action_seq = (SELECT COALESCE(MAX(commit_seq),0) FROM line_actions WHERE product_id = pending_line_commands.product_id)
         WHERE token = ? AND status = 'applying' AND EXISTS (
           SELECT 1 FROM line_product_control WHERE product_id = pending_line_commands.product_id AND owner_workflow_id = ? AND mode = 'recovery')`)
         .bind(reason, now(), token, owner).run()).meta.changes === 1;
@@ -77,7 +82,7 @@ export function createLineMutationRepository(db: D1Database, clock: Clock) {
     async superseded(productId: string) {
       const rows = await db.prepare("SELECT * FROM pending_line_commands WHERE product_id = ? AND status = 'failed' AND monitoring_state IS NOT NULL ORDER BY rowid")
         .bind(productId).all<Record<string, unknown>>();
-      return rows.results.map(parsePending);
+      return rows.results.map(row => ({ ...parsePending(row), resolutionSeq: Number(row.resolution_action_seq ?? 0) }));
     },
     async monitors(productId: string) {
       return (await db.prepare("SELECT token FROM pending_line_commands WHERE product_id = ? AND monitoring_state = 'registered'").bind(productId).all<{token:string}>()).results;

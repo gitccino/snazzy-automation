@@ -21,7 +21,7 @@ export async function writeTrackedSale(pending: PendingLineCommand, recordId: st
 
 import type { LineRepository } from '../db/line-repository';
 import { matchesSaleValues } from './airtable-inventory';
-export type FollowupParams = { pendingToken: string; productId: string };
+export type FollowupParams = { pendingToken: string; productId: string; registeredAt?: number };
 export type RecoveryResult = { status: 'ready'; warning?: string } | { status: 'busy' };
 export type ExecutionStatus = 'active' | 'terminal' | 'unknown';
 export interface RecoveryDeps {
@@ -94,4 +94,60 @@ export async function recoverAbandonedMutation(productId: string, groupId: strin
   }
   await deps.mutationRepo.release(productId, owner);
   return {status:'ready', ...(warning ? {warning} : {})};
+}
+
+export type RepairResult = { status: 'unchanged' | 'repaired' | 'busy' | 'unresolved' };
+export async function checkLateMutation(params: FollowupParams, owner: string, deps: RecoveryDeps): Promise<RepairResult> {
+  if (!await acquireControl(params.productId, owner, 'repair', params.pendingToken, deps)) return {status:'busy'};
+  const current = await deps.inventory.findByProductId(params.productId);
+  const latest = await deps.mutationRepo.latestConfirmed(params.productId);
+  const superseded = await deps.mutationRepo.superseded(params.productId);
+  const late = current && superseded.find(old => validSaleValues(old.after) && matchesSaleValues(current,old.after));
+  if (!current || (!late && !(latest && matchesSaleValues(current,latest.after)) && !superseded.some(old=>matchesSaleValues(current,old.before)))) {
+    await deps.mutationRepo.release(params.productId,owner);
+    return {status:'unresolved'};
+  }
+  if (latest && current && matchesSaleValues(current,latest.after) || !late) {
+    await deps.mutationRepo.release(params.productId,owner);
+    return {status:'unchanged'};
+  }
+  if (!latest || latest.commitSeq <= late.resolutionSeq) {
+    await deps.mutationRepo.release(params.productId,owner);
+    return {status:'unresolved'};
+  }
+  // Capture repair intent before PATCH; retain ownership on an uncertain failure.
+  await writeTrackedSale({...late,after:latest.after},current!.recordId,owner,{...deps,repair:true});
+  await deps.mutationRepo.audit(late.token,'line_late_write_repaired',late.after,latest.after, deps.ids.next());
+  await deps.mutationRepo.release(params.productId,owner);
+  return {status:'repaired'};
+}
+
+export interface MutationCoordinator {
+  recoverToken(token: string, groupId: string): Promise<RecoveryResult>;
+  recover(productId: string, groupId: string): Promise<RecoveryResult>;
+  write(pending: PendingLineCommand, recordId: string, actor: string, correlationId: string): Promise<void>;
+  committed(productId: string): Promise<void>;
+}
+export function createMutationCoordinator(owner: string, deps: RecoveryDeps): MutationCoordinator {
+  return {
+    async recoverToken(token,groupId) {
+      const pending = await deps.mutationRepo.operation(token);
+      if (!pending || pending.groupId !== groupId || ['failed','expired','rejected','approved'].includes(pending.status)) return {status:'ready'};
+      return recoverAbandonedMutation(pending.productId,groupId,owner,deps);
+    },
+    recover: (productId,groupId) => recoverAbandonedMutation(productId,groupId,owner,deps),
+    async write(pending,recordId,actor,correlationId) {
+      await deps.mutationRepo.setOperationOwner(pending.token,owner,actor,correlationId);
+      await writeTrackedSale(pending,recordId,owner,deps);
+    },
+    async committed(productId) {
+      let monitors;
+      try { monitors = await deps.mutationRepo.monitors(productId); }
+      catch(error) { console.error('Cannot query late-write monitors',error); return; }
+      for (const monitor of monitors) {
+        try { await checkLateMutation({pendingToken:monitor.token,productId},owner,deps); }
+        catch(error) { console.error('Immediate late-write check failed',error); }
+      }
+    },
+  };
 }
