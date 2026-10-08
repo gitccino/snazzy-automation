@@ -47,6 +47,11 @@ const SaleValuesSchema = z.object({
   }
 });
 
+export class InventoryWriteRejectedError extends OperationalError {}
+export function validSaleValues(value: SaleValues): boolean {
+  return SaleValuesSchema.safeParse(value).success;
+}
+
 export function matchesSaleValues(actual: SaleValues, expected: SaleValues): boolean {
   return actual.inventoryStatus === expected.inventoryStatus
     && actual.soldPrice === expected.soldPrice
@@ -67,7 +72,9 @@ export function createInventoryClient(config: {
 
   async function requireOk(response: Response, action: string): Promise<void> {
     if (!response.ok) {
-      throw new OperationalError(
+      const ErrorType = action === "update" && [400, 401, 403, 404, 422, 429].includes(response.status)
+        ? InventoryWriteRejectedError : OperationalError;
+      throw new ErrorType(
         `airtable_inventory_${action}_failed`,
         `Airtable inventory ${action} failed with status ${response.status}`,
         response.status === 429 || response.status >= 500,
