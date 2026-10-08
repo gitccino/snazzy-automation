@@ -82,10 +82,19 @@ describe("createMarkerDetector", () => {
   });
 });
 
- it("classifies both control payloads and leaves unrelated or unreadable photos ordinary", () => {
+ it("classifies both control payloads and leaves successfully decoded non-marker photos ordinary", () => {
   expect(detectMarkerImage(markerCleanJpegBytes())).toBe("product_start");
   expect(detectMarkerImage(ignoreMarkerJpegBytes())).toBe("ignore_start");
   expect(detectMarkerImage(wrongPayloadJpegBytes())).toBe("none");
   expect(detectMarkerImage(nonMarkerJpegBytes())).toBe("none");
-  expect(detectMarkerImage(new Uint8Array([1, 2]))).toBe("none");
  });
+
+it("propagates JPEG decoding failures instead of classifying invalid bytes as no marker", async () => {
+  expect(() => detectMarkerImage(new Uint8Array([1, 2]))).toThrow();
+  const transformer: MarkerImageTransformer = {
+    transform() { return transformer; },
+    async output() { return { response: () => new Response("invalid image bytes") }; },
+  };
+  const detector = createMarkerDetector({ input: () => transformer });
+  await expect(detector.detect(new ArrayBuffer(0))).rejects.toThrow();
+});
