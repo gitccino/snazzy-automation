@@ -1,4 +1,6 @@
 import jpeg from "jpeg-js";
+import { z } from "zod";
+import { publicationWorkflowId } from "./types";
 import type { WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import {
@@ -110,7 +112,13 @@ export async function beginProductImagePreparation(deps: ImagePreparationDeps, w
         const outcome = await reconcileProductImageIntent(deps, resumed);
         if (outcome === "original") return { owner: resumed, product };
         if (outcome === "pending") throw error("product_image_ingestion_pending", true);
-        if (outcome === "conflicted") throw error("product_image_source_changed");
+        if (outcome === "conflicted") {
+          for (const image of images) {
+            if (!await findOriginalImage(deps.db, product.airtableRecordId, image.id) && observed.intent.some(item => item.kind === "preview" && item.filename === image.filename)) {
+              throw error("product_image_unresolved_preview");
+            }
+          }
+        }
         observed = await readImagePreparation(deps.db, product.airtableRecordId);
       } else return { owner: resumed, product };
     }
@@ -137,9 +145,6 @@ export async function ensureProductOriginal(deps: ImagePreparationDeps, context:
     original = { recordId: context.owner.recordId, attachmentId: attachment.id, attachmentKind: "preview", originalFilename: attachment.filename,
       ...imported, byteLength: object.size, mediaType: "image/jpeg", previewFilename: attachment.filename, variant: AIRTABLE_PREVIEW_VARIANT };
   } else {
-    if (/^[a-f0-9]{64}\.jpg$/.test(attachment.filename) && await deps.db.prepare("SELECT 1 FROM product_groups WHERE airtable_record_id = ? AND state = 'succeeded' LIMIT 1").bind(context.owner.recordId).first()) {
-      throw error("product_image_original_missing");
-    }
     const images = await currentAttachments(deps, context.owner.recordId);
     const operation = await readImagePreparation(deps.db, context.owner.recordId);
     if (!operation || !sameSnapshot(snapshot(images), operation.snapshot)) throw error("product_image_source_changed");
@@ -147,6 +152,11 @@ export async function ensureProductOriginal(deps: ImagePreparationDeps, context:
     if (!image) throw error("product_image_source_changed");
     const downloaded = await downloadJpegAttachment(deps.fetcher, image);
     const contentHash = await sha256Hex(downloaded.bytes);
+    const recovered = await proveLegacyPreview(deps, context, image, downloaded.bytes, contentHash);
+    if (recovered) {
+      await saveOriginalImage(deps.db, deps.clock, context.owner, recovered);
+      return recovered;
+    }
     const stored = await deps.assets.putIfAbsent(contentHash, downloaded.extension, downloaded.bytes, downloaded.mediaType);
     const object = await deps.bucket.get(stored.r2Key);
     if (!object || object.size !== downloaded.bytes.byteLength) throw error("product_image_original_missing", true);
@@ -158,6 +168,26 @@ export async function ensureProductOriginal(deps: ImagePreparationDeps, context:
   }
   await saveOriginalImage(deps.db, deps.clock, context.owner, original);
   return original;
+}
+
+async function proveLegacyPreview(deps: ImagePreparationDeps, context: ImagePreparationContext, image: DownloadableProductAttachment,
+  bytes: ArrayBuffer, contentHash: string): Promise<OriginalImage | null> {
+  if (!/^[a-f0-9]{64}\.jpg$/.test(image.filename) || contentHash === image.filename.slice(0, 64)) return null;
+  const key = `assets/${image.filename}`;
+  const candidate = await deps.db.prepare(`SELECT r2_key FROM product_image_originals WHERE record_id = ? AND r2_key = ?
+    UNION SELECT a.r2_key FROM product_groups g JOIN import_runs r ON r.id = g.import_run_id
+    JOIN photo_assets a ON a.source_album_id = r.source_album_id
+    WHERE g.airtable_record_id = ? AND g.state = 'succeeded' AND a.r2_key = ? LIMIT 1`)
+    .bind(context.owner.recordId, key, context.owner.recordId, key).first();
+  if (!candidate) return null;
+  const original = await deps.bucket.get(key);
+  if (!original) return null;
+  // Filename is a candidate, not proof. Require exact preview bytes before using the original.
+  const preview = await (await renderAirtablePreview(deps.images, original.body)).arrayBuffer();
+  if (await sha256Hex(preview) !== await sha256Hex(bytes)) return null;
+  return { recordId: context.owner.recordId, attachmentId: image.id, attachmentKind: "preview", originalFilename: image.filename,
+    contentHash: image.filename.slice(0, 64), r2Key: key, byteLength: original.size, mediaType: "image/jpeg",
+    previewFilename: image.filename, variant: AIRTABLE_PREVIEW_VARIANT };
 }
 
 async function preparedProduct(deps: ImagePreparationDeps, product: RawPublicationProduct): Promise<PublicationProduct> {
@@ -176,7 +206,11 @@ async function preparedProduct(deps: ImagePreparationDeps, product: RawPublicati
 export async function replaceProductImagePreviews(deps: ImagePreparationDeps, context: ImagePreparationContext): Promise<PublicationProduct> {
   const { owner, product } = context;
   let operation = await readImagePreparation(deps.db, owner.recordId);
-  if (!operation || operation.workflowId !== owner.workflowId || operation.generation !== owner.generation) throw error("product_image_owner_changed", true);
+  if (!operation || operation.workflowId !== owner.workflowId || operation.generation !== owner.generation) {
+    // Ready ownership may be reused while this completed step's result is still being committed.
+    // Read-only reuse is safe only when every current attachment has a verified preview mapping.
+    try { return await preparedProduct(deps, product); } catch { throw error("product_image_owner_changed", true); }
+  }
   if (operation.state === "ready") return preparedProduct(deps, product);
   await assertImageOwner(deps.db, owner);
   if (!operation.intent) {
@@ -227,31 +261,63 @@ export async function preparePublicationImages(deps: ImagePreparationDeps, valid
   const products: PublicationProduct[] = [];
   let safeFailure = "เตรียมรูปสินค้าไม่สำเร็จ กรุณาตรวจสอบ Airtable แล้วลอง /docs อีกครั้ง";
   try {
-    for (const product of validated.run.products) {
-    let context: ImagePreparationContext | undefined;
-    let position: number | undefined;
-    const call = async <T>(fn: () => Promise<T>): Promise<T> => {
-      try { return await fn(); }
-      catch (failure) {
-        const code = failure instanceof OperationalError ? failure.code : "product_image_preparation_failed";
-        const retryable = failure instanceof OperationalError ? failure.retryable : true;
-        const safe = `${product.productId}${position === undefined ? "" : `: รูปที่ ${position + 1}`} — ${reasons[code] ?? "เตรียมรูปไม่สำเร็จ กรุณาตรวจสอบ Airtable แล้วลอง /docs อีกครั้ง"}`;
-        safeFailure = safe;
-        if (context && !retryable) {
-          try { await failImagePreparation(deps.db, deps.clock, context.owner, code === "product_image_source_changed" ? "conflicted" : "failed", safe); } catch { /* Preserve the original failure if ownership changed. */ }
+    for (const validatedProduct of validated.run.products as Array<RawPublicationProduct | PublicationProduct>) {
+    // Existing workflow instances may replay a pre-upgrade validated product with only R2 keys.
+    const product = "attachments" in validatedProduct ? validatedProduct : await step.do(`images ${validatedProduct.airtableRecordId} hydrate`, retry, async () => {
+      try {
+        const record = await readProductAttachments(deps.fetcher, deps.config, deps.airtableToken, validatedProduct.airtableRecordId);
+        const { orderedImageKeys: _keys, ...metadata } = validatedProduct as PublicationProduct;
+        return { ...metadata, attachments: record.attachments.map(({ url: _url, ...image }) => image) };
+      } catch { throw new Error("Unable to read product attachments."); }
+    });
+    if (product.attachments.length < 4) throw new ProductImagePreparationFailure(`${product.productId}: ต้องมีรูปอย่างน้อย 4 รูป`);
+      let context: ImagePreparationContext | undefined;
+      let position: number | undefined;
+      const call = async <T>(fn: () => Promise<T>): Promise<T> => {
+        try {
+          const value = await fn();
+          try {
+            await deps.db.prepare("UPDATE publication_jobs SET image_error_json = NULL WHERE publication_run_id = ? AND generation = ? AND correlation_id = ? AND state NOT IN ('succeeded','failed')")
+              .bind(validated.run.airtableRunId, validated.generation ?? 1, publicationWorkflowId(validated.run.airtableRunId, validated.generation ?? 1)).run();
+          } catch { /* Diagnostics must not fail a completed image operation. */ }
+          return value;
         }
-        if (!retryable) throw new NonRetryableError(safe, code);
-        throw new Error(safe);
+        catch (failure) {
+          const code = failure instanceof OperationalError ? failure.code : "product_image_preparation_failed";
+          const retryable = failure instanceof OperationalError ? failure.retryable : true;
+          const safe = `${product.productId}${position === undefined ? "" : `: รูปที่ ${position + 1}`} — ${reasons[code] ?? "เตรียมรูปไม่สำเร็จ กรุณาตรวจสอบ Airtable แล้วลอง /docs อีกครั้ง"}`;
+          safeFailure = safe;
+          try {
+            await deps.db.prepare(`UPDATE publication_jobs SET image_error_json = ? WHERE publication_run_id = ? AND generation = ?
+              AND correlation_id = ? AND state NOT IN ('succeeded','failed')`)
+              .bind(JSON.stringify({ productId: product.productId, position: position ?? null, code }), validated.run.airtableRunId,
+                validated.generation ?? 1, publicationWorkflowId(validated.run.airtableRunId, validated.generation ?? 1)).run();
+          } catch { /* Keep a diagnostic storage failure from replacing the original stage error. */ }
+          if (context && !retryable) {
+            try { await failImagePreparation(deps.db, deps.clock, context.owner, code === "product_image_source_changed" ? "conflicted" : "failed", safe); } catch { /* Preserve the original failure if ownership changed. */ }
+          }
+          if (!retryable) throw new NonRetryableError(safe, code);
+          throw new Error(safe);
+        }
+      };
+      context = await step.do(`images ${product.airtableRecordId} begin`, retry, () => call(() => beginProductImagePreparation(deps, workflowId, product)));
+      for (const [index, attachment] of product.attachments.entries()) {
+        position = index;
+        await step.do(`images ${product.airtableRecordId} ${attachment.id} archive`, retry, () => call(() => ensureProductOriginal(deps, context!, attachment, index)));
       }
-    };
-    context = await step.do(`images ${product.airtableRecordId} begin`, retry, () => call(() => beginProductImagePreparation(deps, workflowId, product)));
-    for (const [index, attachment] of product.attachments.entries()) {
-      position = index;
-      await step.do(`images ${product.airtableRecordId} ${attachment.id} archive`, retry, () => call(() => ensureProductOriginal(deps, context!, attachment, index)));
+      position = undefined;
+      products.push(await step.do(`images ${product.airtableRecordId} replace`, retry, () => call(() => replaceProductImagePreviews(deps, context!))));
     }
-    position = undefined;
-    products.push(await step.do(`images ${product.airtableRecordId} replace`, retry, () => call(() => replaceProductImagePreviews(deps, context!))));
+    return { ...validated, run: { ...validated.run, products } };
+  } catch {
+    try {
+      const stored = await deps.db.prepare("SELECT image_error_json FROM publication_jobs WHERE publication_run_id = ? AND generation = ? AND correlation_id = ?")
+        .bind(validated.run.airtableRunId, validated.generation ?? 1, publicationWorkflowId(validated.run.airtableRunId, validated.generation ?? 1)).first<{ image_error_json: string | null }>();
+      if (stored?.image_error_json) {
+        const diagnostic = z.object({ productId: z.string().regex(/^A-\d+$/), position: z.number().int().nonnegative().nullable(), code: z.string() }).parse(JSON.parse(stored.image_error_json));
+        safeFailure = `${diagnostic.productId}${diagnostic.position === null ? "" : `: รูปที่ ${diagnostic.position + 1}`} — ${reasons[diagnostic.code] ?? "เตรียมรูปไม่สำเร็จ กรุณาตรวจสอบ Airtable แล้วลอง /docs อีกครั้ง"}`;
+      }
+    } catch { /* The locally constructed fallback remains safe on diagnostic read failure. */ }
+    throw new ProductImagePreparationFailure(safeFailure);
   }
-  return { ...validated, run: { ...validated.run, products } };
-  } catch { throw new ProductImagePreparationFailure(safeFailure); }
 }

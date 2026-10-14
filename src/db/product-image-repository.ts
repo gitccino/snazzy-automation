@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Clock } from "../shared/time";
+import { sha256Hex } from "../shared/ids";
 import { OperationalError } from "../shared/errors";
 
 const snapshotSchema = z.array(z.object({ id: z.string().min(1), filename: z.string().min(1) }));
@@ -127,15 +128,23 @@ export async function failImagePreparation(db: D1Database, clock: Clock, owner: 
 
 export async function findImportedOriginal(db: D1Database, recordId: string, filename: string): Promise<{ contentHash: string; r2Key: string } | null> {
   if (!/^[a-f0-9]{64}\.jpg$/.test(filename)) return null;
-  const row = await db.prepare(`SELECT a.content_hash, a.r2_key FROM product_groups g
-    JOIN import_runs run ON run.id = g.import_run_id
-    JOIN photo_assets first ON first.apple_photo_id = g.first_photo_id AND first.source_album_id = run.source_album_id
-    JOIN photo_assets last ON last.apple_photo_id = g.last_photo_id AND last.source_album_id = first.source_album_id
-    JOIN photo_assets a ON a.source_album_id = first.source_album_id AND a.position BETWEEN first.position AND last.position
-    WHERE g.airtable_record_id = ? AND g.state = 'succeeded' AND a.marker_kind = 'none' AND a.r2_key = ?
-    LIMIT 1`)
-    .bind(recordId, `assets/${filename}`).first<{ content_hash: string; r2_key: string }>();
-  return row ? { contentHash: row.content_hash, r2Key: row.r2_key } : null;
+  const group = await db.prepare(`SELECT g.id, g.group_hash, g.first_photo_id, g.last_photo_id, r.source_album_id
+    FROM product_groups g JOIN import_runs r ON r.id = g.import_run_id WHERE g.airtable_record_id = ? AND g.state = 'succeeded' LIMIT 1`)
+    .bind(recordId).first<{ id: string; group_hash: string; first_photo_id: string; last_photo_id: string; source_album_id: string }>();
+  if (!group) return null;
+  let members = (await db.prepare("SELECT apple_photo_id, r2_key FROM product_group_image_members WHERE group_id = ? ORDER BY ordinal").bind(group.id)
+    .all<{ apple_photo_id: string; r2_key: string | null }>()).results;
+  if (!members.length) {
+    // Historical positions are candidates only: prove the complete ordered membership by group hash.
+    members = (await db.prepare(`SELECT a.apple_photo_id, a.r2_key FROM photo_assets a
+      JOIN photo_assets first ON first.source_album_id = a.source_album_id AND first.apple_photo_id = ?
+      JOIN photo_assets last ON last.source_album_id = a.source_album_id AND last.apple_photo_id = ?
+      WHERE a.source_album_id = ? AND a.position BETWEEN first.position AND last.position ORDER BY a.position, a.apple_photo_id`)
+      .bind(group.first_photo_id, group.last_photo_id, group.source_album_id).all<{ apple_photo_id: string; r2_key: string | null }>()).results;
+  }
+  if (await sha256Hex(new TextEncoder().encode(JSON.stringify([group.source_album_id, members.map(photo => photo.apple_photo_id)]))) !== group.group_hash) return null;
+  const key = `assets/${filename}`;
+  return members.slice(1).some(photo => photo.r2_key === key) ? { contentHash: filename.slice(0, 64), r2Key: key } : null;
 }
 
 // Take over terminal work without discarding an unresolved external write.

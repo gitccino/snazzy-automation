@@ -13,3 +13,9 @@ CREATE TABLE product_image_originals (
   preview_filename TEXT NOT NULL, variant TEXT NOT NULL, created_at TEXT NOT NULL,
   PRIMARY KEY(record_id, attachment_id)
 );
+CREATE TABLE product_group_image_members (
+  group_id TEXT NOT NULL REFERENCES product_groups(id),
+  ordinal INTEGER NOT NULL, apple_photo_id TEXT NOT NULL, r2_key TEXT,
+  PRIMARY KEY(group_id, ordinal), UNIQUE(group_id, apple_photo_id)
+);
+ALTER TABLE publication_jobs ADD COLUMN image_error_json TEXT;
