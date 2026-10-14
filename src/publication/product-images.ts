@@ -47,38 +47,13 @@ async function verifiedAliases(deps: ImagePreparationDeps, owner: ImageOwner, in
     }
     // Airtable does not consistently supply original dimensions; inspect delivered preview bytes.
     const downloaded = await downloadJpegAttachment(deps.fetcher, image);
-    const { width, height } = jpegDimensions(downloaded.bytes);
-    if (width > 600 || height > 600) throw error("product_image_preview_invalid");
     try {
       const decoded = jpeg.decode(new Uint8Array(downloaded.bytes), { maxResolutionInMP: 1, maxMemoryUsageInMB: 32, tolerantDecoding: false });
-      if (decoded.width !== width || decoded.height !== height) throw error("product_image_preview_invalid");
+      if (decoded.width > 600 || decoded.height > 600) throw error("product_image_preview_invalid");
     } catch { throw error("product_image_preview_invalid"); }
     aliases.push({ sourceAttachmentId: descriptor.sourceAttachmentId, previewAttachmentId: image.id });
   }
   return aliases;
-}
-
-// Inspect JPEG frame dimensions without decoding a full image buffer in the Worker.
-function jpegDimensions(buffer: ArrayBuffer): { width: number; height: number } {
-  const bytes = new Uint8Array(buffer);
-  let position = 2;
-  while (position + 4 <= bytes.length) {
-    if (bytes[position++] !== 0xff) throw error("product_image_preview_invalid");
-    while (bytes[position] === 0xff) position++;
-    const marker = bytes[position++];
-    if (marker === 0xda || marker === 0xd9) break;
-    if (marker === 0x01 || (marker !== undefined && marker >= 0xd0 && marker <= 0xd7)) continue;
-    if (position + 2 > bytes.length) break;
-    const length = bytes[position]! * 256 + bytes[position + 1]!;
-    if (length < 2 || position + length > bytes.length) break;
-    if (marker !== undefined && [0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker) && length >= 8) {
-      const height = bytes[position + 3]! * 256 + bytes[position + 4]!;
-      const width = bytes[position + 5]! * 256 + bytes[position + 6]!;
-      if (width > 0 && height > 0) return { width, height };
-    }
-    position += length;
-  }
-  throw error("product_image_preview_invalid");
 }
 
 export async function reconcileProductImageIntent(deps: ImagePreparationDeps, owner: ImageOwner): Promise<"ready" | "original" | "pending" | "conflicted"> {
@@ -243,10 +218,16 @@ const reasons: Record<string, string> = {
   product_image_owner_unknown: "ตรวจสอบสถานะงานเตรียมรูปไม่ได้ กรุณาลอง /docs อีกครั้ง",
 };
 
+export class ProductImagePreparationFailure extends Error {
+  constructor(reason: string) { super(reason); this.name = "ProductImagePreparationFailure"; }
+}
+
 export async function preparePublicationImages(deps: ImagePreparationDeps, validated: RawValidatedPublication, workflowId: string, step: WorkflowStep): Promise<ValidatedPublication> {
   const retry = { retries: { limit: deps.config.publicationRetryLimit, delay: "10 seconds" as const, backoff: "exponential" as const }, timeout: "5 minutes" as const };
   const products: PublicationProduct[] = [];
-  for (const product of validated.run.products) {
+  let safeFailure = "เตรียมรูปสินค้าไม่สำเร็จ กรุณาตรวจสอบ Airtable แล้วลอง /docs อีกครั้ง";
+  try {
+    for (const product of validated.run.products) {
     let context: ImagePreparationContext | undefined;
     let position: number | undefined;
     const call = async <T>(fn: () => Promise<T>): Promise<T> => {
@@ -255,6 +236,7 @@ export async function preparePublicationImages(deps: ImagePreparationDeps, valid
         const code = failure instanceof OperationalError ? failure.code : "product_image_preparation_failed";
         const retryable = failure instanceof OperationalError ? failure.retryable : true;
         const safe = `${product.productId}${position === undefined ? "" : `: รูปที่ ${position + 1}`} — ${reasons[code] ?? "เตรียมรูปไม่สำเร็จ กรุณาตรวจสอบ Airtable แล้วลอง /docs อีกครั้ง"}`;
+        safeFailure = safe;
         if (context && !retryable) {
           try { await failImagePreparation(deps.db, deps.clock, context.owner, code === "product_image_source_changed" ? "conflicted" : "failed", safe); } catch { /* Preserve the original failure if ownership changed. */ }
         }
@@ -271,4 +253,5 @@ export async function preparePublicationImages(deps: ImagePreparationDeps, valid
     products.push(await step.do(`images ${product.airtableRecordId} replace`, retry, () => call(() => replaceProductImagePreviews(deps, context!))));
   }
   return { ...validated, run: { ...validated.run, products } };
+  } catch { throw new ProductImagePreparationFailure(safeFailure); }
 }

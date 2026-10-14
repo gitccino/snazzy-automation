@@ -12,7 +12,7 @@ import {
   persistFinalizationIntent, completePublicationGeneration,
 } from "../db/publication-repository";
 import {
-  loadRunById, markRunFailed, markRunGenerated, markRunGenerating,
+  loadRawRunById, markRunFailed, markRunGenerated, markRunGenerating,
   markRunNeedsCorrection, updateProductCollage,
   readPublishedRun,
 } from "./airtable-runs";
@@ -38,6 +38,7 @@ export interface PublicationServiceDeps {
   config: AppConfig;
   airtableToken: string;
   googleOAuthCredentials: GoogleOAuthCredentials;
+  imageExecutionStatus?(workflowId: string): Promise<"active" | "terminal" | "unknown">;
   notify(text: string, contents?: Record<string, unknown>): Promise<void>;
 }
 
@@ -60,7 +61,7 @@ export interface PreparedPublication extends ValidatedPublication {
 }
 
 export type ValidationStageOutcome =
-  | { kind: "valid"; value: ValidatedPublication }
+  | { kind: "valid"; value: RawValidatedPublication }
   | { kind: "already_succeeded"; result: PublicationResult }
   | { kind: "validation_failed"; thaiDate: string; validation: ValidationResult };
 
@@ -127,7 +128,7 @@ export async function validatePublication(
       throw new OperationalError("publication_job_locked", "Publication job is owned by another workflow", false);
     }
   }
-  const run = await loadRunById(deps.fetcher, deps.config, deps.airtableToken, publicationRunId);
+  const run = await loadRawRunById(deps.fetcher, deps.config, deps.airtableToken, publicationRunId);
   if (acquired.alreadySucceeded) {
     return { kind: "already_succeeded", result: publicationResult(publicationRunId, acquired.job, run.products.map(p => p.productId)) };
   }
