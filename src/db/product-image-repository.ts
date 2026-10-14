@@ -137,3 +137,12 @@ export async function findImportedOriginal(db: D1Database, recordId: string, fil
     .bind(recordId, `assets/${filename}`).first<{ content_hash: string; r2_key: string }>();
   return row ? { contentHash: row.content_hash, r2Key: row.r2_key } : null;
 }
+
+// Take over terminal work without discarding an unresolved external write.
+export async function resumeImagePreparation(db: D1Database, clock: Clock, workflowId: string, observed: ImagePreparation): Promise<ImageOwner | null> {
+  const result = await db.prepare(`UPDATE product_image_preparations SET owner_workflow_id = ?, generation = generation + 1,
+    state = CASE WHEN intent_json IS NULL THEN 'preparing' ELSE 'replacing' END, updated_at = ?, safe_error = NULL
+    WHERE record_id = ? AND owner_workflow_id = ? AND generation = ? AND state = ?`)
+    .bind(workflowId, clock.now().toISOString(), observed.recordId, observed.workflowId, observed.generation, observed.state).run();
+  return result.meta.changes === 1 ? { recordId: observed.recordId, workflowId, generation: observed.generation + 1 } : null;
+}
