@@ -154,6 +154,7 @@ Detect staff changes with the re-read before replacement and verification afterw
 - Apply bounded download timeouts and enforce size limits while reading, not only through Content-Length.
 - Set an initial per-image cap of 20,000,000 bytes, matching a conservative interpretation of the Images binding's documented 20 MB input limit. Files exceeding this cap fail before replacement. [Cloudflare Images limits](https://developers.cloudflare.com/images/get-started/limits/)
 - Use the existing import-supported image media types and detected extensions. Reject unsupported types, corrupt files, and transformation failures with product/image context. Do not expand format support in this feature.
+- The current `SourcePhoto` contract in `src/icloud/types.ts` supports JPEG only. Initial manual preparation therefore accepts JPEG bytes and stores `.jpg` originals; the filename compatibility rule above remains applicable to legacy mappings.
 - Keep bytes inside the individual processing step. D1 and durable step results contain metadata and keys, not image buffers.
 - Redact attachment URLs and signed asset URLs from logs and user replies. Record operation ID, product record ID, image position, state, and safe error category for diagnostics.
 
