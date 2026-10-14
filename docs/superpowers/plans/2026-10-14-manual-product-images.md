@@ -350,3 +350,17 @@ Distinguish existing failures from new regressions using the same commands on th
 ## Handoff
 
 Implementation uses Native execution as previously requested. Review this plan before execution, as required by the writing-plans skill. Planning does not modify product code, Airtable attachments, R2 objects, or deployed Workers.
+
+## Native execution record — 2026-10-14
+
+Product code and runbook are implemented on `docs/manual-product-images-spec`. Typecheck, local D1 migrations (including 0009), and staging deploy dry run pass. A fresh whole-branch review identified recovery/provenance issues; the fix pass addressed them. Automated tests, fault-injection tests, and the disposable live Airtable/LINE smoke check were not added or run: session developer instructions require an explicit testing request. Remote migration, deployment, PR, and merge remain outside this implementation turn.
+
+Review-driven refinements:
+
+- Immutable `product_group_image_members` are recorded from current import snapshots before the succeeded-group skip. Historical position ranges are only candidates and must reproduce the stored group hash. Unprovable legacy candidates require exact preview-byte matching before original reuse; unknown hash filenames use ordinary source archival.
+- Read-only mapped-preview reuse permits a completed operation to return after another workflow reclaims ready ownership. Every write remains fenced.
+- Sanitized error product/position/category is saved in `publication_jobs.image_error_json` and reloaded after durable failure replay.
+- Cached pre-upgrade validated products hydrate current attachment metadata in a durable step. Legacy prepared adapter exports remain for compatibility; production validation uses the raw path.
+- Ambiguous unmatched previews after a conflict require original-image correction; the implementation will not guess which full-resolution original belongs to them.
+
+The implementation is not evidence of live attachment ingestion or crash-recovery correctness. Those acceptance checks remain pending before rollout to client data.

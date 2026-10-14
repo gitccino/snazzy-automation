@@ -38,3 +38,25 @@ Review and back up the target D1 database, then apply all pending migrations, in
 Do not downgrade to a Worker without generation support while a replacement is active or has pending finalization. Preserve the new columns and saved intent during rollback; reconcile unfinished work first.
 
 In staging, use an existing successful row for today's Bangkok date: change Products, set `Ready`, send LINE `/docs`, and verify the new `(v2)` Doc, latest URL, and preserved original. A second `/docs` while still `Generated` must keep that Doc. See [regeneration operations](operations.md#regenerate-todays-publication) for retry behavior.
+
+## Manually added product images
+
+For manually created products, fill the required fields including both LINE Square Price and IG Price, attach at least four JPEG images, and link the product to today's Publication Run. Each image must be at most 20,000,000 bytes. Filenames may contain spaces or Thai characters. Finish editing the images before sending `/docs`.
+
+The publication workflow archives every attached original in R2 before replacing the product's image attachments. Airtable then contains JPEG previews within 600 × 600, preserving aspect ratio, count and order. Preview filenames become the original R2 hash basename (for example `<hash>.jpg`). The document collage uses the first four original images in Airtable order. Product ID, prices, text and System Group ID are unchanged by image preparation. Images beyond the first four are also archived.
+
+Retries reuse saved original mappings. Known `/upload` products reuse their verified import originals, rather than downloading previews as originals. Reordering known previews changes collage order. New attachments are archived before replacing those new entries; previously managed previews retain their attachment IDs.
+
+If `/docs` reports a changed image list, finish editing Airtable and retry. If an interrupted replacement leaves an unmatched preview whose original mapping cannot be proven, restore that entry's original JPEG before retrying. Do not reset D1 locks manually. Missing known originals must be restored from a backup; the system will not substitute a small preview for an original.
+
+Concurrent edits remain a limitation: Airtable provides no conditional write in this adapter, so a staff change in the final read/PATCH window or a late timed-out PATCH may race with replacement. Images present in the captured snapshot are backed up; a newly added image outside that snapshot may not be. Avoid editing Product Images until the `/docs` attempt finishes.
+
+### Preparation migration and rollback
+
+Apply pending migrations including `0009_product_image_preparation.sql` before deploying the preparation-enabled Worker. Use the existing environment-specific migration/deployment scripts, and run a staging dry-run first. No additional secrets, Airtable fields, bucket or Workflow binding are required.
+
+Once manually attached images have been converted, rollback must retain mapping-aware original resolution and the additive D1 tables. Do not revert to filename-only resolution, drop mappings or delete archived originals. Unknown attachment-write outcomes retain intent for reconciliation on a later attempt.
+
+Before enabling this for client records, use an authorized disposable five-image product/run to verify Airtable ingestion, preview dimensions, unchanged metadata, R2 original hashes and a successful LINE `/docs` response. This live check is a rollout prerequisite; typechecking and a dry-run deployment do not prove external attachment ingestion.
+
+Migration 0009 also records immutable import-group image membership and replay-safe publication diagnostics. New imports save the current ordered members instead of relying on historical iCloud positions. Legacy membership candidates must reproduce their stored group hash; where this is impossible, reuse requires matching the attachment's bytes to a rendered preview of the candidate original. Such legacy recovery can incur an extra download/transformation. Hash-shaped filenames by themselves do not prove that an attachment is a preview.

@@ -152,7 +152,7 @@ export async function ensureProductOriginal(deps: ImagePreparationDeps, context:
     if (!image) throw error("product_image_source_changed");
     const downloaded = await downloadJpegAttachment(deps.fetcher, image);
     const contentHash = await sha256Hex(downloaded.bytes);
-    const recovered = await proveLegacyPreview(deps, context, image, downloaded.bytes, contentHash);
+    const recovered = await proveLegacyPreview(deps, context, image, contentHash);
     if (recovered) {
       await saveOriginalImage(deps.db, deps.clock, context.owner, recovered);
       return recovered;
@@ -171,7 +171,7 @@ export async function ensureProductOriginal(deps: ImagePreparationDeps, context:
 }
 
 async function proveLegacyPreview(deps: ImagePreparationDeps, context: ImagePreparationContext, image: DownloadableProductAttachment,
-  bytes: ArrayBuffer, contentHash: string): Promise<OriginalImage | null> {
+  contentHash: string): Promise<OriginalImage | null> {
   if (!/^[a-f0-9]{64}\.jpg$/.test(image.filename) || contentHash === image.filename.slice(0, 64)) return null;
   const key = `assets/${image.filename}`;
   const candidate = await deps.db.prepare(`SELECT r2_key FROM product_image_originals WHERE record_id = ? AND r2_key = ?
@@ -184,7 +184,7 @@ async function proveLegacyPreview(deps: ImagePreparationDeps, context: ImagePrep
   if (!original) return null;
   // Filename is a candidate, not proof. Require exact preview bytes before using the original.
   const preview = await (await renderAirtablePreview(deps.images, original.body)).arrayBuffer();
-  if (await sha256Hex(preview) !== await sha256Hex(bytes)) return null;
+  if (await sha256Hex(preview) !== contentHash) return null;
   return { recordId: context.owner.recordId, attachmentId: image.id, attachmentKind: "preview", originalFilename: image.filename,
     contentHash: image.filename.slice(0, 64), r2Key: key, byteLength: original.size, mediaType: "image/jpeg",
     previewFilename: image.filename, variant: AIRTABLE_PREVIEW_VARIANT };
