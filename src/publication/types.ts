@@ -52,3 +52,21 @@ export interface PublicationRun {
   status: PublicationRunStatus;
   products: PublicationProduct[];
 }
+
+export interface ProductAttachment {
+  id: string;
+  filename: string;
+  size?: number;
+  type?: string;
+  width?: number;
+  height?: number;
+}
+export type RawPublicationProduct = Omit<PublicationProduct, "orderedImageKeys"> & { attachments: ProductAttachment[] };
+export type RawPublicationRun = Omit<PublicationRun, "products"> & { products: RawPublicationProduct[] };
+export interface DownloadableProductAttachment extends ProductAttachment { url: string }
+export interface ProductAttachmentRecord {
+  airtableRecordId: string;
+  productId: string;
+  attachments: DownloadableProductAttachment[];
+}
+export type ProductImagePatch = { id: string } | { url: string; filename: string };

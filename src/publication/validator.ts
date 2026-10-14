@@ -1,4 +1,4 @@
-import type { PublicationProduct } from "./types";
+import type { PublicationProduct, RawPublicationProduct } from "./types";
 
 export interface ProductMissingFields {
   productId: string;
@@ -10,7 +10,7 @@ export interface ValidationResult {
   productsMissingFields: ProductMissingFields[];
 }
 
-const REQUIRED_TEXT_FIELDS: Array<{ key: keyof PublicationProduct; label: string }> = [
+const REQUIRED_TEXT_FIELDS: Array<{ key: "brandName" | "modelName" | "conditionType" | "size" | "description"; label: string }> = [
   { key: "brandName", label: "Brand Name" },
   { key: "modelName", label: "Model Name" },
   { key: "conditionType", label: "Condition Type" },
@@ -20,7 +20,7 @@ const REQUIRED_TEXT_FIELDS: Array<{ key: keyof PublicationProduct; label: string
 
 const MIN_COLLAGE_IMAGES = 4;
 
-export function validateRunCompleteness(products: PublicationProduct[]): ValidationResult {
+export function validateRunCompleteness(products: Array<PublicationProduct | RawPublicationProduct>): ValidationResult {
   if (products.length === 0) {
     return {
       valid: false,
@@ -40,7 +40,7 @@ export function validateRunCompleteness(products: PublicationProduct[]): Validat
       }
     }
 
-    if (product.orderedImageKeys.length < MIN_COLLAGE_IMAGES) {
+    if (("attachments" in product ? product.attachments.length : product.orderedImageKeys.length) < MIN_COLLAGE_IMAGES) {
       missingFields.push(`Product Images (needs at least ${MIN_COLLAGE_IMAGES})`);
     }
 

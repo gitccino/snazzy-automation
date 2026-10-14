@@ -23,7 +23,7 @@ import {
   copyTemplate, deleteDocument, fillTemplate, finalizeDocument,
   findTemporaryDocument, verifyDocumentContainsProducts, type DocProductContent,
 } from "./google-docs";
-import type { PublicationProduct, PublicationResult, PublicationRun, PublicationFinalizationIntent } from "./types";
+import type { PublicationProduct, PublicationResult, PublicationRun, PublicationFinalizationIntent, RawPublicationRun } from "./types";
 import { publicationWorkflowId } from "./types";
 import { formatValidationErrorSummary, validateRunCompleteness, type ValidationResult } from "./validator";
 
@@ -46,6 +46,8 @@ export interface ValidatedPublication {
   thaiDate: string;
   generation?: number;
 }
+
+export type RawValidatedPublication = Omit<ValidatedPublication, "run"> & { run: RawPublicationRun };
 
 export interface PreparedProductOutput {
   product: PublicationProduct;
