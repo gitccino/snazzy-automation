@@ -24,8 +24,8 @@ describe("LINE Thai messages", () => {
     expect(helpText()).toContain("/soldout A-1234 ราคา 1,290 บาท");
   });
 
-  it("asks for one price when a sold-out command contains several", () => {
-    expect(parseErrorText("multiple_prices")).toBe("⚠️ พบหลายยอดเงินหรือข้อความราคาไม่ชัดเจน\nกรุณาระบุราคาขายเพียงหนึ่งยอด เช่น ราคาขาย 12,000 บาท");
+  it("asks users to label the sale price when a sold-out command contains several amounts", () => {
+    expect(parseErrorText("multiple_prices")).toBe("⚠️ พบหลายยอดเงินหรือข้อความราคาไม่ชัดเจน\nกรุณาใช้คำว่า \"ราคาขาย\" ก่อนราคาสินค้า เช่น ราคาขาย 12,000 บาท");
   });
 
   it("shows searchable inventory fields without sale details", () => {
