@@ -11,7 +11,7 @@ const attemptOptions = { retries: { limit: 0, delay: "1 second" }, timeout: "1 m
 const waits = ["30 seconds", "1 minute"] as const;
 
 interface RecoveryOperations {
-  prepare(): Promise<CommandReply>;
+  prepare(): Promise<CommandReply | null>;
   deliver(reply: CommandReply, retryKey: string): Promise<void>;
   notify(text: string, retryKey: string): Promise<void>;
 }
@@ -34,7 +34,10 @@ export async function runLineCommandRecovery(step: Pick<WorkflowStep, "do" | "sl
         console.error("LINE preparation step interrupted", error);
         return { ok: false as const, retryable: true };
       });
-      if (prepared.ok) reply = prepared.reply;
+      if (prepared.ok) {
+        if (prepared.reply === null) return { status: "ignored" as const };
+        reply = prepared.reply;
+      }
       else if (!prepared.retryable) break;
     }
     if (reply !== null) {
