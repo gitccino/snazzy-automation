@@ -1,3 +1,4 @@
+import { fakeMutationCoordinator } from "../helpers/mutation";
 import { expect, it, vi } from "vitest";
 import { createLineRepository } from "../../src/db/line-repository";
 import { createInventoryClient, type InventoryClient } from "../../src/line/airtable-inventory";
@@ -21,13 +22,14 @@ function setup(legacy: Partial<SaleValues> = {}) {
   };
   const writes: SaleValues[] = [];
   const inventory = {
+    listSalesForDay: vi.fn().mockResolvedValue([]),
     findByProductId: vi.fn(async () => ({ ...state })),
     updateSaleValues: vi.fn(async (_recordId: string, values: SaleValues) => {
       writes.push(values);
       state = { ...state, ...values };
     }),
   } satisfies InventoryClient;
-  const d = { repo: createLineRepository(testEnv().DB, ids, clock), inventory, ids, clock };
+  const d = { repo: createLineRepository(testEnv().DB, ids, clock), inventory, ids, clock, mutation: fakeMutationCoordinator(inventory) };
   const source = (name: string) => `${productId}-${name}`;
   return { d, actor, productId, source, writes, state: () => state, setTime: (iso: string) => { now = new Date(iso); } };
 }
@@ -120,7 +122,7 @@ it("restores exact legacy In values through the real Airtable writer and D1 audi
     }
     return Response.json({ records: [{ id: "rec1", fields }] });
   } });
-  const d = { ...h.d, inventory };
+  const d = { ...h.d, inventory, mutation: fakeMutationCoordinator(inventory) };
   await prepareSoldout({ productId: h.productId, soldPrice: 100 }, h.actor, h.source("sale"), false, d);
   await prepareRevert(h.actor, h.source("revert"), d);
   const pending = (await d.repo.findPendingBySourceEvent(h.source("revert")))!;

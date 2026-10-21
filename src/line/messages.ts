@@ -61,6 +61,7 @@ export function helpText(): string {
 
 export function parseErrorText(code: ParseErrorCode): string {
   const messages: Record<ParseErrorCode, string> = {
+    invalid_report_command: "⚠️ รูปแบบคำสั่งไม่ถูกต้อง ใช้ /report หรือ /report วัน/เดือน/ปี ค.ศ. เช่น /report 7/10/2026",
     unknown_command: "⚠️ ไม่รู้จักคำสั่ง ใช้ /help",
     missing_product_id: "⚠️ ไม่พบรหัสสินค้า",
     invalid_product_id: "⚠️ รูปแบบรหัสไม่ถูกต้อง",
@@ -68,7 +69,7 @@ export function parseErrorText(code: ParseErrorCode): string {
     missing_price: "⚠️ ไม่พบราคาขาย",
     invalid_price: "⚠️ รูปแบบราคาขายไม่ถูกต้อง",
     invalid_publication_date: "⚠️ วันที่ไม่ถูกต้อง ใช้ /docs วัน/เดือน/ปี ค.ศ. เช่น /docs 3/10/2026",
-    multiple_prices: "⚠️ พบหลายยอดเงินหรือข้อความราคาไม่ชัดเจน\nกรุณาระบุราคาขายเพียงหนึ่งยอด เช่น ราคาขาย 12,000 บาท",
+    multiple_prices: "⚠️ พบหลายยอดเงินหรือข้อความราคาไม่ชัดเจน\nกรุณาใช้คำว่า \"ราคาขาย\" ก่อนราคาสินค้า เช่น ราคาขาย 12,000 บาท",
   };
   return messages[code];
 }

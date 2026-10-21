@@ -132,3 +132,30 @@ describe("computeGroupHash", () => {
     expect(a).not.toBe(b);
   });
 });
+
+it("closes product groups at ignore markers and resumes only at product markers", async () => {
+  const input: GroupingPhoto[] = [photo("m1", 1, true), photo("p1", 2),
+    { ...photo("ignore", 3), markerKind: "ignore_start", r2Key: null }, photo("extra", 4),
+    photo("m2", 5, true), photo("p2", 6)];
+  const result = groupByMarkers(input);
+  expect(result.groups.map(g => g.photos.map(p => p.applePhotoId))).toEqual([["m1", "p1"], ["m2", "p2"]]);
+  expect(result.ignoredPhotos.map(p => p.applePhotoId)).toEqual(["ignore", "extra"]);
+  expect(result.orphanPhotos).toEqual([]);
+  const legacyHash = await computeGroupHash("album", [photo("m1", 1, true), photo("p1", 2)]);
+  expect(await computeGroupHash("album", result.groups[0]!.photos)).toBe(legacyHash);
+});
+
+it("ignores repeated markers and ordinary photos before any product in position order", () => {
+  const input: GroupingPhoto[] = [photo("extra", 3),
+    { ...photo("i2", 2), markerKind: "ignore_start", r2Key: null },
+    { ...photo("i1", 1), markerKind: "ignore_start", r2Key: null }];
+  const result = groupByMarkers(input);
+  expect(result.groups).toEqual([]);
+  expect(result.orphanPhotos).toEqual([]);
+  expect(result.ignoredPhotos.map(p => p.applePhotoId)).toEqual(["i1", "i2", "extra"]);
+});
+
+it("preserves an empty product group when an ignore marker immediately closes it", () => {
+  const result = groupByMarkers([photo("m1", 1, true), { ...photo("i1", 2), markerKind: "ignore_start" }]);
+  expect(result.groups.map(g => g.photos.map(p => p.applePhotoId))).toEqual([["m1"]]);
+});

@@ -235,3 +235,31 @@ return dailySalesReportCard(products, date, command.page, date === today);
 ## Known practical limits
 
 Reports use current records rather than a historical ledger. Airtable is not a consistent multi-page snapshot, and each navigation command queries again; edits may change totals/pages. Missing Sold At cannot be assigned to any date. Every request reads all matching records to avoid partial totals, so high-volume days increase latency; introduce a stored snapshot or background report only if measured volume requires it.
+
+## Execution outcome — 2026-10-07
+
+Tasks 1–4 are implemented and committed on `feat/daily-sales-report` in `/tmp/snazzy-daily-sales-report`. No deployment, push, PR, or merge has been performed for this feature.
+
+Validation:
+
+- Type checking and diff checking passed.
+- Five focused inventory/card/search/webhook/route files: 99 tests passed after the review fix.
+- The report parser check passed separately.
+- Wider LINE/time regression run: 189 passed and 7 failed before the final diagnostics fix. All seven failures also reproduce in the original checkout: one existing `/soldout` THB parsing bug and six old warning-copy expectations. They are not report regressions.
+- Independent review found one Important issue: friendly report errors discarded diagnostics. Fixed using the existing sanitized logger, with a regression check observed failing and then passing.
+- A ten-row long-Unicode stress payload measured 11,239 bytes locally; the reviewer independently measured 12,349 bytes with both navigation buttons and large prices. Both fit the [official 30 KB LINE bubble limit](https://developers.line.biz/en/reference/messaging-api/nojs/#bubble).
+- Real Airtable query behavior and live LINE visual rendering have not been exercised.
+
+Rulings made:
+
+- Used an isolated `/tmp` worktree and the installed dependencies to protect local changes. Cost if unsuitable: relocate the worktree.
+- Ran the approved focused checks and related LINE regressions, without unrelated acceptance suites. Cost: regressions outside those checks are not ruled out.
+- Kept the pre-existing soldout parser/copy failures outside this feature. Cost: those seven baseline failures remain.
+- Grouped dependent interface mock updates with Task 4 integration rather than Task 2; intermediate commits require subsequent integration for type checking. Final branch type checking passes.
+- Retained current-record semantics across page clicks and excluded records missing Sold At, as approved. Cost: edited totals can change and undated sales cannot be assigned to a report.
+- Retained the existing group-member profile lookup dependency. Cost: a profile lookup failure can prevent a report reply, as for other commands.
+- Deferred live Airtable and LINE validation until deployment. Cost: actual API filtering and device layout remain unverified.
+
+Deferred minor finding:
+
+- Expand the automated payload-size regression check from one product to ten long-Unicode rows with both navigation buttons. Manual stress checks cover the current payload, but do not protect every future rendering change.

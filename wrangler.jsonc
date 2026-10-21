@@ -14,7 +14,13 @@
       "name": "snazzy-publication-workflow-local",
       "binding": "PUBLICATION_WORKFLOW",
       "class_name": "PublicationWorkflow"
-    }
+    },
+    {
+      "binding": "LINE_COMMAND_WORKFLOW",
+      "name": "snazzy-line-command-local",
+      "class_name": "LineCommandWorkflow"
+    },
+      { "binding": "LINE_MUTATION_FOLLOWUP_WORKFLOW", "name": "snazzy-line-mutation-followup-local", "class_name": "LineMutationFollowupWorkflow" }
   ],
   "d1_databases": [
     {
@@ -70,7 +76,13 @@
           "binding": "PUBLICATION_WORKFLOW",
           "name": "snazzy-publication-staging",
           "class_name": "PublicationWorkflow"
-        }
+        },
+        {
+          "binding": "LINE_COMMAND_WORKFLOW",
+          "name": "snazzy-line-command-staging",
+          "class_name": "LineCommandWorkflow"
+        },
+      { "binding": "LINE_MUTATION_FOLLOWUP_WORKFLOW", "name": "snazzy-line-mutation-followup-staging", "class_name": "LineMutationFollowupWorkflow" }
       ]
     },
     "production": {
@@ -102,7 +114,13 @@
           "binding": "PUBLICATION_WORKFLOW",
           "name": "snazzy-publication-production",
           "class_name": "PublicationWorkflow"
-        }
+        },
+        {
+          "binding": "LINE_COMMAND_WORKFLOW",
+          "name": "snazzy-line-command-production",
+          "class_name": "LineCommandWorkflow"
+        },
+      { "binding": "LINE_MUTATION_FOLLOWUP_WORKFLOW", "name": "snazzy-line-mutation-followup-production", "class_name": "LineMutationFollowupWorkflow" }
       ]
     }
   }

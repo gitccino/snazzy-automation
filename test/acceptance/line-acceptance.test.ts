@@ -1,3 +1,4 @@
+import { fakeMutationCoordinator } from "../helpers/mutation";
 import { describe, expect, it, vi } from "vitest";
 import type { LineRepository } from "../../src/db/line-repository";
 import type { InventoryClient } from "../../src/line/airtable-inventory";
@@ -109,6 +110,7 @@ function pending(kind: "soldout" | "revert"): PendingLineCommand {
 
 function deps(found: InventoryProduct | null): SoldoutDeps {
   const inventory = {
+    listSalesForDay: vi.fn().mockResolvedValue([]),
     findByProductId: vi.fn().mockResolvedValue(found),
     updateSaleValues: vi.fn().mockResolvedValue(undefined),
   } satisfies InventoryClient;
@@ -127,6 +129,7 @@ function deps(found: InventoryProduct | null): SoldoutDeps {
     latestReversible: vi.fn().mockResolvedValue(action()),
   } satisfies LineRepository;
   return {
+    mutation: fakeMutationCoordinator(inventory),
     clock: { now: () => new Date("2026-09-01T10:00:00.000Z") },
     ids: { next: () => "tok" },
     inventory,

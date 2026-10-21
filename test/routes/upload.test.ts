@@ -50,6 +50,19 @@ describe("handleUploadTrigger", () => {
     expect(JSON.stringify([body, create.mock.calls])).not.toContain("TEST-TOKEN-ABC123");
     expect(JSON.stringify([body, create.mock.calls])).not.toContain("test-admin-route-token");
   });
+  it("reuses the same import run after an uncertain Workflow start response", async () => {
+    const { env } = triggerEnv();
+    await createSequenceRepository(env.DB).bootstrap("product_id", 1);
+    const createBatch = vi.fn().mockRejectedValueOnce(new Error("response lost")).mockResolvedValue([]);
+    env.IMPORT_WORKFLOW = { createBatch } as unknown as typeof env.IMPORT_WORKFLOW;
+    await expect(handleUploadTrigger(env, "line", "line-stable-event")).rejects.toMatchObject({ retryable: true });
+    expect((await handleUploadTrigger(env, "line", "line-stable-event")).status).toBe(202);
+    expect(createBatch.mock.calls[0]).toEqual(createBatch.mock.calls[1]);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM import_runs").first("count")).toBe(1);
+    await env.DB.prepare("UPDATE import_runs SET status = 'completed' WHERE id = ?").bind("line-stable-event").run();
+    expect((await handleUploadTrigger(env, "line", "line-stable-event")).status).toBe(202);
+    expect(createBatch).toHaveBeenCalledTimes(2);
+  });
   // Mutation: letting the D1 uniqueness race reject instead of returning a benign conflict.
   it("allows one concurrent running import per album using real D1", async () => {
     const { env, create } = triggerEnv();

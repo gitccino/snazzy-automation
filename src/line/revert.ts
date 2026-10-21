@@ -37,6 +37,7 @@ export async function prepareRevert(
 ): Promise<CommandReply> {
   const existing = await deps.repo.findPendingBySourceEvent(sourceEventId);
   if (existing !== null) {
+    if (['failed','rejected','expired'].includes(existing.status)) return {kind:'text',text:'คำยืนยันหมดอายุหรือถูกใช้แล้ว'};
     if (existing.kind !== "revert") {
       throw new Error("source event belongs to another command");
     }
@@ -50,6 +51,10 @@ export async function prepareRevert(
       text: "ไม่มีคำสั่งที่ย้อนกลับได้ในกลุ่มนี้",
     };
   }
+  const recovery = await deps.mutation.recover(action.productId,requester.groupId);
+  if (recovery.status === 'busy') return {kind:'text',text:'⚠️ มีงานปรับปรุงสินค้ากำลังทำงานอยู่ กรุณาลองอีกครั้งภายหลัง'};
+  const latest = await deps.repo.latestReversible(requester.groupId);
+  if (latest?.id !== action.id) return {kind:'text',text:'⚠️ รายการที่ย้อนกลับได้เปลี่ยนแล้ว กรุณาส่ง /revert อีกครั้ง'};
   const product = await deps.inventory.findByProductId(action.productId);
   if (product === null) {
     return {
@@ -94,7 +99,7 @@ export async function prepareRevert(
   if (pending.kind !== "revert") {
     throw new Error("source event belongs to another command");
   }
-  return confirmationReply(pending);
+  return {...confirmationReply(pending),recoveryWarning:recovery.warning};
 }
 
 export async function resolveRevert(
@@ -105,6 +110,8 @@ export async function resolveRevert(
   correlationId: string,
   deps: SoldoutDeps,
 ): Promise<CommandReply> {
+  const recovery = await deps.mutation.recoverToken(token,actor.groupId);
+  if (recovery.status === 'busy') return {kind:'text',text:'⚠️ มีงานปรับปรุงสินค้ากำลังทำงานอยู่ กรุณาลองอีกครั้งภายหลัง'};
   const pending = await deps.repo.claimPending(
     token,
     actor.groupId,
@@ -164,7 +171,7 @@ export async function resolveRevert(
     }
 
     if (matchesSaleValues(product, pending.before)) {
-      await deps.inventory.updateSaleValues(product.recordId, pending.after);
+      await deps.mutation.write(pending,product.recordId,resolver,correlationId);
     } else if (matchesSaleValues(product, pending.after)) {
       // A previous attempt may already have restored the exact values.
     } else {
@@ -192,10 +199,12 @@ export async function resolveRevert(
       actor: resolver,
       correlationId,
     });
+    await deps.mutation.committed(pending.productId);
     return {
       kind: "text",
       text: `ย้อนกลับ ${pending.productId} สำเร็จ`,
       revertSuccess: true,
+      recoveryWarning: recovery.warning,
     };
   } catch (error) {
     // Claiming persists the complete revert intent. Even a read failure on this

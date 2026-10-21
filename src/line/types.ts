@@ -2,17 +2,20 @@ import { z } from "zod";
 
 export type ParsedCommand =
   | { type: "help" }
+  | { type: "report"; reportDate?: string; page: number }
   | { type: "search"; productId: string }
   | { type: "upload" }
   | { type: "testupload"; caseNumber: number | null }
   | { type: "testsearch"; caseNumber: number | null }
   | { type: "testsoldout"; caseNumber: number | null }
+  | { type: "testreport"; caseNumber: number | null; page: number }
   | { type: "testdocs"; caseNumber: number | null }
   | { type: "docs"; publicationDate?: string }
   | { type: "soldout"; productId: string; soldPrice: number }
   | { type: "revert" };
 
 export type ParseErrorCode =
+  | "invalid_report_command"
   | "unknown_command"
   | "missing_product_id"
   | "invalid_product_id"
@@ -50,7 +53,7 @@ export interface InventoryProduct extends SaleValues {
 }
 
 export type PendingCommandKind = "soldout" | "revert";
-export type PendingCommandStatus = "pending" | "applying" | "approved" | "rejected" | "expired";
+export type PendingCommandStatus = "pending" | "applying" | "approved" | "rejected" | "expired" | "failed";
 
 export interface PendingLineCommand {
   token: string;
@@ -129,4 +132,14 @@ export function parseSupportedLineEvents(value: unknown): SupportedLineEvent[] {
     const parsed = SupportedLineEventSchema.safeParse(event);
     return parsed.success ? [parsed.data] : [];
   });
+}
+
+export interface DailySaleProduct {
+  productCost: number | null;
+  recordId: string;
+  productId: string;
+  brandName: string | null;
+  modelName: string | null;
+  soldPrice: number;
+  soldAt: string;
 }

@@ -1,3 +1,4 @@
+import { OperationalError } from "../../src/shared/errors";
 import { parseLineCommand } from "../../src/line/parser";
 import { expect, it, vi } from "vitest";
 import {
@@ -12,8 +13,9 @@ function deps(
   docs: DocsTriggerResult = { status: "no_runnable_run" },
 ): ReadOnlyDeps {
   return {
+    clock: { now: () => new Date("2026-10-06T17:00:00Z") },
     publicBaseUrl: "https://worker.example",
-    inventory: { findByProductId: vi.fn().mockResolvedValue(null) },
+    inventory: { listSalesForDay: vi.fn().mockResolvedValue([]), findByProductId: vi.fn().mockResolvedValue(null) },
     triggerUpload: vi.fn<() => Promise<UploadTriggerResult>>().mockResolvedValue(upload),
     triggerDocs: vi.fn<() => Promise<DocsTriggerResult>>().mockResolvedValue(docs),
   };
@@ -149,4 +151,52 @@ it("previews all docs replies without invoking workflows or inventory reads", as
   expect(d.triggerDocs).not.toHaveBeenCalled();
   expect(d.triggerUpload).not.toHaveBeenCalled();
   expect(d.inventory.findByProductId).not.toHaveBeenCalled();
+});
+
+it("routes daily reports with Bangkok dates and no pipeline calls", async () => {
+  const d = deps();
+  await expect(handleReadOnlyCommand({ type: "report", page: 1 }, d)).resolves.toMatchObject({ kind: "flex" });
+  expect(d.inventory.listSalesForDay).toHaveBeenLastCalledWith("2026-10-07");
+  d.clock = { now: () => new Date("2026-10-06T16:59:59.999Z") };
+  await handleReadOnlyCommand({ type: "report", page: 1 }, d);
+  expect(d.inventory.listSalesForDay).toHaveBeenLastCalledWith("2026-10-06");
+  await handleReadOnlyCommand({ type: "report", reportDate: "2026-01-01", page: 1 }, d);
+  expect(d.inventory.listSalesForDay).toHaveBeenLastCalledWith("2026-01-01");
+  const reply = await handleReadOnlyCommand({ type: "report", reportDate: "2026-01-01", page: 2 }, d);
+  expect(reply).toContain("/report 01/01/2026");
+  expect(d.inventory.findByProductId).not.toHaveBeenCalled();
+  expect(d.triggerUpload).not.toHaveBeenCalled(); expect(d.triggerDocs).not.toHaveBeenCalled();
+});
+
+it.each(["airtable_inventory_report_invalid_record", "sales_report_invalid_total", "airtable_inventory_report_failed", "airtable_inventory_invalid_response", "airtable_inventory_report_invalid_response"])("maps report failure %s to warning instead of zero revenue", async code => {
+  const d = deps();
+  vi.mocked(d.inventory.listSalesForDay).mockRejectedValue(new OperationalError(code, "private diagnostic", false));
+  const reply = await handleReadOnlyCommand({ type: "report", page: 1 }, d);
+  expect(reply).toContain("⚠️"); expect(reply).not.toContain("0 บาท"); expect(reply).not.toContain("private diagnostic");
+  expect(reply).toContain(["airtable_inventory_report_invalid_record", "sales_report_invalid_total"].includes(code) ? "ข้อมูลการขาย" : "ดึงข้อมูลยอดขาย");
+});
+
+it("does not swallow unexpected programming errors in reports", async () => {
+  const d = deps();
+  vi.mocked(d.inventory.listSalesForDay).mockRejectedValue(new Error("unexpected"));
+  await expect(handleReadOnlyCommand({ type: "report", page: 1 }, d)).rejects.toThrow("unexpected");
+});
+
+it("preserves sanitized report diagnostics while delivering a friendly warning", async () => {
+  const d = deps();
+  const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    vi.mocked(d.inventory.listSalesForDay).mockRejectedValue(new OperationalError("airtable_inventory_report_failed", "Airtable inventory report failed with status 429", true));
+    const reply = await handleReadOnlyCommand({ type: "report", page: 1 }, d);
+    expect(reply).toContain("⚠️ ดึงข้อมูลยอดขาย");
+    expect(errorLog).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(errorLog.mock.calls[0]![0]))).toMatchObject({ code: "airtable_inventory_report_failed", reportDate: "2026-10-07", retryable: true, detail: "Airtable inventory report failed with status 429" });
+  } finally { errorLog.mockRestore(); }
+});
+
+it("lets durable processing retry temporary report failures instead of returning a final warning", async () => {
+  const d = deps();
+  const error = new OperationalError("airtable_inventory_report_failed", "Unavailable", true);
+  vi.mocked(d.inventory.listSalesForDay).mockRejectedValue(error);
+  await expect(handleReadOnlyCommand({ type: "report", page: 1 }, { ...d, retryTransientErrors: true })).rejects.toBe(error);
 });

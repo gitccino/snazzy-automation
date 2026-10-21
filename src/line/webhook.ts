@@ -66,40 +66,68 @@ async function actorFor(event: SupportedLineEvent, line: LineClient): Promise<Li
   };
 }
 
-async function send(replyToken: string, reply: CommandReply, line: LineClient, publicBaseUrl: string): Promise<void> {
+function addRecoveryWarning(contents: Record<string, unknown>, warning?: string): Record<string, unknown> {
+  if (!warning) return contents;
+  const body = contents.body as Record<string, unknown> | undefined;
+  if (!body || !Array.isArray(body.contents)) return contents;
+  return {...contents,body:{...body,contents:[...body.contents,{type:"text",text:warning,size:"xs",color:"#FF3344",wrap:true,margin:"md"}]}};
+}
+
+export async function sendCommandReply(replyToken: string, reply: CommandReply, line: LineClient, publicBaseUrl: string): Promise<void> {
   if (reply.kind === "flex") {
-    await line.replyFlex(replyToken, reply.text, reply.contents);
+    await line.replyFlex(replyToken, reply.text, addRecoveryWarning(reply.contents,reply.recoveryWarning));
     return;
   }
   if (reply.kind === "text") {
     if (reply.alreadyOut) {
       const card = alreadyOutCard(reply.alreadyOut, publicBaseUrl);
-      await line.replyFlex(replyToken, card.text, card.contents);
+      await line.replyFlex(replyToken, card.text, addRecoveryWarning(card.contents,reply.recoveryWarning));
       return;
     }
     if (reply.revertSuccess) {
-      await line.replyFlex(replyToken, reply.text, revertSuccessCard(publicBaseUrl));
+      await line.replyFlex(replyToken, reply.text, addRecoveryWarning(revertSuccessCard(publicBaseUrl),reply.recoveryWarning));
       return;
     }
     if (reply.saleSuccess) {
       const { productId, soldPrice, product } = reply.saleSuccess;
       const card = saleSuccessCard(productId, soldPrice, publicBaseUrl, product);
-      await line.replyFlex(replyToken, card.text, card.contents);
+      await line.replyFlex(replyToken, card.text, addRecoveryWarning(card.contents,reply.recoveryWarning));
       return;
     }
-    await line.replyText(replyToken, reply.text);
+    await line.replyText(replyToken, reply.recoveryWarning ? `${reply.recoveryWarning}\n${reply.text}` : reply.text);
     return;
   }
   // Flex text components allow 2,000 characters. Keep the existing lossless
   // multi-message path for unusually large legacy confirmation details.
   if (reply.text.length <= 2000) {
-    await line.replyFlex(replyToken, reply.text, confirmationCard(reply, publicBaseUrl));
+    await line.replyFlex(replyToken, reply.text, addRecoveryWarning(confirmationCard(reply, publicBaseUrl),reply.recoveryWarning));
     return;
   }
-  await line.replyButtons(replyToken, reply.text, reply.text, [
+  await line.replyButtons(replyToken, reply.text, reply.recoveryWarning ? `${reply.recoveryWarning}\n${reply.text}` : reply.text, [
     { label: "ยืนยัน", data: reply.approveData, style: "primary" },
     { label: "ยกเลิก", data: reply.rejectData, style: "secondary" },
   ]);
+}
+
+export async function prepareLineReply(event: SupportedLineEvent, deps: WebhookDeps, correlationId = event.webhookEventId): Promise<CommandReply> {
+  if (event.type === "message") {
+    const parsed = parseLineCommand(event.message.text);
+    if (!parsed.ok) return { kind: "text", text: parseErrorText(parsed.code) };
+    const actor = await actorFor(event, deps.line);
+    if (parsed.command.type !== "soldout" && parsed.command.type !== "revert") {
+      const reply = await handleReadOnlyCommand(parsed.command, deps);
+      return typeof reply === "string" ? { kind: "text", text: reply } : reply;
+    }
+    return parsed.command.type === "soldout"
+      ? prepareSoldout(parsed.command, actor, event.webhookEventId, deps.confirmationEnabled, deps)
+      : prepareRevert(actor, event.webhookEventId, deps);
+  }
+  const postback = parsePostback(event.postback.data);
+  if (postback === null) return { kind: "text", text: "คำยืนยันไม่ถูกต้อง" };
+  const actor = await actorFor(event, deps.line);
+  return postback.action === "soldout"
+    ? resolveSoldout(postback.decision, postback.token, actor, event.webhookEventId, correlationId, deps)
+    : resolveRevert(postback.decision, postback.token, actor, event.webhookEventId, correlationId, deps);
 }
 
 export async function processLineEvents(
@@ -126,66 +154,14 @@ export async function processLineEvents(
 
       const savedReply = await deps.repo.findEventReply(event.webhookEventId);
       if (savedReply !== null) {
-        await send(event.replyToken, savedReply, deps.line, deps.publicBaseUrl);
+        await sendCommandReply(event.replyToken, savedReply, deps.line, deps.publicBaseUrl);
         continue;
       }
       const deliver = async (reply: CommandReply) => {
         await deps.repo.saveEventReply(event.webhookEventId, reply);
-        await send(event.replyToken, reply, deps.line, deps.publicBaseUrl);
+        await sendCommandReply(event.replyToken, reply, deps.line, deps.publicBaseUrl);
       };
-      const actor = await actorFor(event, deps.line);
-      if (event.type === "postback") {
-        const postback = parsePostback(event.postback.data);
-        if (postback === null) {
-          await deliver({ kind: "text", text: "คำยืนยันไม่ถูกต้อง" });
-          continue;
-        }
-        const reply = postback.action === "soldout"
-          ? await resolveSoldout(
-            postback.decision,
-            postback.token,
-            actor,
-            event.webhookEventId,
-            correlationId,
-            deps,
-          )
-          : await resolveRevert(
-            postback.decision,
-            postback.token,
-            actor,
-            event.webhookEventId,
-            correlationId,
-            deps,
-          );
-        await deliver(reply);
-        continue;
-      }
-
-      const parsed = parseLineCommand(event.message.text);
-      if (!parsed.ok) {
-        await deliver({ kind: "text", text: parseErrorText(parsed.code) });
-        continue;
-      }
-      if (parsed.command.type === "soldout") {
-        await deliver(
-          await prepareSoldout(
-            parsed.command,
-            actor,
-            event.webhookEventId,
-            deps.confirmationEnabled,
-            deps,
-          ),
-        );
-        continue;
-      }
-      if (parsed.command.type === "revert") {
-        await deliver(
-          await prepareRevert(actor, event.webhookEventId, deps),
-        );
-        continue;
-      }
-      const reply = await handleReadOnlyCommand(parsed.command, deps);
-      await deliver(typeof reply === "string" ? { kind: "text", text: reply } : reply);
+      await deliver(await prepareLineReply(event, deps, correlationId));
     } catch (error) {
       failures.push(error);
       if (claimed) {
