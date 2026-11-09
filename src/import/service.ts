@@ -186,6 +186,7 @@ export async function downloadAndGroupSnapshot(
       groupHash,
       firstPhotoId: group.photos[0]!.applePhotoId,
       lastPhotoId: group.photos[group.photos.length - 1]!.applePhotoId,
+      photos: group.photos.map(photo => ({ applePhotoId: photo.applePhotoId, r2Key: photo.r2Key })),
     });
     if (row.state === "succeeded") {
       continue;

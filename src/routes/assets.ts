@@ -1,3 +1,4 @@
+import { renderAirtablePreview } from "../import/preview";
 import type { Clock, Env } from "../env";
 import { AIRTABLE_PREVIEW_VARIANT, verifyAssetToken } from "../import/asset-store";
 
@@ -37,13 +38,9 @@ export async function handleGetAsset(request: Request, env: Env, clock: Clock): 
   }
 
   if (variant === AIRTABLE_PREVIEW_VARIANT) {
-    const output = await env.IMAGES.input(object.body)
-      .transform({ width: 600, height: 600, fit: "scale-down" })
-      .output({ format: "image/jpeg", quality: 80 });
-    const preview = output.response();
-    if (!preview.ok || preview.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "image/jpeg") {
-      return new Response("image preview unavailable", { status: 502 });
-    }
+    let preview: Response;
+    try { preview = await renderAirtablePreview(env.IMAGES, object.body); }
+    catch { return new Response("image preview unavailable", { status: 502 }); }
     return new Response(preview.body, { headers: {
       "content-type": "image/jpeg",
       "cache-control": "private, max-age=60",

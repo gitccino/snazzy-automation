@@ -109,10 +109,10 @@ export async function sendCommandReply(replyToken: string, reply: CommandReply, 
   ]);
 }
 
-export async function prepareLineReply(event: SupportedLineEvent, deps: WebhookDeps, correlationId = event.webhookEventId): Promise<CommandReply> {
+export async function prepareLineReply(event: SupportedLineEvent, deps: WebhookDeps, correlationId = event.webhookEventId): Promise<CommandReply | null> {
   if (event.type === "message") {
     const parsed = parseLineCommand(event.message.text);
-    if (!parsed.ok) return { kind: "text", text: parseErrorText(parsed.code) };
+    if (!parsed.ok) return parsed.code === "unknown_command" ? null : { kind: "text", text: parseErrorText(parsed.code) };
     const actor = await actorFor(event, deps.line);
     if (parsed.command.type !== "soldout" && parsed.command.type !== "revert") {
       const reply = await handleReadOnlyCommand(parsed.command, deps);
@@ -161,7 +161,8 @@ export async function processLineEvents(
         await deps.repo.saveEventReply(event.webhookEventId, reply);
         await sendCommandReply(event.replyToken, reply, deps.line, deps.publicBaseUrl);
       };
-      await deliver(await prepareLineReply(event, deps, correlationId));
+      const reply = await prepareLineReply(event, deps, correlationId);
+      if (reply !== null) await deliver(reply);
     } catch (error) {
       failures.push(error);
       if (claimed) {
