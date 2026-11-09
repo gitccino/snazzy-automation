@@ -1,3 +1,4 @@
+import { preparePublicationImages, ProductImagePreparationFailure } from "./product-images";
 import Anthropic from "@anthropic-ai/sdk";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
@@ -39,6 +40,14 @@ function depsFor(env: Env, clock: Clock): PublicationServiceDeps {
     clock,
     config,
     airtableToken: env.AIRTABLE_TOKEN,
+    imageExecutionStatus: async (id) => {
+      try {
+        const status = (await (await env.PUBLICATION_WORKFLOW.get(id)).status()).status;
+        if (["complete", "errored", "terminated"].includes(status)) return "terminal";
+        if (["queued", "running", "paused", "waiting", "waitingForPause"].includes(status)) return "active";
+        return "unknown";
+      } catch { return "unknown"; }
+    },
     googleOAuthCredentials: {
       clientId: env.GOOGLE_OAUTH_CLIENT_ID,
       clientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
@@ -72,6 +81,7 @@ export async function runPublicationWorkflow(
   params: PublicationWorkflowParams,
   step: WorkflowStep,
   deps: PublicationServiceDeps,
+  instanceId?: string,
 ): Promise<PublicationResult | null> {
   const retries = {
     retries: {
@@ -127,11 +137,20 @@ export async function runPublicationWorkflow(
 
   let prepared: Awaited<ReturnType<typeof preparePublicationOutputs>>;
   let result: PublicationResult;
-  // Fixed stage reasons are the only error text passed to Airtable and LINE.
-  let failureReason = "Unable to prepare publication images and captions.";
+  // Image errors use locally constructed safe reasons; other stages use fixed reasons.
+  let failureReason = "Unable to prepare product images.";
   try {
+    let imagePrepared;
+    try {
+      imagePrepared = await preparePublicationImages({ ...deps, executionStatus: deps.imageExecutionStatus ?? (async () => "unknown") }, validation.value,
+        instanceId ?? publicationWorkflowId(runId, generation), step);
+    } catch (error) {
+      if (error instanceof ProductImagePreparationFailure) failureReason = error.message;
+      throw error;
+    }
+    failureReason = "Unable to prepare publication images and captions.";
     prepared = await step.do("prepare outputs", retries, () =>
-      workflowCall(failureReason, () => preparePublicationOutputs(deps, validation.value)),
+      workflowCall(failureReason, () => preparePublicationOutputs(deps, imagePrepared)),
     );
     failureReason = "Unable to create the temporary Google document.";
     const tempDocId = await step.do("ensure temporary document", retries, () =>
@@ -171,6 +190,6 @@ export class PublicationWorkflow extends WorkflowEntrypoint<Env, PublicationWork
       (generation > 1 && event.instanceId !== publicationWorkflowId(event.payload.publicationRunId, generation))) {
       throw new NonRetryableError("Invalid publication generation owner", "publication_generation_stale");
     }
-    return runPublicationWorkflow(event.payload, step, depsFor(this.env, { now: () => new Date() }));
+    return runPublicationWorkflow(event.payload, step, depsFor(this.env, { now: () => new Date() }), event.instanceId);
   }
 }

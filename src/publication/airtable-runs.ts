@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { AppConfig } from "../config";
 import { OperationalError } from "../shared/errors";
 import type { Fetcher } from "../shared/http";
-import type { PublicationProduct, PublicationRun, PublicationRunStatus } from "./types";
+import type { PublicationProduct, PublicationRun, PublicationRunStatus, RawPublicationProduct, RawPublicationRun, ProductAttachmentRecord, ProductImagePatch } from "./types";
 
 export type AirtablePublicationConfig = Pick<
   AppConfig,
@@ -52,6 +52,10 @@ const AirtableProductRecordSchema = z.object({
       id: z.string().min(1),
       url: z.string().url(),
       filename: z.string().min(1),
+      size: z.number().int().nonnegative().optional(),
+      type: z.string().optional(),
+      width: z.number().int().positive().optional(),
+      height: z.number().int().positive().optional(),
     })).optional(),
     "Brand Name": z.string().optional(),
     "Model Name": z.string().optional(),
@@ -75,7 +79,10 @@ async function fetchLinkedProducts(
   config: AirtablePublicationConfig,
   token: string,
   recordIds: string[],
-): Promise<PublicationProduct[]> {
+  raw: true,
+): Promise<RawPublicationProduct[]>;
+async function fetchLinkedProducts(fetcher: Fetcher, config: AirtablePublicationConfig, token: string, recordIds: string[], raw?: false): Promise<PublicationProduct[]>;
+async function fetchLinkedProducts(fetcher: Fetcher, config: AirtablePublicationConfig, token: string, recordIds: string[], raw = false): Promise<Array<PublicationProduct | RawPublicationProduct>> {
   if (recordIds.length === 0) return [];
   const formula = `OR(${recordIds.map((id) => `RECORD_ID()='${id}'`).join(",")})`;
   const url = `${airtableUrl(config, config.airtableProductsTableId)}?filterByFormula=${encodeURIComponent(formula)}`;
@@ -109,9 +116,7 @@ async function fetchLinkedProducts(
     return {
       airtableRecordId: record.id,
       productId: record.fields["Product ID"],
-      orderedImageKeys: (record.fields["Product Images"] ?? []).map((image) =>
-        attachmentR2Key(image.filename),
-      ),
+      ...(raw ? { attachments: (record.fields["Product Images"] ?? []).map(({ url: _url, ...image }) => image) } : { orderedImageKeys: (record.fields["Product Images"] ?? []).map(image => attachmentR2Key(image.filename)) }),
       brandName: record.fields["Brand Name"] ?? "",
       modelName: record.fields["Model Name"] ?? "",
       conditionType: record.fields["Condition Type"] ?? "",
@@ -292,4 +297,28 @@ export async function updateProductCollage(
       response.status,
     );
   }
+}
+
+export async function loadRawRunById(fetcher: Fetcher, config: AirtablePublicationConfig, token: string, runId: string): Promise<RawPublicationRun> {
+  const response = await fetcher(airtableUrl(config, config.airtablePublicationRunsTableId, `/${encodeURIComponent(runId)}`), { headers: authHeaders(token) });
+  if (!response.ok) throw airtableHttpError("airtable_run_fetch_failed", "run fetch", response.status);
+  const record = AirtableRunRecordSchema.parse(await response.json());
+  if (record.id !== runId) throw new OperationalError("airtable_run_mismatch", "Unexpected publication record", false);
+  return { airtableRunId: record.id, publicationDate: record.fields["Publication Date"], status: record.fields.Status,
+    products: await fetchLinkedProducts(fetcher, config, token, record.fields.Products ?? [], true) };
+}
+
+export async function readProductAttachments(fetcher: Fetcher, config: AirtablePublicationConfig, token: string, recordId: string): Promise<ProductAttachmentRecord> {
+  const response = await fetcher(airtableUrl(config, config.airtableProductsTableId, `/${encodeURIComponent(recordId)}`), { headers: authHeaders(token) });
+  if (!response.ok) throw airtableHttpError("airtable_product_fetch_failed", "product fetch", response.status);
+  const record = AirtableProductRecordSchema.parse(await response.json());
+  if (record.id !== recordId) throw new OperationalError("airtable_product_mismatch", "Unexpected product record", false);
+  return { airtableRecordId: record.id, productId: record.fields["Product ID"], attachments: record.fields["Product Images"] ?? [] };
+}
+
+export async function replaceProductImages(fetcher: Fetcher, config: AirtablePublicationConfig, token: string, recordId: string, images: ProductImagePatch[]): Promise<void> {
+  const response = await fetcher(airtableUrl(config, config.airtableProductsTableId, `/${encodeURIComponent(recordId)}`), {
+    method: "PATCH", headers: authHeaders(token), body: JSON.stringify({ fields: { "Product Images": images } }),
+  });
+  if (!response.ok) throw airtableHttpError("airtable_product_images_update_failed", "product images update", response.status);
 }

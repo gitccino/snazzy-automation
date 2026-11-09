@@ -15,7 +15,7 @@ export const COLLAGE_CELL_POSITIONS: Array<{ top: number; left: number }> = [
 ];
 
 export interface ImageTransformer {
-  transform(options: { width: number; height: number; fit: "cover"; background: string }): ImageTransformer;
+  transform(options: { width: number; height: number; fit: "cover" | "scale-down"; background?: string }): ImageTransformer;
   draw(
     overlay: ReadableStream<Uint8Array> | ImageTransformer,
     options?: { top?: number; left?: number },

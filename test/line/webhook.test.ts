@@ -179,3 +179,27 @@ it('retains a recovery conflict warning in the long confirmation reply', async()
   await sendCommandReply('reply',{kind:'buttons',text,approveData:'approve',rejectData:'reject',recoveryWarning:warning},d.line,'https://example.com');
   expect(d.line.replyButtons).toHaveBeenCalledWith('reply',text,warning+'\n'+text,expect.any(Array));
 });
+
+it.each(["สวัสดีครับ", "hello", "/unknown", "/soldout-extra A-1 thb 100", "   "])(
+  "silently ignores unrecognized message %j",
+  async (text) => {
+    const d = deps();
+
+    await processLineEvents([{ ...event, message: { ...event.message, text } }], d);
+
+    expect(d.repo.saveEventReply).not.toHaveBeenCalled();
+    expect(d.line.replyText).not.toHaveBeenCalled();
+    expect(d.line.replyFlex).not.toHaveBeenCalled();
+    expect(d.line.replyButtons).not.toHaveBeenCalled();
+    expect(d.inventory.findByProductId).not.toHaveBeenCalled();
+  },
+);
+
+it("still replies with validation errors for recognized commands", async () => {
+  const d = deps();
+
+  await processLineEvents([{ ...event, message: { ...event.message, text: "/search" } }], d);
+
+  expect(d.line.replyText).toHaveBeenCalledWith("reply-1", expect.stringContaining("ไม่พบรหัสสินค้า"));
+  expect(d.repo.saveEventReply).toHaveBeenCalledTimes(1);
+});

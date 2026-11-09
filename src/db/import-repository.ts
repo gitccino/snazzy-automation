@@ -38,7 +38,7 @@ export interface ImportRepository {
   setAssetR2Key(sourceAlbumId: string, applePhotoId: string, r2Key: string): Promise<void>;
   recordPhotoAsset(input: Omit<PhotoAssetRow, "createdAt">): Promise<void>;
   findGroupByHash(groupHash: string): Promise<ProductGroupRow | null>;
-  upsertPendingGroup(input: { id: string; importRunId: string; ordinal: number; groupHash: string; firstPhotoId: string; lastPhotoId: string }): Promise<ProductGroupRow>;
+  upsertPendingGroup(input: { id: string; importRunId: string; ordinal: number; groupHash: string; firstPhotoId: string; lastPhotoId: string; photos?: Array<{ applePhotoId: string; r2Key: string | null }> }): Promise<ProductGroupRow>;
   setGroupState(id: string, state: ProductGroupState, patch?: Partial<{ productId: string; airtableRecordId: string; failureReason: string | null; attemptCount: number }>): Promise<void>;
 }
 
@@ -313,8 +313,17 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
         )
         .bind(input.id, input.importRunId, input.ordinal, input.groupHash, input.firstPhotoId, input.lastPhotoId, now, now)
         .run();
-      const row = await db.prepare(`SELECT * FROM product_groups WHERE group_hash = ?`).bind(input.groupHash).first();
-      return toGroupRow(row as Record<string, unknown>);
+      const row = toGroupRow(await db.prepare(`SELECT * FROM product_groups WHERE group_hash = ?`).bind(input.groupHash).first());
+      if (input.photos?.length) {
+        const wanted = input.photos.map(photo => ({ apple_photo_id: photo.applePhotoId, r2_key: photo.r2Key }));
+        const readMembers = async () => (await db.prepare("SELECT apple_photo_id, r2_key FROM product_group_image_members WHERE group_id = ? ORDER BY ordinal")
+          .bind(row.id).all<{ apple_photo_id: string; r2_key: string | null }>()).results;
+        const existing = await readMembers();
+        if (!existing.length) await db.batch(input.photos.map((photo, ordinal) => db.prepare("INSERT INTO product_group_image_members (group_id, ordinal, apple_photo_id, r2_key) VALUES (?, ?, ?, ?) ON CONFLICT(group_id, ordinal) DO NOTHING")
+          .bind(row.id, ordinal, photo.applePhotoId, photo.r2Key)));
+        if (JSON.stringify(await readMembers()) !== JSON.stringify(wanted)) throw new Error("Product group image membership changed");
+      }
+      return row;
     },
 
     async setGroupState(id, state, patch = {}) {

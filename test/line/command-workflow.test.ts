@@ -82,3 +82,12 @@ it("recovers from a Workflow step interruption within the same two-retry budget"
   expect(operations.prepare).toHaveBeenCalledTimes(1);
   expect(step.sleep).toHaveBeenCalledExactlyOnceWith("retry-wait-0", "30 seconds");
 });
+
+it("silently finishes ignored messages without delivery or retry notices", async () => {
+  const { operations, step, run } = setup();
+  operations.prepare.mockResolvedValue(null);
+  expect(await run()).toEqual({ status: "ignored" });
+  expect(operations.deliver).not.toHaveBeenCalled();
+  expect(operations.notify).not.toHaveBeenCalled();
+  expect(step.sleep).not.toHaveBeenCalled();
+});
