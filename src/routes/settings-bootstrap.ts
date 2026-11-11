@@ -10,6 +10,7 @@ export async function handleSettingsBootstrap(request: Request, env: Env): Promi
     let record = await readSettings(env.DB);
     if (!record) {
       const config = parseConfig(env.APP_CONFIG_JSON, env.WORKFLOW_RETRY_LIMIT);
+      if (config.productIdPrefix !== 'A') throw new Error('Unsupported product prefix');
       const settings = parseStoredSettings({
         AIRTABLE_BASE_ID: config.airtableBaseId, AIRTABLE_PRODUCTS_TABLE_ID: config.airtableProductsTableId,
         AIRTABLE_PUBLICATION_RUNS_TABLE_ID: config.airtablePublicationRunsTableId,
