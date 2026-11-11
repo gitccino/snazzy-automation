@@ -81,10 +81,11 @@ describe("line repository", () => {
   it('stores a confirmation context with the pending command', async () => {
     const repo = createLineRepository(testEnv().DB, sequentialIdGenerator('context'), fixedClock('2026-09-01T10:00:00.000Z'));
     const context = { settings: await loadSettingsSnapshot({ ...testEnv(), ...createTestEnv() }), replyGroupId: 'C1' };
-    const command = pendingCommand({ context });
+    const command = pendingCommand({ context, groupId: 'C1' });
     await repo.createPending(command);
     expect(await readPendingContext(testEnv().DB, command.token)).toEqual(context);
     expect(await repo.findPendingBySourceEvent(command.sourceEventId)).toMatchObject({ context });
+    await expect(repo.createPending(pendingCommand({ context, groupId: 'C2' }))).rejects.toThrow('pending_context_group_mismatch');
   });
   it("claims one webhook event once", async () => {
     const repo = createLineRepository(testEnv().DB, sequentialIdGenerator("line"), fixedClock("2026-09-01T10:00:00.000Z"));

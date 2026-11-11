@@ -77,6 +77,7 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
       return row ? parsePending(row) : null;
     },
     async createPending(command) {
+      if (command.context && command.context.replyGroupId !== command.groupId) throw new Error("pending_context_group_mismatch");
       const existing = await db.prepare("SELECT * FROM pending_line_commands WHERE source_event_id = ?")
         .bind(command.sourceEventId).first<Record<string, unknown>>();
       if (existing) return parsePending(existing);
