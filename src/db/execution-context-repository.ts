@@ -13,7 +13,8 @@ const contextSchema = z.strictObject({
     claudeInputPriceUsdPerMtok: z.number().finite().nonnegative(), claudeOutputPriceUsdPerMtok: z.number().finite().nonnegative(), r2PriceUsdPerGbMonth: z.number().finite().nonnegative(),
   }) }), replyGroupId: id.nullable(),
 });
-function parseContext(json: string | null): OperationContext | null { return json === null ? null : contextSchema.parse(JSON.parse(json)); }
+export function parseContext(json: string | null): OperationContext | null { return json === null ? null : contextSchema.parse(JSON.parse(json)); }
+export function serializeContext(context: OperationContext): string { return JSON.stringify(contextSchema.parse(context)); }
 export async function readImportContext(db: D1Database, runId: string): Promise<OperationContext | null> {
   const row = await db.prepare('SELECT settings_context_json FROM import_runs WHERE id = ?').bind(runId).first<{ settings_context_json: string | null }>();
   return row ? parseContext(row.settings_context_json) : null;
@@ -27,7 +28,7 @@ export async function readPendingContext(db: D1Database, token: string): Promise
   return row ? parseContext(row.settings_context_json) : null;
 }
 export async function saveImportContextIfAbsent(db: D1Database, runId: string, context: OperationContext): Promise<OperationContext> {
-  const serialized = JSON.stringify(contextSchema.parse(context));
+  const serialized = serializeContext(context);
   await db.prepare("UPDATE import_runs SET settings_context_json = ? WHERE id = ? AND status = 'running' AND settings_context_json IS NULL").bind(serialized, runId).run();
   const saved = await readImportContext(db, runId);
   if (!saved) throw new Error('import_context_unavailable');

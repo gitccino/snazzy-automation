@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { testEnv } from "../helpers/env";
+import { testEnv, createTestEnv } from "../helpers/env";
+import { loadSettingsSnapshot } from '../../src/settings/runtime';
+import { readPendingContext } from '../../src/db/execution-context-repository';
 import { fixedClock, sequentialIdGenerator } from "../helpers/fakes";
 import { createLineRepository } from "../../src/db/line-repository";
 import type { PendingLineCommand, ReversibleLineAction, SaleValues } from "../../src/line/types";
@@ -76,6 +78,14 @@ async function createApplyingCommandWithoutClaimValidation(
 }
 
 describe("line repository", () => {
+  it('stores a confirmation context with the pending command', async () => {
+    const repo = createLineRepository(testEnv().DB, sequentialIdGenerator('context'), fixedClock('2026-09-01T10:00:00.000Z'));
+    const context = { settings: await loadSettingsSnapshot({ ...testEnv(), ...createTestEnv() }), replyGroupId: 'C1' };
+    const command = pendingCommand({ context });
+    await repo.createPending(command);
+    expect(await readPendingContext(testEnv().DB, command.token)).toEqual(context);
+    expect(await repo.findPendingBySourceEvent(command.sourceEventId)).toMatchObject({ context });
+  });
   it("claims one webhook event once", async () => {
     const repo = createLineRepository(testEnv().DB, sequentialIdGenerator("line"), fixedClock("2026-09-01T10:00:00.000Z"));
     expect(await repo.claimEvent("evt-1", "C1")).toBe(true);

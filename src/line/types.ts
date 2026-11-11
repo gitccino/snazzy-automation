@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { OperationContext } from "../settings/schema";
 
 export type ParsedCommand =
   | { type: "help" }
@@ -56,6 +57,7 @@ export type PendingCommandKind = "soldout" | "revert";
 export type PendingCommandStatus = "pending" | "applying" | "approved" | "rejected" | "expired" | "failed";
 
 export interface PendingLineCommand {
+  context?: OperationContext;
   token: string;
   sourceEventId: string;
   applyEventId: string | null;

@@ -2,6 +2,7 @@ import type { IdGenerator } from "../shared/ids";
 import type { Clock } from "../shared/time";
 import type { PendingLineCommand, ReversibleLineAction, SaleValues } from "../line/types";
 import type { CommandReply } from "../line/soldout";
+import { parseContext, serializeContext } from "./execution-context-repository";
 
 export interface LineRepository {
   claimEvent(eventId: string, groupId: string): Promise<boolean>;
@@ -23,7 +24,9 @@ export interface LineRepository {
 }
 
 export function parsePending(row: Record<string, unknown>): PendingLineCommand {
+  const context = row.settings_context_json == null ? null : parseContext(String(row.settings_context_json));
   return {
+    ...(context ? { context } : {}),
     token: String(row.token), sourceEventId: String(row.source_event_id), applyEventId: row.apply_event_id === null ? null : String(row.apply_event_id),
     kind: row.kind as PendingLineCommand["kind"], status: row.status as PendingLineCommand["status"],
     requesterUserId: String(row.requester_user_id), groupId: String(row.group_id), productId: String(row.product_id),
@@ -83,11 +86,11 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
           WHERE product_id = ? AND status = 'pending' AND expires_at <= ?`)
           .bind(nowIso, command.productId, nowIso),
         db.prepare(`INSERT OR IGNORE INTO pending_line_commands
-        (token, source_event_id, apply_event_id, kind, status, requester_user_id, group_id, product_id, sold_price, before_json, after_json, target_action_id, expires_at, created_at)
-        SELECT ?, ?, NULL, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?
+        (token, source_event_id, apply_event_id, kind, status, requester_user_id, group_id, product_id, sold_price, before_json, after_json, target_action_id, expires_at, created_at, settings_context_json)
+        SELECT ?, ?, NULL, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         WHERE NOT EXISTS (SELECT 1 FROM line_product_control WHERE product_id = ?)`)
         .bind(command.token, command.sourceEventId, command.kind, command.requesterUserId, command.groupId, command.productId, command.soldPrice,
-          JSON.stringify(command.before), JSON.stringify(command.after), command.targetActionId, command.expiresAt, nowIso, command.productId),
+          JSON.stringify(command.before), JSON.stringify(command.after), command.targetActionId, command.expiresAt, nowIso, command.context ? serializeContext(command.context) : null, command.productId),
       ]);
       return result!.meta.changes === 1 ? { ...command, status: "pending", applyEventId: null } : null;
     },
