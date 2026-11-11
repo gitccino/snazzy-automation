@@ -15,6 +15,7 @@ const RawAppConfigSchema = z.object({
   AIRTABLE_PUBLICATION_RUNS_TABLE_ID: z.string().min(1),
   GOOGLE_DRIVE_FOLDER_ID: z.string().min(1),
   GOOGLE_TEMPLATE_DOC_ID: z.string().min(1),
+  AI_CAPTIONS_ENABLED: z.boolean().default(false),
   CLAUDE_MODEL: z.literal("claude-opus-5"),
   CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: z.number().int().positive().max(150_000),
   LINE_ALLOWED_GROUP_ID: z.string().min(1),
@@ -32,9 +33,9 @@ export interface AppConfig {
   uploadCutoffMinutes: number;
   productIdPrefix: string;
   importCron: string;
-  importRetryLimit: 5;
+  importRetryLimit: 0 | 5;
   publicationCron: string;
-  publicationRetryLimit: 5;
+  publicationRetryLimit: 0 | 5;
   productIdInitialNumber: number;
   firstImportCutoffDate: string | null;
   airtableBaseId: string;
@@ -42,6 +43,7 @@ export interface AppConfig {
   airtablePublicationRunsTableId: string;
   googleDriveFolderId: string;
   googleTemplateDocId: string;
+  aiCaptionsEnabled: boolean;
   claudeModel: "claude-opus-5";
   claudeRequestInputTokenLimit: number;
   lineAllowedGroupId: string;
@@ -54,17 +56,19 @@ export interface AppConfig {
   r2PriceUsdPerGbMonth: number;
 }
 
-export function parseConfig(raw: unknown): AppConfig {
+export function parseConfig(raw: unknown, workflowRetryLimit?: string): AppConfig {
   const value = typeof raw === "string" ? JSON.parse(raw) : raw;
   const parsed = RawAppConfigSchema.parse(value);
+  const retryLimit = workflowRetryLimit === undefined ? undefined
+    : z.enum(["0", "5"]).transform(value => value === "0" ? 0 as const : 5 as const).parse(workflowRetryLimit);
   return {
     timeZone: parsed.TIME_ZONE,
     uploadCutoffMinutes: parsed.UPLOAD_CUTOFF_MINUTES,
     productIdPrefix: parsed.PRODUCT_ID_PREFIX,
     importCron: parsed.IMPORT_CRON,
-    importRetryLimit: parsed.IMPORT_RETRY_LIMIT,
+    importRetryLimit: retryLimit ?? parsed.IMPORT_RETRY_LIMIT,
     publicationCron: parsed.PUBLICATION_CRON,
-    publicationRetryLimit: parsed.PUBLICATION_RETRY_LIMIT,
+    publicationRetryLimit: retryLimit ?? parsed.PUBLICATION_RETRY_LIMIT,
     productIdInitialNumber: parsed.PRODUCT_ID_INITIAL_NUMBER,
     firstImportCutoffDate: parsed.FIRST_IMPORT_CUTOFF_DATE,
     airtableBaseId: parsed.AIRTABLE_BASE_ID,
@@ -72,6 +76,7 @@ export function parseConfig(raw: unknown): AppConfig {
     airtablePublicationRunsTableId: parsed.AIRTABLE_PUBLICATION_RUNS_TABLE_ID,
     googleDriveFolderId: parsed.GOOGLE_DRIVE_FOLDER_ID,
     googleTemplateDocId: parsed.GOOGLE_TEMPLATE_DOC_ID,
+    aiCaptionsEnabled: parsed.AI_CAPTIONS_ENABLED,
     claudeModel: parsed.CLAUDE_MODEL,
     claudeRequestInputTokenLimit: parsed.CLAUDE_REQUEST_INPUT_TOKEN_LIMIT,
     lineAllowedGroupId: parsed.LINE_ALLOWED_GROUP_ID,

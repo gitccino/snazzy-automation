@@ -79,9 +79,10 @@ export async function runImportWorkflow(
   step: WorkflowStepLike,
   operations: ImportWorkflowOperations,
 ): Promise<ImportRunResult> {
+  const retries = { retries: { limit: operations.retryLimit, delay: "10 seconds" as const, backoff: "exponential" as const } };
   let downloadOutcome: DownloadAndGroupOutcome;
   try {
-    downloadOutcome = await step.do("download-and-group", async () => {
+    downloadOutcome = await step.do("download-and-group", retries, async () => {
       try {
         return await operations.downloadAndGroup();
       } catch (error) {
@@ -102,7 +103,7 @@ export async function runImportWorkflow(
     });
   } catch (error) {
     const errorCode = durableErrorCode(error, "download_and_group_failed");
-    await step.do("record-download-and-group-failure", () =>
+    await step.do("record-download-and-group-failure", retries, () =>
       operations.recordRunFailure(errorCode),
     );
     throw error;
@@ -115,13 +116,7 @@ export async function runImportWorkflow(
     try {
       const outcome = await step.do(
         `process-group-${group.groupRowId}`,
-        {
-          retries: {
-            limit: operations.retryLimit,
-            delay: "10 seconds",
-            backoff: "exponential",
-          },
-        },
+        retries,
         async () => {
           try {
             return await operations.processGroupAttempt(
@@ -149,6 +144,7 @@ export async function runImportWorkflow(
     } catch (error) {
       const failure = await step.do(
         `record-failed-group-${group.groupRowId}`,
+        retries,
         () =>
           operations.recordExhaustedFailure(
             deps,
@@ -170,14 +166,14 @@ export async function runImportWorkflow(
     succeededProductIds,
     failedGroups,
   };
-  await step.do("finalize-checkpoint", () =>
+  await step.do("finalize-checkpoint", retries, () =>
     operations.finalize(
       failedGroups.length > 0,
       orphanRange?.count ?? 0,
       checkpointPosition,
     ),
   );
-  await step.do("send-import-summary", () =>
+  await step.do("send-import-summary", retries, () =>
     operations.notify(result, orphanRange),
   );
   return result;
@@ -191,7 +187,7 @@ export class ImportWorkflow extends WorkflowEntrypoint<
     event: WorkflowEvent<ImportWorkflowParams>,
     step: WorkflowStep,
   ): Promise<ImportRunResult> {
-    const config = parseConfig(this.env.APP_CONFIG_JSON);
+    const config = parseConfig(this.env.APP_CONFIG_JSON, this.env.WORKFLOW_RETRY_LIMIT);
     const clock = { now: () => new Date() };
     const ids = { next: () => newCorrelationId() };
     const fetcher = fetch.bind(globalThis);

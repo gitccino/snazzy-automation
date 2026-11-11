@@ -53,7 +53,7 @@ export type RawValidatedPublication = Omit<ValidatedPublication, "run"> & { run:
 export interface PreparedProductOutput {
   product: PublicationProduct;
   collageR2Key: string;
-  captionDrafts: [string, string, string];
+  captionDrafts: [] | [string, string, string];
 }
 
 export interface PreparedPublication extends ValidatedPublication {
@@ -211,10 +211,12 @@ export async function preparePublicationOutputs(deps: PublicationServiceDeps, va
   requireActiveJob(await readJob(deps, runId), generation);
   await setJobState(deps.db, deps.clock, runId, "generating", undefined, generation);
   await markRunGenerating(deps.fetcher, deps.config, deps.airtableToken, runId);
-  const captions = await captionsForProducts(deps, runId, validated.run.products, generation);
+  const captions = deps.config.aiCaptionsEnabled
+    ? await captionsForProducts(deps, runId, validated.run.products, generation)
+    : null;
   const outputs: PreparedProductOutput[] = [];
   for (const product of validated.run.products) {
-    const drafts = captions.get(product.productId);
+    const drafts = captions === null ? [] as [] : captions.get(product.productId);
     if (!drafts) throw new Error(`captions missing for ${product.productId}`);
     outputs.push({ product, collageR2Key: await ensureCollage(deps, runId, product, generation), captionDrafts: drafts });
   }
@@ -247,7 +249,7 @@ export async function fillAndVerifyDocument(deps: PublicationServiceDeps, prepar
     products.push({
       productId: output.product.productId, conditionType: output.product.conditionType,
       description: output.product.description, lineSquarePrice: output.product.lineSquarePrice,
-      igPrice: output.product.igPrice, captionDrafts: output.captionDrafts, collageImageUrl: signedUrl,
+      igPrice: output.product.igPrice, captionDrafts: deps.config.aiCaptionsEnabled ? output.captionDrafts : [], collageImageUrl: signedUrl,
     });
   }
   await fillTemplate(deps.fetcher, tokens, tempDocId, prepared.thaiDate, products);

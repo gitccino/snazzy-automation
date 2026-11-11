@@ -23,4 +23,5 @@ export interface Env {
   ASSET_URL_SIGNING_SECRET: string;
   ADMIN_ROUTE_TOKEN: string;
   APP_CONFIG_JSON: string;
+  WORKFLOW_RETRY_LIMIT?: string;
 }

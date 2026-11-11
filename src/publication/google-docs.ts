@@ -39,7 +39,7 @@ export interface DocProductContent {
   description: string;
   lineSquarePrice: number;
   igPrice: number;
-  captionDrafts: [string, string, string];
+  captionDrafts: [] | [string, string, string];
   collageImageUrl: string;
 }
 
@@ -170,9 +170,7 @@ export function buildBatchUpdateRequests(
           .filter(line => !/^\s*(?:ขนาด|ไซส์|อุปกรณ์|สภาพ)\s*[:：]/u.test(line))
           .join("\n").trim(),
         "",
-        `Caption 1: ${product.captionDrafts[0]}`,
-        `Caption 2: ${product.captionDrafts[1]}`,
-        `Caption 3: ${product.captionDrafts[2]}`,
+        ...product.captionDrafts.map((draft, index) => `Caption ${index + 1}: ${draft}`),
         "",
       ].join("\n") } },
       { insertInlineImage: { location, uri: product.collageImageUrl, objectSize: {

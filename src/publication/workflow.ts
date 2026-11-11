@@ -24,9 +24,10 @@ import type { PublicationResult, PublicationWorkflowParams } from "./types";
 import { publicationWorkflowId } from "./types";
 
 function depsFor(env: Env, clock: Clock): PublicationServiceDeps {
-  const config = parseConfig(env.APP_CONFIG_JSON);
+  const config = parseConfig(env.APP_CONFIG_JSON, env.WORKFLOW_RETRY_LIMIT);
   const fetcher = fetch.bind(globalThis);
   const line = createLineClient({ channelAccessToken: env.LINE_CHANNEL_ACCESS_TOKEN, fetch: fetcher });
+  let anthropic: Anthropic | undefined;
   return {
     db: env.DB,
     assets: createAssetStore(env.IMAGES_BUCKET, {
@@ -36,7 +37,7 @@ function depsFor(env: Env, clock: Clock): PublicationServiceDeps {
     bucket: env.IMAGES_BUCKET,
     images: env.IMAGES,
     fetcher,
-    anthropic: new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, maxRetries: 0 }),
+    get anthropic() { return anthropic ??= new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, maxRetries: 0 }); },
     clock,
     config,
     airtableToken: env.AIRTABLE_TOKEN,

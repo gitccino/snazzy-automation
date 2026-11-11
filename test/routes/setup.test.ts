@@ -94,6 +94,18 @@ describe("setup routes", () => {
     });
   });
 
+  it("does not require Claude access when AI captions are disabled", async () => {
+    const env = await readyEnv();
+    const config = JSON.parse(env.APP_CONFIG_JSON);
+    delete config.AI_CAPTIONS_ENABLED;
+    env.APP_CONFIG_JSON = JSON.stringify(config);
+    const probes = { ...happyProbes, verifyClaudeCredential: vi.fn().mockRejectedValue(new Error("No Claude credentials")) };
+    const report = await runSetupChecks(env, airtableFetch(), { now: () => new Date("2026-09-02T01:00:00.000Z") }, probes);
+    expect(report.ok).toBe(true);
+    expect(probes.verifyClaudeCredential).not.toHaveBeenCalled();
+    expect(report.checks.find(check => check.name === "claude_credential")).toMatchObject({ ok: true, detail: "AI captions disabled; Anthropic credential check skipped" });
+  });
+
   it("fails r2_access when the required collage base object is missing", async () => {
     const env = await readyEnv();
     await env.IMAGES_BUCKET.delete("assets/collage-base-1080.jpg");

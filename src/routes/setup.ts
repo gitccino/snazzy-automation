@@ -334,7 +334,11 @@ export async function runSetupChecks(
     return "LINE token can access configured allowed group";
   }));
   checks.push(await check("google_template_access", async () => { await probes.verifyGoogleTemplateAccess(); return "Google My Drive template rehearsal verified"; }));
-  checks.push(await check("claude_credential", async () => { await probes.verifyClaudeCredential(); return `Anthropic model ${config.claudeModel} verified`; }));
+  checks.push(await check("claude_credential", async () => {
+    if (!config.aiCaptionsEnabled) return "AI captions disabled; Anthropic credential check skipped";
+    await probes.verifyClaudeCredential();
+    return `Anthropic model ${config.claudeModel} verified`;
+  }));
   checks.push(await check("icloud_phase_zero", async () => {
     const count = await probes.verifyICloudSnapshotAccess();
     if (count <= 0) throw new Error("iCloud album has no photos");

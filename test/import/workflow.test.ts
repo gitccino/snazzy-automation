@@ -76,6 +76,40 @@ function processDeps(): ProcessGroupDeps {
 }
 
 describe("runImportWorkflow", () => {
+  it("attempts download and failure recording only once when retries are zero", async () => {
+    const step = retryingStep();
+    const download = vi.fn().mockRejectedValue(new OperationalError("source_unavailable", "Unavailable", true));
+    const record = vi.fn().mockRejectedValue(new OperationalError("db_unavailable", "Unavailable", true));
+    await expect(runImportWorkflow(processDeps(), { importRunId: "run-1", sourceAlbumId: "album-1", trigger: "line" }, step, {
+      retryLimit: 0, downloadAndGroup: download, recordRunFailure: record,
+      processGroupAttempt: vi.fn(), recordExhaustedFailure: vi.fn(), finalize: vi.fn(), notify: vi.fn(),
+    })).rejects.toMatchObject({ code: "db_unavailable" });
+    expect(download).toHaveBeenCalledTimes(1);
+    expect(record).toHaveBeenCalledTimes(1);
+    expect(step.calls.map(call => call.attempts)).toEqual([1, 1]);
+  });
+
+  it.each(["process", "record", "finalize", "notify"])("does not repeat %s with retries disabled", async failure => {
+    const step = retryingStep();
+    const error = new OperationalError("temporary_failure", "Unavailable", true);
+    const process = vi.fn().mockRejectedValue(error);
+    const record = vi.fn().mockResolvedValue({ productId: null, errorCode: "temporary_failure" });
+    const finalize = vi.fn().mockResolvedValue(undefined);
+    const notify = vi.fn().mockResolvedValue(undefined);
+    if (failure === "record") record.mockRejectedValue(error);
+    if (failure === "finalize") finalize.mockRejectedValue(error);
+    if (failure === "notify") notify.mockRejectedValue(error);
+    const execution = runImportWorkflow(processDeps(), { importRunId: "run-1", sourceAlbumId: "album-1", trigger: "line" }, step, {
+      retryLimit: 0, downloadAndGroup: async () => ({ pendingGroups: [group("g1", 0)], orphanRange: null, checkpointPosition: 1 }),
+      recordRunFailure: vi.fn(), processGroupAttempt: process, recordExhaustedFailure: record, finalize, notify,
+    });
+    if (failure === "process") await expect(execution).resolves.toMatchObject({ failedGroups: [{ errorCode: "temporary_failure" }] });
+    else await expect(execution).rejects.toBe(error);
+    expect(process).toHaveBeenCalledTimes(1);
+    expect(record).toHaveBeenCalledTimes(1);
+    expect(step.calls.every(call => call.attempts === 1)).toBe(true);
+  });
+
   it("records a terminal download failure durably before stopping the workflow", async () => {
     const step = retryingStep();
     const recordRunFailure = vi.fn().mockResolvedValue(undefined);
@@ -112,10 +146,10 @@ describe("runImportWorkflow", () => {
       "icloud_invalid_webstream_response",
     );
     expect(step.calls).toEqual([
-      { name: "download-and-group", options: null, attempts: 1 },
+      { name: "download-and-group", options: { retries: { limit: 5, delay: "10 seconds", backoff: "exponential" } }, attempts: 1 },
       {
         name: "record-download-and-group-failure",
-        options: null,
+        options: { retries: { limit: 5, delay: "10 seconds", backoff: "exponential" } },
         attempts: 1,
       },
     ]);
@@ -123,7 +157,7 @@ describe("runImportWorkflow", () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
-  it("records a retryable download failure after the durable step exhausts its default retries", async () => {
+  it("records a retryable download failure after the durable step exhausts its configured retries", async () => {
     const step = retryingStep();
     const recordRunFailure = vi.fn().mockResolvedValue(undefined);
 
@@ -154,10 +188,10 @@ describe("runImportWorkflow", () => {
       "icloud_webstream_unavailable",
     );
     expect(step.calls).toEqual([
-      { name: "download-and-group", options: null, attempts: 6 },
+      { name: "download-and-group", options: { retries: { limit: 5, delay: "10 seconds", backoff: "exponential" } }, attempts: 6 },
       {
         name: "record-download-and-group-failure",
-        options: null,
+        options: { retries: { limit: 5, delay: "10 seconds", backoff: "exponential" } },
         attempts: 1,
       },
     ]);
@@ -169,6 +203,7 @@ describe("runImportWorkflow", () => {
       async do<T>(
         name: string,
         optionsOrCallback: unknown,
+        callback?: () => Promise<T>,
       ): Promise<T> {
         calls.push(name);
         if (name === "download-and-group") {
@@ -176,7 +211,7 @@ describe("runImportWorkflow", () => {
           reconstructed.name = "icloud_invalid_webstream_response";
           throw reconstructed;
         }
-        return await (optionsOrCallback as () => Promise<T>)();
+        return await (callback ?? optionsOrCallback as () => Promise<T>)();
       },
     };
     const recordRunFailure = vi.fn().mockResolvedValue(undefined);
@@ -333,7 +368,7 @@ describe("runImportWorkflow", () => {
     );
 
     expect(step.calls).toEqual([
-      { name: "download-and-group", options: null, attempts: 1 },
+      { name: "download-and-group", options: { retries: { limit: 5, delay: "10 seconds", backoff: "exponential" } }, attempts: 1 },
       {
         name: "process-group-row-g1",
         options: {
@@ -345,7 +380,7 @@ describe("runImportWorkflow", () => {
         },
         attempts: 6,
       },
-      { name: "record-failed-group-row-g1", options: null, attempts: 1 },
+      { name: "record-failed-group-row-g1", options: { retries: { limit: 5, delay: "10 seconds", backoff: "exponential" } }, attempts: 1 },
       {
         name: "process-group-row-g2",
         options: {
@@ -357,8 +392,8 @@ describe("runImportWorkflow", () => {
         },
         attempts: 1,
       },
-      { name: "finalize-checkpoint", options: null, attempts: 1 },
-      { name: "send-import-summary", options: null, attempts: 1 },
+      { name: "finalize-checkpoint", options: { retries: { limit: 5, delay: "10 seconds", backoff: "exponential" } }, attempts: 1 },
+      { name: "send-import-summary", options: { retries: { limit: 5, delay: "10 seconds", backoff: "exponential" } }, attempts: 1 },
     ]);
     expect(events).toEqual([
       "process-g1",

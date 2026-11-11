@@ -41,6 +41,7 @@ describe("parseConfig", () => {
       airtablePublicationRunsTableId: "tblRuns",
       googleDriveFolderId: "folder-1",
       googleTemplateDocId: "template-1",
+      aiCaptionsEnabled: false,
       claudeModel: "claude-opus-5",
       claudeRequestInputTokenLimit: 150_000,
       lineAllowedGroupId: "Cgroup",
@@ -52,6 +53,18 @@ describe("parseConfig", () => {
       claudeOutputPriceUsdPerMtok: 25,
       r2PriceUsdPerGbMonth: 0.015,
     });
+  });
+
+  it("allows AI captions to be explicitly re-enabled", () => {
+    expect(parseConfig({ ...validRawConfig, AI_CAPTIONS_ENABLED: true }).aiCaptionsEnabled).toBe(true);
+    expect(() => parseConfig({ ...validRawConfig, AI_CAPTIONS_ENABLED: "false" })).toThrow();
+  });
+
+  it("lets the deployment override both workflow retry limits without replacing stored config", () => {
+    expect(parseConfig(validRawConfig, "0")).toMatchObject({ importRetryLimit: 0, publicationRetryLimit: 0 });
+    expect(parseConfig(validRawConfig, "5")).toMatchObject({ importRetryLimit: 5, publicationRetryLimit: 5 });
+    expect(() => parseConfig(validRawConfig, "")).toThrow();
+    expect(() => parseConfig(validRawConfig, "1")).toThrow();
   });
 
   it("rejects invalid JSON", () => {
@@ -87,6 +100,7 @@ describe("parseConfig", () => {
       airtablePublicationRunsTableId: "tblRuns",
       googleDriveFolderId: "folder-1",
       googleTemplateDocId: "template-1",
+      aiCaptionsEnabled: false,
       claudeModel: "claude-opus-5",
       claudeRequestInputTokenLimit: 150_000,
     });

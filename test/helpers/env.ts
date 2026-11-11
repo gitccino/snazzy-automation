@@ -40,6 +40,7 @@ export function createTestEnv(overrides: Partial<TestEnvConfig> = {}): TestEnvCo
       AIRTABLE_PUBLICATION_RUNS_TABLE_ID: "tblRuns",
       GOOGLE_DRIVE_FOLDER_ID: "folder-1",
       GOOGLE_TEMPLATE_DOC_ID: "template-1",
+      AI_CAPTIONS_ENABLED: true,
       CLAUDE_MODEL: "claude-opus-5",
       CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150_000,
       LINE_ALLOWED_GROUP_ID: "CtestGroup",

@@ -41,7 +41,7 @@ function baseDeps(overrides: Partial<PublicationServiceDeps> = {}): PublicationS
     clock,
     config: {
       airtableBaseId: "base123", airtableProductsTableId: "tblProducts", airtablePublicationRunsTableId: "tblRuns",
-      googleDriveFolderId: "folder-1", googleTemplateDocId: "template-1", claudeModel: "claude-opus-5",
+      googleDriveFolderId: "folder-1", googleTemplateDocId: "template-1", aiCaptionsEnabled: true, claudeModel: "claude-opus-5",
       claudeRequestInputTokenLimit: 150_000, publicBaseUrl: "https://worker.example", timeZone: "Asia/Bangkok",
     } as PublicationServiceDeps["config"],
     airtableToken: "airtable-token",
@@ -59,7 +59,7 @@ async function seedJob(state = "generating", tempId: string | null = null, corre
     VALUES ('rec-run-1', ?, ?, ?, ?, ?)`)
     .bind(state, correlationId, tempId, clock.now().toISOString(), clock.now().toISOString()).run();
 }
-async function seedCache(id = "A-1001", captions = JSON.stringify(drafts), collage: string | null = `products/${id}/collage/1080x1080.jpg`) {
+async function seedCache(id = "A-1001", captions: string | null = JSON.stringify(drafts), collage: string | null = `products/${id}/collage/1080x1080.jpg`) {
   await env.DB.prepare(`INSERT INTO publication_product_cache
     (publication_run_id, product_id, collage_r2_key, collage_input_fingerprint, captions_json, captions_input_fingerprint, updated_at)
     VALUES ('rec-run-1', ?, ?, ?, ?, ?, ?)`)
@@ -106,6 +106,20 @@ function generationDeps(): PublicationServiceDeps {
 }
 
 describe("publication stages", () => {
+  it.each([null, JSON.stringify(drafts)])("prepares collages without AI calls or cached drafts when captioning is disabled (%s)", async captions => {
+    await seedJob();
+    await seedCache("A-1001", captions);
+    const deps = baseDeps();
+    deps.config = { ...deps.config, aiCaptionsEnabled: false };
+    vi.mocked(deps.anthropic.messages.countTokens).mockRejectedValue(new Error("AI must not be called"));
+    vi.mocked(deps.anthropic.messages.create).mockRejectedValue(new Error("AI must not be called"));
+    const result = await preparePublicationOutputs(deps, validated);
+    expect(result.outputs).toEqual([{ product, collageR2Key: "products/A-1001/collage/1080x1080.jpg", captionDrafts: [] }]);
+    expect(deps.anthropic.messages.countTokens).not.toHaveBeenCalled();
+    expect(deps.anthropic.messages.create).not.toHaveBeenCalled();
+    expect((await getProductCache(env.DB, "rec-run-1", "A-1001")).captionsJson).toBe(captions);
+  });
+
   it.each(["rename", "before publish", "lost response", "D1"])("retains a candidate after %s failure and retries the saved version", async (failure) => {
     await seedJob("generating", "candidate-v2", "publication-rec-run-1-v2");
     await env.DB.prepare("UPDATE publication_jobs SET generation=2,successful_generation=1,google_doc_id='old-doc',google_doc_url='old-url'").run();
@@ -182,7 +196,13 @@ describe("publication stages", () => {
   it("loads the exact requested run and validates before any generation", async () => {
     const fetcher = runFetcher();
     const deps = baseDeps({ fetcher });
-    expect(await validatePublication(deps, "rec-run-1", "corr-1")).toEqual({ kind: "valid", value: validated });
+    const { orderedImageKeys, ...sourceProduct } = product;
+    expect(await validatePublication(deps, "rec-run-1", "corr-1")).toEqual({ kind: "valid", value: {
+      ...validated, run: { ...validated.run, products: [{ ...sourceProduct, attachments: [
+        { id: "0", filename: "1.jpg" }, { id: "1", filename: "2.jpg" },
+        { id: "2", filename: "3.jpg" }, { id: "3", filename: "4.jpg" },
+      ] }] },
+    } });
     expect(String(fetcher.mock.calls[0]![0])).toContain("tblRuns/rec-run-1");
     expect(await job()).toMatchObject({ state: "validating", correlation_id: "corr-1" });
     expect(deps.bucket.put).not.toHaveBeenCalled();
@@ -418,7 +438,7 @@ describe("publication stages", () => {
     expect(await job()).toMatchObject({ temp_doc_id: "temp-doc" });
   });
 
-  it("signs the collage, fills and then verifies without finalizing", async () => {
+  it.each([true, false])("signs, fills and verifies with captioning enabled=%s", async aiCaptionsEnabled => {
     await seedJob("generating", "temp-doc");
     const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(json({ id: product.airtableRecordId }))
       .mockResolvedValueOnce(token())
@@ -426,7 +446,11 @@ describe("publication stages", () => {
       .mockResolvedValueOnce(json({ documentId: "temp-doc" }))
       .mockResolvedValueOnce(document("Product ID: A-1001\n"));
     const deps = baseDeps({ fetcher });
+    deps.config = { ...deps.config, aiCaptionsEnabled };
     await fillAndVerifyDocument(deps, prepared, "temp-doc");
+    const requests = JSON.parse(String(fetcher.mock.calls[3]![1]?.body)).requests;
+    expect(JSON.stringify(requests).includes("Caption 1:")).toBe(aiCaptionsEnabled);
+    expect(JSON.stringify(requests).includes("หนึ่ง")).toBe(aiCaptionsEnabled);
     expect(deps.assets.signUrl).toHaveBeenCalledWith("products/A-1001/collage/1080x1080.jpg", 900);
     const attachment = JSON.parse(String(fetcher.mock.calls[0]![1]?.body)).fields["4-in-1 Image"][0].url;
     expect(attachment).toContain("sig=x");

@@ -217,6 +217,31 @@ beforeEach(() => {
     expect(stages.failPublicationAfterExhaustion).toHaveBeenCalledTimes(retryable ? 6 : 1);
   });
 
+  it("attempts publication and failure cleanup once when retries are disabled", async () => {
+    stages.preparePublicationOutputs.mockRejectedValue(new OperationalError("provider_failed", "Unavailable", true));
+    stages.failPublicationAfterExhaustion.mockRejectedValue(new OperationalError("cleanup_failed", "Unavailable", true));
+    await expect(runPublicationWorkflow(params, retryingStep() as unknown as WorkflowStep, {
+      ...deps, config: { ...deps.config, publicationRetryLimit: 0 },
+    })).rejects.toThrow();
+    expect(stages.preparePublicationOutputs).toHaveBeenCalledTimes(1);
+    expect(stages.failPublicationAfterExhaustion).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs with captioning disabled and no Anthropic key", async () => {
+    const env = { ...testEnv(), ...createTestEnv(), ANTHROPIC_API_KEY: undefined, WORKFLOW_RETRY_LIMIT: "0" };
+    const config = JSON.parse(env.APP_CONFIG_JSON);
+    delete config.AI_CAPTIONS_ENABLED;
+    env.APP_CONFIG_JSON = JSON.stringify(config);
+    await expect(PublicationWorkflow.prototype.run.call(
+      { env } as unknown as PublicationWorkflow,
+      { payload: params } as WorkflowEvent<PublicationWorkflowParams>,
+      retryingStep() as unknown as WorkflowStep,
+    )).resolves.toEqual(result);
+    const actualDeps = stages.validatePublication.mock.calls[0]?.[0] as PublicationServiceDeps;
+    expect(actualDeps.config.aiCaptionsEnabled).toBe(false);
+    expect(actualDeps.config.publicationRetryLimit).toBe(0);
+  });
+
   it("constructs the official Anthropic client with SDK retries disabled in the bound Workflow", async () => {
     const env = { ...testEnv(), ...createTestEnv() };
 
