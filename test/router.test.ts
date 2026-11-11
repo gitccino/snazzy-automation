@@ -52,6 +52,18 @@ describe("routeRequest", () => {
     expect(response.status).toBe(202);
     expect(create.mock.calls[0]?.[0].params.trigger).toBe("admin");
   });
+  it("rejects new authorized manual jobs during maintenance without creating work", async () => {
+    const { env, create } = routerEnv();
+    env.CONFIGURATION_MODE = 'maintenance';
+    for (const path of ['/upload', '/docs']) {
+      const response = await routeRequest(new Request(`https://worker.example${path}`, {
+        method: 'POST', headers: { authorization: 'Bearer test-admin-route-token' },
+      }), env, ctx);
+      expect(response.status).toBe(503);
+    }
+    expect(create).not.toHaveBeenCalled();
+    expect(docsRoute.handleDocsRoute).not.toHaveBeenCalled();
+  });
   // Mutation: dropping signed-asset dispatch or routing another method/path into a handler.
   it("dispatches GET assets to signature validation and rejects other methods and paths", async () => {
     const { env, create } = routerEnv();

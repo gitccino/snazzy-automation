@@ -12,6 +12,10 @@ import { verifyAdminBearer } from "./shared/admin-auth";
 
 export async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
+  if (env.CONFIGURATION_MODE === "maintenance" && request.method === "POST" && (url.pathname === "/upload" || url.pathname === "/docs")) {
+    if (!(await verifyAdminBearer(request, env.ADMIN_ROUTE_TOKEN))) return Response.json({ error: "unauthorized" }, { status: 401 });
+    return Response.json({ error: "maintenance" }, { status: 503, headers: { "Retry-After": "60" } });
+  }
   if (request.method === "GET" && url.pathname.startsWith("/line/icons/")) {
     return handleLineIcon(url.pathname);
   }

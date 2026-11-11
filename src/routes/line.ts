@@ -51,6 +51,7 @@ export async function handleLineRoute(
   if (!await verifyLineSignature(rawBody, signature, env.LINE_CHANNEL_SECRET)) {
     return new Response("unauthorized", { status: 401 });
   }
+  if (env.CONFIGURATION_MODE === "maintenance") return new Response("maintenance", { status: 503, headers: { "Retry-After": "60" } });
 
   let events: SupportedLineEvent[];
   try {
