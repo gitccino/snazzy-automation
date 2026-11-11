@@ -29,7 +29,7 @@ const DriveFileSchema = z.object({
 });
 const DriveCopySchema = z.object({ id: z.string().regex(/^[A-Za-z0-9_-]+$/) });
 const DriveFilesSchema = z.object({ files: z.array(DriveCopySchema).default([]), nextPageToken: z.string().min(1).optional() });
-const GoogleDocumentSchema = z.object({
+export const GoogleDocumentSchema = z.object({
   body: z.object({ content: z.array(z.object({ paragraph: z.object({ elements: z.array(z.object({
     startIndex: z.number().int().nonnegative().optional(), textRun: z.object({ content: z.string() }).optional(),
   })) }).optional() })) }),
@@ -44,7 +44,7 @@ export interface SetupExternalProbes {
   verifyICloudSnapshotAccess(): Promise<number>;
 }
 
-function requireTemplateMarkers(document: z.infer<typeof GoogleDocumentSchema>): void {
+export function requireTemplateMarkers(document: z.infer<typeof GoogleDocumentSchema>): void {
   const runs = document.body.content.flatMap((block) => block.paragraph?.elements ?? [])
     .flatMap((element) => element.textRun && element.startIndex !== undefined ? [{ content: element.textRun.content, startIndex: element.startIndex }] : []);
   const marker = (value: string) => {
@@ -70,7 +70,7 @@ function requireCollageBaseJpeg(bytes: Uint8Array): void {
   }
 }
 
-const requiredFields = {
+export const requiredFields = {
   Products: [
     "Product ID", "System Group ID", "Upload Date", "Product Images", "Inventory Status", "4-in-1 Image", "Publication Run", "Sold Price", "Sold At", "Sold By", "Last System Update", "Brand Name", "Model Name", "Condition Type", "Size", "Description", "LINE Square Price", "IG Price", "Data Complete", "Missing Fields",
   ],

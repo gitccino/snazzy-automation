@@ -5,6 +5,7 @@ import { handleScheduled } from "./scheduled";
 export { LineCommandWorkflow } from "./line/command-workflow";
 export { ImportWorkflow } from "./import/workflow";
 export { PublicationWorkflow } from "./publication/workflow";
+export { SettingsService } from "./settings/entrypoint";
 
 export default {
   fetch(request, env, ctx) {

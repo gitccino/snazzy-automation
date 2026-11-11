@@ -5,6 +5,7 @@ import { handleDocsRoute } from "./routes/docs";
 import { handleLineRoute } from "./routes/line";
 import { handleHealth } from "./routes/health";
 import { handleBootstrapSequence, handleSetup } from "./routes/setup";
+import { handleSettingsBootstrap } from "./routes/settings-bootstrap";
 import { handleUploadTrigger } from "./routes/upload";
 import { handleUsage } from "./routes/usage";
 import { verifyAdminBearer } from "./shared/admin-auth";
@@ -40,6 +41,9 @@ export async function routeRequest(request: Request, env: Env, ctx: ExecutionCon
   }
   if (request.method === "POST" && url.pathname === "/setup/bootstrap-sequence") {
     return handleBootstrapSequence(request, env);
+  }
+  if (request.method === "POST" && url.pathname === "/setup/settings-bootstrap") {
+    return handleSettingsBootstrap(request, env);
   }
   return Response.json({ error: "not_found" }, { status: 404 });
 }

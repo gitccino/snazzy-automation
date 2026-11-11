@@ -24,4 +24,7 @@ export interface Env {
   ADMIN_ROUTE_TOKEN: string;
   APP_CONFIG_JSON: string;
   WORKFLOW_RETRY_LIMIT?: string;
+  CONFIGURATION_MODE?: "legacy" | "maintenance" | "d1";
+  PUBLIC_BASE_URL?: string;
+  ENVIRONMENT?: string;
 }
