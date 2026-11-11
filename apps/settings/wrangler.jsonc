@@ -1,0 +1,19 @@
+{
+  "name": "snazzy-settings-staging",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-09-03",
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+  },
+  "services": [
+    {
+      "binding": "SETTINGS_SERVICE",
+      "service": "snazzy-automation-staging",
+      "entrypoint": "SettingsService",
+    },
+  ],
+}

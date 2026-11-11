@@ -1,5 +1,7 @@
 # Operations Runbook
 
+Staging settings cutover: follow [the settings-console runbook](settings-console.md). After cutover, staging is manual-only: send `/upload` and `/docs` in an allowed LINE group. Results return to that group. Edit non-secret values through the standalone settings site; retain credentials in Worker secrets. The scheduled daily-cycle instructions below describe the legacy production deployment, whose schedules are unchanged by this feature.
+
 Use the production Worker URL as `WORKER_BASE_URL` (no trailing slash) and the current bearer token as `ADMIN_ROUTE_TOKEN`. See [deployment](deployment.md) for initial setup.
 
 ## Daily cycle

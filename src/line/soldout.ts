@@ -1,11 +1,9 @@
+import type { OperationContext } from "../settings/schema";
 import type { MutationCoordinator } from "./mutation-recovery";
 import type { LineRepository } from "../db/line-repository";
 import type { IdGenerator } from "../shared/ids";
 import type { Clock } from "../shared/time";
-import {
-  matchesSaleValues,
-  type InventoryClient,
-} from "./airtable-inventory";
+import { matchesSaleValues, type InventoryClient } from "./airtable-inventory";
 import {
   actorText,
   alreadyOutText,
@@ -23,7 +21,17 @@ import type { SearchCardReply } from "./search-card";
 
 export type CommandReply = (
   | SearchCardReply
-  | { kind: "text"; text: string; saleSuccess?: { productId: string; soldPrice: number; product?: InventoryProduct }; revertSuccess?: boolean; alreadyOut?: InventoryProduct }
+  | {
+      kind: "text";
+      text: string;
+      saleSuccess?: {
+        productId: string;
+        soldPrice: number;
+        product?: InventoryProduct;
+      };
+      revertSuccess?: boolean;
+      alreadyOut?: InventoryProduct;
+    }
   | {
       kind: "buttons";
       text: string;
@@ -32,10 +40,10 @@ export type CommandReply = (
       sale?: { productId: string; soldPrice: number };
       revert?: { productId: string; before: SaleValues; after: SaleValues };
     }
-
 ) & { recoveryWarning?: string };
 
 export interface SoldoutDeps {
+  context?: OperationContext;
   mutation: MutationCoordinator;
   inventory: InventoryClient;
   repo: LineRepository;
@@ -43,7 +51,11 @@ export interface SoldoutDeps {
   ids: IdGenerator;
 }
 
-function saleReply(productId: string, soldPrice: number, product?: InventoryProduct): CommandReply {
+function saleReply(
+  productId: string,
+  soldPrice: number,
+  product?: InventoryProduct,
+): CommandReply {
   return {
     kind: "text",
     saleSuccess: { productId, soldPrice, ...(product ? { product } : {}) },
@@ -78,7 +90,8 @@ export async function prepareSoldout(
 
   const existing = await deps.repo.findPendingBySourceEvent(sourceEventId);
   if (existing !== null) {
-    if (['failed','rejected','expired'].includes(existing.status)) return {kind:'text',text:soldoutMessages.expired};
+    if (["failed", "rejected", "expired"].includes(existing.status))
+      return { kind: "text", text: soldoutMessages.expired };
     return confirmationEnabled
       ? confirmationReply(existing)
       : resolveSoldout(
@@ -91,14 +104,26 @@ export async function prepareSoldout(
         );
   }
 
-  const recovery = await deps.mutation.recover(input.productId,requester.groupId);
-  if (recovery.status === 'busy') return {kind:'text',text:`⚠️ มีงานปรับปรุงสินค้า ${input.productId} กำลังทำงานอยู่ กรุณาลองอีกครั้งภายหลัง`};
+  const recovery = await deps.mutation.recover(
+    input.productId,
+    requester.groupId,
+  );
+  if (recovery.status === "busy")
+    return {
+      kind: "text",
+      text: `⚠️ มีงานปรับปรุงสินค้า ${input.productId} กำลังทำงานอยู่ กรุณาลองอีกครั้งภายหลัง`,
+    };
   const product = await deps.inventory.findByProductId(input.productId);
   if (product === null) {
     return { kind: "text", text: notFoundText(input.productId) };
   }
   if (product.inventoryStatus === "Out") {
-    return { kind: "text", text: alreadyOutText(product), alreadyOut: product, recoveryWarning: recovery.warning };
+    return {
+      kind: "text",
+      text: alreadyOutText(product),
+      alreadyOut: product,
+      recoveryWarning: recovery.warning,
+    };
   }
 
   const before: SaleValues = {
@@ -108,6 +133,7 @@ export async function prepareSoldout(
     soldBy: product.soldBy,
   };
   const candidate: PendingLineCommand = {
+    ...(deps.context ? { context: deps.context } : {}),
     token: deps.ids.next(),
     sourceEventId,
     applyEventId: null,
@@ -127,8 +153,9 @@ export async function prepareSoldout(
     targetActionId: null,
     expiresAt: new Date(deps.clock.now().getTime() + 10 * 60_000).toISOString(),
   };
-  const pending = await deps.repo.createPending(candidate)
-    ?? await deps.repo.findPendingBySourceEvent(sourceEventId);
+  const pending =
+    (await deps.repo.createPending(candidate)) ??
+    (await deps.repo.findPendingBySourceEvent(sourceEventId));
   if (pending === null) {
     return { kind: "text", text: soldoutMessages.pending(input.productId) };
   }
@@ -143,7 +170,7 @@ export async function prepareSoldout(
         sourceEventId,
         deps,
       );
-  return {...reply,recoveryWarning:recovery.warning};
+  return { ...reply, recoveryWarning: recovery.warning };
 }
 
 export async function resolveSoldout(
@@ -154,8 +181,12 @@ export async function resolveSoldout(
   correlationId: string,
   deps: SoldoutDeps,
 ): Promise<CommandReply> {
-  const recovery = await deps.mutation.recoverToken(token,actor.groupId);
-  if (recovery.status === 'busy') return {kind:'text',text:'⚠️ มีงานปรับปรุงสินค้ากำลังทำงานอยู่ กรุณาลองอีกครั้งภายหลัง'};
+  const recovery = await deps.mutation.recoverToken(token, actor.groupId);
+  if (recovery.status === "busy")
+    return {
+      kind: "text",
+      text: "⚠️ มีงานปรับปรุงสินค้ากำลังทำงานอยู่ กรุณาลองอีกครั้งภายหลัง",
+    };
   const nowIso = deps.clock.now().toISOString();
   const pending = await deps.repo.claimPending(
     token,
@@ -181,8 +212,8 @@ export async function resolveSoldout(
     return { kind: "text", text: soldoutMessages.invalidConfirmationPrice };
   }
 
-  const recoveringMutation = pending.after.soldAt !== null
-    && pending.after.soldBy !== null;
+  const recoveringMutation =
+    pending.after.soldAt !== null && pending.after.soldBy !== null;
   let mutationIntentPersisted = recoveringMutation;
   try {
     const product = await deps.inventory.findByProductId(pending.productId);
@@ -205,7 +236,12 @@ export async function resolveSoldout(
     }
 
     if (matchesSaleValues(product, pending.before)) {
-      await deps.mutation.write({...pending,after},product.recordId,resolver,correlationId);
+      await deps.mutation.write(
+        { ...pending, after },
+        product.recordId,
+        resolver,
+        correlationId,
+      );
     } else if (!recoveringMutation || !matchesSaleValues(product, after)) {
       await deps.repo.resolvePending(token, applyEventId, "rejected", resolver);
       return {
@@ -227,7 +263,13 @@ export async function resolveSoldout(
       correlationId,
     });
     await deps.mutation.committed(pending.productId);
-    return {...saleReply(pending.productId, pending.soldPrice, { ...product, ...after }),recoveryWarning:recovery.warning};
+    return {
+      ...saleReply(pending.productId, pending.soldPrice, {
+        ...product,
+        ...after,
+      }),
+      recoveryWarning: recovery.warning,
+    };
   } catch (error) {
     if (!mutationIntentPersisted) {
       await deps.repo.resetPending(token, applyEventId);

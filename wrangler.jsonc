@@ -46,11 +46,12 @@
         }
       },
       "vars": {
-        "WORKFLOW_RETRY_LIMIT": "0",
+        "CONFIGURATION_MODE": "maintenance",
+        "ENVIRONMENT": "staging",
         "GOOGLE_OAUTH_CLIENT_ID": "891460059017-fg9acj1nhbtjb133d6vgoj7ljh8ng5n4.apps.googleusercontent.com"
       },
       "triggers": {
-        "crons": ["45 22 * * *", "0 23 * * *", "30 23 * * *"]
+        "crons": []
       },
       "d1_databases": [
         {

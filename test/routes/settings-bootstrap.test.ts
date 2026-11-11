@@ -14,6 +14,7 @@ describe('settings bootstrap', () => {
     expect(response.status).toBe(200);
     const body = await response.text();
     expect(body).not.toContain(env.GOOGLE_REFRESH_TOKEN);
+    expect(JSON.parse(body).publicBaseUrl).toBe('https://example.workers.dev');
     const saved = await readSettings(env.DB);
     expect(saved?.settings).toMatchObject({ LINE_ALLOWED_GROUP_IDS: ['CtestGroup'], IMPORT_RETRY_LIMIT: 0, PUBLICATION_RETRY_LIMIT: 0, AIRTABLE_BASE_ID: 'appTest' });
     const changed = { ...env, APP_CONFIG_JSON: env.APP_CONFIG_JSON.replace('appTest', 'anotherBase') };

@@ -1,31 +1,82 @@
-import { docsSuccessCard, docsValidationFailureCard, docsWorkflowFailureCard } from "../line/docs-summary-card";
+import {
+  docsSuccessCard,
+  docsValidationFailureCard,
+  docsWorkflowFailureCard,
+} from "../line/docs-summary-card";
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import type { AppConfig } from "../config";
+import type { AppConfig as LegacyConfig } from "../config";
+type AppConfig = Omit<
+  LegacyConfig,
+  | "lineAllowedGroupId"
+  | "importCron"
+  | "publicationCron"
+  | "uploadCutoffMinutes"
+>;
 import type { AssetStore } from "../import/asset-store";
 import type { Fetcher } from "../shared/http";
 import type { Clock } from "../shared/time";
 import { OperationalError } from "../shared/errors";
 import {
-  acquireOrResumeJob, readPublicationJob, claimPublicationDate, getProductCache, putProductCaptions, putProductCollage,
-  setJobState, setTempDocId, type PublicationJobRow,
-  persistFinalizationIntent, completePublicationGeneration,
+  acquireOrResumeJob,
+  readPublicationJob,
+  claimPublicationDate,
+  getProductCache,
+  putProductCaptions,
+  putProductCollage,
+  setJobState,
+  setTempDocId,
+  type PublicationJobRow,
+  persistFinalizationIntent,
+  completePublicationGeneration,
 } from "../db/publication-repository";
 import {
-  loadRawRunById, markRunFailed, markRunGenerated, markRunGenerating,
-  markRunNeedsCorrection, updateProductCollage,
+  loadRawRunById,
+  markRunFailed,
+  markRunGenerated,
+  markRunGenerating,
+  markRunNeedsCorrection,
+  updateProductCollage,
   readPublishedRun,
 } from "./airtable-runs";
-import { generateCollage, collageR2Key, collageInputFingerprint, type ImagesBinding } from "./collage";
-import { captionInputFingerprint, planCaptionBatches, requestCaptionBatch, toCaptionRequestProducts } from "./captions";
-import { createGoogleAuthClient, type GoogleOAuthCredentials } from "./google-auth";
 import {
-  copyTemplate, deleteDocument, fillTemplate, finalizeDocument,
-  findTemporaryDocument, verifyDocumentContainsProducts, type DocProductContent,
+  generateCollage,
+  collageR2Key,
+  collageInputFingerprint,
+  type ImagesBinding,
+} from "./collage";
+import {
+  captionInputFingerprint,
+  planCaptionBatches,
+  requestCaptionBatch,
+  toCaptionRequestProducts,
+} from "./captions";
+import {
+  createGoogleAuthClient,
+  type GoogleOAuthCredentials,
+} from "./google-auth";
+import {
+  copyTemplate,
+  deleteDocument,
+  fillTemplate,
+  finalizeDocument,
+  findTemporaryDocument,
+  verifyDocumentContainsProducts,
+  type DocProductContent,
 } from "./google-docs";
-import type { PublicationProduct, PublicationResult, PublicationRun, PublicationFinalizationIntent, RawPublicationRun } from "./types";
+import type {
+  PublicationProduct,
+  PublicationResult,
+  PublicationRun,
+  PublicationFinalizationIntent,
+  RawPublicationRun,
+} from "./types";
 import { publicationWorkflowId } from "./types";
-import { formatValidationErrorSummary, validateRunCompleteness, type ValidationResult } from "./validator";
+import {
+  formatValidationErrorSummary,
+  validateRunCompleteness,
+  type ValidationResult,
+} from "./validator";
 
 export interface PublicationServiceDeps {
   db: D1Database;
@@ -38,7 +89,9 @@ export interface PublicationServiceDeps {
   config: AppConfig;
   airtableToken: string;
   googleOAuthCredentials: GoogleOAuthCredentials;
-  imageExecutionStatus?(workflowId: string): Promise<"active" | "terminal" | "unknown">;
+  imageExecutionStatus?(
+    workflowId: string,
+  ): Promise<"active" | "terminal" | "unknown">;
   notify(text: string, contents?: Record<string, unknown>): Promise<void>;
 }
 
@@ -48,7 +101,9 @@ export interface ValidatedPublication {
   generation?: number;
 }
 
-export type RawValidatedPublication = Omit<ValidatedPublication, "run"> & { run: RawPublicationRun };
+export type RawValidatedPublication = Omit<ValidatedPublication, "run"> & {
+  run: RawPublicationRun;
+};
 
 export interface PreparedProductOutput {
   product: PublicationProduct;
@@ -63,35 +118,76 @@ export interface PreparedPublication extends ValidatedPublication {
 export type ValidationStageOutcome =
   | { kind: "valid"; value: RawValidatedPublication }
   | { kind: "already_succeeded"; result: PublicationResult }
-  | { kind: "validation_failed"; thaiDate: string; validation: ValidationResult };
+  | {
+      kind: "validation_failed";
+      thaiDate: string;
+      validation: ValidationResult;
+    };
 
 type StageJob = PublicationJobRow;
 
 // Ownership is established by validatePublication. Subsequent stages are internal
 // durable steps; reading their job must never acquire a new lock or create a row.
-async function readJob(deps: PublicationServiceDeps, runId: string): Promise<StageJob> {
+async function readJob(
+  deps: PublicationServiceDeps,
+  runId: string,
+): Promise<StageJob> {
   const job = await readPublicationJob(deps.db, runId);
-  if (!job) throw new OperationalError("publication_job_missing", "Publication job is missing", false);
+  if (!job)
+    throw new OperationalError(
+      "publication_job_missing",
+      "Publication job is missing",
+      false,
+    );
   return job;
 }
 
 function requireActiveJob(job: StageJob, generation = 1): void {
-  if (job.generation !== generation) throw new OperationalError("publication_generation_stale", "Publication generation is stale", false);
-  if (job.state === "succeeded" || job.state === "failed" || job.state === "validation_failed") {
-    throw new OperationalError("publication_job_terminal", `Publication job is ${job.state}`, false);
+  if (job.generation !== generation)
+    throw new OperationalError(
+      "publication_generation_stale",
+      "Publication generation is stale",
+      false,
+    );
+  if (
+    job.state === "succeeded" ||
+    job.state === "failed" ||
+    job.state === "validation_failed"
+  ) {
+    throw new OperationalError(
+      "publication_job_terminal",
+      `Publication job is ${job.state}`,
+      false,
+    );
   }
 }
 
-function publicationResult(runId: string, job: StageJob, productIds: string[]): PublicationResult {
+function publicationResult(
+  runId: string,
+  job: StageJob,
+  productIds: string[],
+): PublicationResult {
   if (!job.googleDocId || !job.googleDocUrl) {
-    throw new OperationalError("publication_result_missing", "Successful publication job has no document result", false);
+    throw new OperationalError(
+      "publication_result_missing",
+      "Successful publication job has no document result",
+      false,
+    );
   }
-  return { publicationRunId: runId, googleDocId: job.googleDocId, googleDocUrl: job.googleDocUrl, productIds };
+  return {
+    publicationRunId: runId,
+    googleDocId: job.googleDocId,
+    googleDocUrl: job.googleDocUrl,
+    productIds,
+  };
 }
 
 function thaiDate(isoDate: string): string {
   return new Intl.DateTimeFormat("th-TH-u-ca-buddhist-nu-latn", {
-    timeZone: "Asia/Bangkok", day: "numeric", month: "long", year: "numeric",
+    timeZone: "Asia/Bangkok",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
   }).format(new Date(`${isoDate}T12:00:00.000Z`));
 }
 
@@ -102,11 +198,24 @@ function airtableRunUrl(config: AppConfig, runId: string): string {
 function cachedDrafts(value: string | null): [string, string, string] | null {
   if (!value) return null;
   let parsed: unknown;
-  try { parsed = JSON.parse(value); } catch { return null; }
-  if (Array.isArray(parsed) && parsed.length === 3 && parsed.every(draft =>
-    typeof draft === "string" && draft === draft.trim() && draft.length > 0 &&
-    draft.length <= 400 && /[ก-๙]/.test(draft),
-  )) return [parsed[0], parsed[1], parsed[2]];
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return null;
+  }
+  if (
+    Array.isArray(parsed) &&
+    parsed.length === 3 &&
+    parsed.every(
+      (draft) =>
+        typeof draft === "string" &&
+        draft === draft.trim() &&
+        draft.length > 0 &&
+        draft.length <= 400 &&
+        /[ก-๙]/.test(draft),
+    )
+  )
+    return [parsed[0], parsed[1], parsed[2]];
   return null;
 }
 
@@ -116,35 +225,111 @@ export async function validatePublication(
   correlationId: string,
   generation = 1,
 ): Promise<ValidationStageOutcome> {
-  const acquired = await acquireOrResumeJob(deps.db, deps.clock, publicationRunId, correlationId);
-  if (acquired.job.generation !== generation) throw new OperationalError("publication_generation_stale", "Publication generation is stale", false);
+  const acquired = await acquireOrResumeJob(
+    deps.db,
+    deps.clock,
+    publicationRunId,
+    correlationId,
+  );
+  if (acquired.job.generation !== generation)
+    throw new OperationalError(
+      "publication_generation_stale",
+      "Publication generation is stale",
+      false,
+    );
   if (!acquired.alreadySucceeded) {
     if (acquired.job.state === "failed") {
-      throw new OperationalError("publication_job_terminal", "Publication job is failed", false);
+      throw new OperationalError(
+        "publication_job_terminal",
+        "Publication job is failed",
+        false,
+      );
     }
     // A retried durable step uses the original owner's correlation ID. Only the
     // atomic INSERT winner establishes that identity; contenders cannot change it.
     if (!acquired.ownsLock && acquired.job.correlationId !== correlationId) {
-      throw new OperationalError("publication_job_locked", "Publication job is owned by another workflow", false);
+      throw new OperationalError(
+        "publication_job_locked",
+        "Publication job is owned by another workflow",
+        false,
+      );
     }
   }
-  const run = await loadRawRunById(deps.fetcher, deps.config, deps.airtableToken, publicationRunId);
+  const run = await loadRawRunById(
+    deps.fetcher,
+    deps.config,
+    deps.airtableToken,
+    publicationRunId,
+  );
   if (acquired.alreadySucceeded) {
-    return { kind: "already_succeeded", result: publicationResult(publicationRunId, acquired.job, run.products.map(p => p.productId)) };
+    return {
+      kind: "already_succeeded",
+      result: publicationResult(
+        publicationRunId,
+        acquired.job,
+        run.products.map((p) => p.productId),
+      ),
+    };
   }
   const displayDate = thaiDate(run.publicationDate);
-  await setJobState(deps.db, deps.clock, publicationRunId, "validating", undefined, generation);
+  await setJobState(
+    deps.db,
+    deps.clock,
+    publicationRunId,
+    "validating",
+    undefined,
+    generation,
+  );
   const validation = validateRunCompleteness(run.products);
   if (!validation.valid) {
-    await setJobState(deps.db, deps.clock, publicationRunId, "validation_failed", { validationResultJson: JSON.stringify(validation) }, generation);
-    await markRunNeedsCorrection(deps.fetcher, deps.config, deps.airtableToken, publicationRunId, formatValidationErrorSummary(validation));
+    await setJobState(
+      deps.db,
+      deps.clock,
+      publicationRunId,
+      "validation_failed",
+      { validationResultJson: JSON.stringify(validation) },
+      generation,
+    );
+    await markRunNeedsCorrection(
+      deps.fetcher,
+      deps.config,
+      deps.airtableToken,
+      publicationRunId,
+      formatValidationErrorSummary(validation),
+    );
     return { kind: "validation_failed", thaiDate: displayDate, validation };
   }
-  if (!await claimPublicationDate(deps.db, deps.clock, publicationRunId, run.publicationDate, generation)) {
-    throw new OperationalError("publication_date_conflict", "Publication date is already claimed or differs from this run's claim", false);
+  if (
+    !(await claimPublicationDate(
+      deps.db,
+      deps.clock,
+      publicationRunId,
+      run.publicationDate,
+      generation,
+    ))
+  ) {
+    throw new OperationalError(
+      "publication_date_conflict",
+      "Publication date is already claimed or differs from this run's claim",
+      false,
+    );
   }
-  await setJobState(deps.db, deps.clock, publicationRunId, "validating", { validationResultJson: null }, generation);
-  return { kind: "valid", value: { run, thaiDate: displayDate, ...(generation > 1 ? { generation } : {}) } };
+  await setJobState(
+    deps.db,
+    deps.clock,
+    publicationRunId,
+    "validating",
+    { validationResultJson: null },
+    generation,
+  );
+  return {
+    kind: "valid",
+    value: {
+      run,
+      thaiDate: displayDate,
+      ...(generation > 1 ? { generation } : {}),
+    },
+  };
 }
 
 export async function notifyPublicationValidationFailure(
@@ -153,39 +338,84 @@ export async function notifyPublicationValidationFailure(
   displayDate: string,
   validation: ValidationResult,
 ): Promise<void> {
-  const card = docsValidationFailureCard({
-    thaiDate: displayDate, validation, airtableRunUrl: airtableRunUrl(deps.config, publicationRunId),
-  }, deps.config.publicBaseUrl);
+  const card = docsValidationFailureCard(
+    {
+      thaiDate: displayDate,
+      validation,
+      airtableRunUrl: airtableRunUrl(deps.config, publicationRunId),
+    },
+    deps.config.publicBaseUrl,
+  );
   await deps.notify(card.text, card.contents);
 }
 
-async function ensureCollage(deps: PublicationServiceDeps, runId: string, product: PublicationProduct, generation: number): Promise<string> {
+async function ensureCollage(
+  deps: PublicationServiceDeps,
+  runId: string,
+  product: PublicationProduct,
+  generation: number,
+): Promise<string> {
   const cache = await getProductCache(deps.db, runId, product.productId);
-  const inputFingerprint = await collageInputFingerprint(product.orderedImageKeys);
-  if (cache.collageR2Key && cache.collageInputFingerprint === inputFingerprint) return cache.collageR2Key;
+  const inputFingerprint = await collageInputFingerprint(
+    product.orderedImageKeys,
+  );
+  if (cache.collageR2Key && cache.collageInputFingerprint === inputFingerprint)
+    return cache.collageR2Key;
   const [first, second, third, fourth] = product.orderedImageKeys;
-  if (!first || !second || !third || !fourth) throw new Error(`four ordered images required for ${product.productId}`);
-  const bytes = await generateCollage(deps.bucket, deps.images, [first, second, third, fourth]);
+  if (!first || !second || !third || !fourth)
+    throw new Error(`four ordered images required for ${product.productId}`);
+  const bytes = await generateCollage(deps.bucket, deps.images, [
+    first,
+    second,
+    third,
+    fourth,
+  ]);
   const key = collageR2Key(product.productId);
   requireActiveJob(await readJob(deps, runId), generation);
-  await deps.bucket.put(key, bytes, { httpMetadata: { contentType: "image/jpeg" } });
-  await putProductCollage(deps.db, deps.clock, runId, product.productId, key, inputFingerprint, generation);
+  await deps.bucket.put(key, bytes, {
+    httpMetadata: { contentType: "image/jpeg" },
+  });
+  await putProductCollage(
+    deps.db,
+    deps.clock,
+    runId,
+    product.productId,
+    key,
+    inputFingerprint,
+    generation,
+  );
   return key;
 }
 
-async function captionsForProducts(deps: PublicationServiceDeps, runId: string, products: PublicationProduct[], generation: number): Promise<Map<string, [string, string, string]>> {
+async function captionsForProducts(
+  deps: PublicationServiceDeps,
+  runId: string,
+  products: PublicationProduct[],
+  generation: number,
+): Promise<Map<string, [string, string, string]>> {
   const result = new Map<string, [string, string, string]>();
   const missing: PublicationProduct[] = [];
   const fingerprints = new Map<string, string>();
   for (const product of products) {
     const cache = await getProductCache(deps.db, runId, product.productId);
-    const inputFingerprint = await captionInputFingerprint(product, deps.config.claudeModel);
+    const inputFingerprint = await captionInputFingerprint(
+      product,
+      deps.config.claudeModel,
+    );
     fingerprints.set(product.productId, inputFingerprint);
-    const drafts = cache.captionsInputFingerprint === inputFingerprint ? cachedDrafts(cache.captionsJson) : null;
+    const drafts =
+      cache.captionsInputFingerprint === inputFingerprint
+        ? cachedDrafts(cache.captionsJson)
+        : null;
     if (drafts) result.set(product.productId, drafts);
     else missing.push(product);
   }
-  const batches = await planCaptionBatches(deps.anthropic, deps.config.claudeModel, toCaptionRequestProducts(missing), deps.config.claudeRequestInputTokenLimit);
+  const batches = await planCaptionBatches(
+    deps.anthropic,
+    deps.config.claudeModel,
+    toCaptionRequestProducts(missing),
+    deps.config.claudeRequestInputTokenLimit,
+  );
   const unresolved: string[] = [];
   for (const batch of batches) {
     const generated = await requestCaptionBatch(
@@ -196,82 +426,187 @@ async function captionsForProducts(deps: PublicationServiceDeps, runId: string, 
     );
     // Commit valid work before another batch can throw or return incomplete data.
     for (const item of generated.captions) {
-      await putProductCaptions(deps.db, deps.clock, runId, item.productId, JSON.stringify(item.drafts), fingerprints.get(item.productId)!, generation);
+      await putProductCaptions(
+        deps.db,
+        deps.clock,
+        runId,
+        item.productId,
+        JSON.stringify(item.drafts),
+        fingerprints.get(item.productId)!,
+        generation,
+      );
       result.set(item.productId, item.drafts);
     }
     unresolved.push(...generated.missingProductIds);
   }
-  if (unresolved.length > 0) throw new Error(`caption generation incomplete for ${unresolved.join(", ")}`);
+  if (unresolved.length > 0)
+    throw new Error(
+      `caption generation incomplete for ${unresolved.join(", ")}`,
+    );
   return result;
 }
 
-export async function preparePublicationOutputs(deps: PublicationServiceDeps, validated: ValidatedPublication): Promise<PreparedPublication> {
+export async function preparePublicationOutputs(
+  deps: PublicationServiceDeps,
+  validated: ValidatedPublication,
+): Promise<PreparedPublication> {
   const runId = validated.run.airtableRunId;
   const generation = validated.generation ?? 1;
   requireActiveJob(await readJob(deps, runId), generation);
-  await setJobState(deps.db, deps.clock, runId, "generating", undefined, generation);
+  await setJobState(
+    deps.db,
+    deps.clock,
+    runId,
+    "generating",
+    undefined,
+    generation,
+  );
   await markRunGenerating(deps.fetcher, deps.config, deps.airtableToken, runId);
   const captions = deps.config.aiCaptionsEnabled
     ? await captionsForProducts(deps, runId, validated.run.products, generation)
     : null;
   const outputs: PreparedProductOutput[] = [];
   for (const product of validated.run.products) {
-    const drafts = captions === null ? [] as [] : captions.get(product.productId);
+    const drafts =
+      captions === null ? ([] as []) : captions.get(product.productId);
     if (!drafts) throw new Error(`captions missing for ${product.productId}`);
-    outputs.push({ product, collageR2Key: await ensureCollage(deps, runId, product, generation), captionDrafts: drafts });
+    outputs.push({
+      product,
+      collageR2Key: await ensureCollage(deps, runId, product, generation),
+      captionDrafts: drafts,
+    });
   }
   return { ...validated, outputs };
 }
 
-export async function ensureTemporaryDocument(deps: PublicationServiceDeps, prepared: PreparedPublication): Promise<string> {
+export async function ensureTemporaryDocument(
+  deps: PublicationServiceDeps,
+  prepared: PreparedPublication,
+): Promise<string> {
   const runId = prepared.run.airtableRunId;
   const job = await readJob(deps, runId);
   const generation = prepared.generation ?? 1;
   requireActiveJob(job, generation);
   if (job.tempDocId) return job.tempDocId;
-  const tokens = createGoogleAuthClient(deps.googleOAuthCredentials, deps.clock, deps.fetcher);
-  const identity = generation === 1 ? runId : publicationWorkflowId(runId, generation);
+  const tokens = createGoogleAuthClient(
+    deps.googleOAuthCredentials,
+    deps.clock,
+    deps.fetcher,
+  );
+  const identity =
+    generation === 1 ? runId : publicationWorkflowId(runId, generation);
   const title = `Publication ${prepared.run.publicationDate}${generation === 1 ? "" : ` (v${generation})`}`;
-  const discovered = await findTemporaryDocument(deps.fetcher, tokens, deps.config.googleDriveFolderId, identity);
-  const docId = discovered ?? await copyTemplate(deps.fetcher, tokens, deps.config.googleTemplateDocId, deps.config.googleDriveFolderId, identity, `${title} (in progress)`);
+  const discovered = await findTemporaryDocument(
+    deps.fetcher,
+    tokens,
+    deps.config.googleDriveFolderId,
+    identity,
+  );
+  const docId =
+    discovered ??
+    (await copyTemplate(
+      deps.fetcher,
+      tokens,
+      deps.config.googleTemplateDocId,
+      deps.config.googleDriveFolderId,
+      identity,
+      `${title} (in progress)`,
+    ));
   await setTempDocId(deps.db, deps.clock, runId, docId, generation);
   return docId;
 }
 
-export async function fillAndVerifyDocument(deps: PublicationServiceDeps, prepared: PreparedPublication, tempDocId: string): Promise<void> {
-  requireActiveJob(await readJob(deps, prepared.run.airtableRunId), prepared.generation ?? 1);
-  const tokens = createGoogleAuthClient(deps.googleOAuthCredentials, deps.clock, deps.fetcher);
+export async function fillAndVerifyDocument(
+  deps: PublicationServiceDeps,
+  prepared: PreparedPublication,
+  tempDocId: string,
+): Promise<void> {
+  requireActiveJob(
+    await readJob(deps, prepared.run.airtableRunId),
+    prepared.generation ?? 1,
+  );
+  const tokens = createGoogleAuthClient(
+    deps.googleOAuthCredentials,
+    deps.clock,
+    deps.fetcher,
+  );
   const products: DocProductContent[] = [];
   for (const output of prepared.outputs) {
-    requireActiveJob(await readJob(deps, prepared.run.airtableRunId), prepared.generation ?? 1);
+    requireActiveJob(
+      await readJob(deps, prepared.run.airtableRunId),
+      prepared.generation ?? 1,
+    );
     const signedUrl = await deps.assets.signUrl(output.collageR2Key, 900);
-    await updateProductCollage(deps.fetcher, deps.config, deps.airtableToken, output.product.airtableRecordId, signedUrl);
+    await updateProductCollage(
+      deps.fetcher,
+      deps.config,
+      deps.airtableToken,
+      output.product.airtableRecordId,
+      signedUrl,
+    );
     products.push({
-      productId: output.product.productId, conditionType: output.product.conditionType,
-      description: output.product.description, lineSquarePrice: output.product.lineSquarePrice,
-      igPrice: output.product.igPrice, captionDrafts: deps.config.aiCaptionsEnabled ? output.captionDrafts : [], collageImageUrl: signedUrl,
+      productId: output.product.productId,
+      conditionType: output.product.conditionType,
+      description: output.product.description,
+      lineSquarePrice: output.product.lineSquarePrice,
+      igPrice: output.product.igPrice,
+      captionDrafts: deps.config.aiCaptionsEnabled ? output.captionDrafts : [],
+      collageImageUrl: signedUrl,
     });
   }
-  await fillTemplate(deps.fetcher, tokens, tempDocId, prepared.thaiDate, products);
-  const verification = await verifyDocumentContainsProducts(deps.fetcher, tokens, tempDocId, prepared.outputs.map(o => o.product.productId));
-  if (!verification.ok) throw new Error(`generated document missing Product IDs: ${verification.missingProductIds.join(", ")}`);
+  await fillTemplate(
+    deps.fetcher,
+    tokens,
+    tempDocId,
+    prepared.thaiDate,
+    products,
+  );
+  const verification = await verifyDocumentContainsProducts(
+    deps.fetcher,
+    tokens,
+    tempDocId,
+    prepared.outputs.map((o) => o.product.productId),
+  );
+  if (!verification.ok)
+    throw new Error(
+      `generated document missing Product IDs: ${verification.missingProductIds.join(", ")}`,
+    );
 }
 
-export async function finalizePublication(deps: PublicationServiceDeps, prepared: PreparedPublication, tempDocId: string): Promise<PublicationResult> {
+export async function finalizePublication(
+  deps: PublicationServiceDeps,
+  prepared: PreparedPublication,
+  tempDocId: string,
+): Promise<PublicationResult> {
   const runId = prepared.run.airtableRunId;
   const job = await readJob(deps, runId);
   const generation = prepared.generation ?? 1;
-  if (job.generation !== generation) throw new OperationalError("publication_generation_stale", "Publication generation is stale", false);
-  const productIds = prepared.outputs.map(o => o.product.productId);
-  if (job.state === "succeeded") return publicationResult(runId, job, productIds);
+  if (job.generation !== generation)
+    throw new OperationalError(
+      "publication_generation_stale",
+      "Publication generation is stale",
+      false,
+    );
+  const productIds = prepared.outputs.map((o) => o.product.productId);
+  if (job.state === "succeeded")
+    return publicationResult(runId, job, productIds);
   requireActiveJob(job, generation);
   if (!job.finalizationJson) {
-    if (job.googleDocId === tempDocId) throw new OperationalError("publication_finalization_conflict", "Replacement cannot reuse the successful Doc", false);
+    if (job.googleDocId === tempDocId)
+      throw new OperationalError(
+        "publication_finalization_conflict",
+        "Replacement cannot reuse the successful Doc",
+        false,
+      );
     await persistFinalizationIntent(deps.db, deps.clock, runId, generation, {
-      generation, publicationDate: prepared.run.publicationDate, thaiDate: prepared.thaiDate,
-      docId: tempDocId, docUrl: `https://docs.google.com/document/d/${encodeURIComponent(tempDocId)}/edit`,
+      generation,
+      publicationDate: prepared.run.publicationDate,
+      thaiDate: prepared.thaiDate,
+      docId: tempDocId,
+      docUrl: `https://docs.google.com/document/d/${encodeURIComponent(tempDocId)}/edit`,
       title: `Publication ${prepared.run.publicationDate}${generation === 1 ? "" : ` (v${generation})`}`,
-      productIds, generatedAt: deps.clock.now().toISOString(),
+      productIds,
+      generatedAt: deps.clock.now().toISOString(),
     });
   }
   return finalizeStoredPublication(deps, runId, generation);
@@ -279,52 +614,125 @@ export async function finalizePublication(deps: PublicationServiceDeps, prepared
 
 const FinalizationIntentSchema = z.object({
   generation: z.number().int().positive().refine(Number.isSafeInteger),
-  publicationDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), thaiDate: z.string().min(1),
-  docId: z.string().min(1), docUrl: z.string().url(), title: z.string().min(1),
-  productIds: z.array(z.string().regex(/^A-[1-9]\d*$/)), generatedAt: z.string().datetime(),
+  publicationDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  thaiDate: z.string().min(1),
+  docId: z.string().min(1),
+  docUrl: z.string().url(),
+  title: z.string().min(1),
+  productIds: z.array(z.string().regex(/^A-[1-9]\d*$/)),
+  generatedAt: z.string().datetime(),
 });
 
 function parseFinalizationIntent(job: StageJob): PublicationFinalizationIntent {
   try {
-    const intent = FinalizationIntentSchema.parse(JSON.parse(job.finalizationJson ?? "null"));
-    if (intent.generation !== job.generation) throw new Error("generation mismatch");
+    const intent = FinalizationIntentSchema.parse(
+      JSON.parse(job.finalizationJson ?? "null"),
+    );
+    if (intent.generation !== job.generation)
+      throw new Error("generation mismatch");
     return intent;
   } catch {
-    throw new OperationalError("publication_finalization_invalid", "Publication finalization intent is invalid", false);
+    throw new OperationalError(
+      "publication_finalization_invalid",
+      "Publication finalization intent is invalid",
+      false,
+    );
   }
 }
 
-export async function finalizeStoredPublication(deps: PublicationServiceDeps, runId: string, generation: number): Promise<PublicationResult> {
+export async function finalizeStoredPublication(
+  deps: PublicationServiceDeps,
+  runId: string,
+  generation: number,
+): Promise<PublicationResult> {
   const job = await readJob(deps, runId);
   requireActiveJob(job, generation);
   const intent = parseFinalizationIntent(job);
-  const tokens = createGoogleAuthClient(deps.googleOAuthCredentials, deps.clock, deps.fetcher);
+  const tokens = createGoogleAuthClient(
+    deps.googleOAuthCredentials,
+    deps.clock,
+    deps.fetcher,
+  );
   await finalizeDocument(deps.fetcher, tokens, intent.docId, intent.title);
   requireActiveJob(await readJob(deps, runId), generation);
-  const published = await readPublishedRun(deps.fetcher, deps.config, deps.airtableToken, runId);
-  if (published.docUrl !== intent.docUrl || published.status !== "Generated" || published.generatedAt !== intent.generatedAt) {
-    await markRunGenerated(deps.fetcher, deps.config, deps.airtableToken, runId, intent.docUrl, intent.generatedAt);
+  const published = await readPublishedRun(
+    deps.fetcher,
+    deps.config,
+    deps.airtableToken,
+    runId,
+  );
+  if (
+    published.docUrl !== intent.docUrl ||
+    published.status !== "Generated" ||
+    published.generatedAt !== intent.generatedAt
+  ) {
+    await markRunGenerated(
+      deps.fetcher,
+      deps.config,
+      deps.airtableToken,
+      runId,
+      intent.docUrl,
+      intent.generatedAt,
+    );
   }
-  await completePublicationGeneration(deps.db, deps.clock, runId, generation, intent);
-  return { publicationRunId: runId, googleDocId: intent.docId, googleDocUrl: intent.docUrl, productIds: intent.productIds };
+  await completePublicationGeneration(
+    deps.db,
+    deps.clock,
+    runId,
+    generation,
+    intent,
+  );
+  return {
+    publicationRunId: runId,
+    googleDocId: intent.docId,
+    googleDocUrl: intent.docUrl,
+    productIds: intent.productIds,
+  };
 }
 
-export async function recoverPublicationFinalization(deps: PublicationServiceDeps, runId: string, generation: number): Promise<{
-  result: PublicationResult; thaiDate: string; generation: number;
+export async function recoverPublicationFinalization(
+  deps: PublicationServiceDeps,
+  runId: string,
+  generation: number,
+): Promise<{
+  result: PublicationResult;
+  thaiDate: string;
+  generation: number;
 } | null> {
   const job = await readPublicationJob(deps.db, runId);
   if (!job) return null;
-  if (job.generation !== generation) throw new OperationalError("publication_generation_stale", "Publication generation is stale", false);
+  if (job.generation !== generation)
+    throw new OperationalError(
+      "publication_generation_stale",
+      "Publication generation is stale",
+      false,
+    );
   if (!job.finalizationJson) return null;
   const intent = parseFinalizationIntent(job);
   const result = await finalizeStoredPublication(deps, runId, generation);
   return { result, thaiDate: intent.thaiDate, generation };
 }
 
-export async function notifyPublicationSuccess(deps: PublicationServiceDeps, prepared: Pick<PreparedPublication, "thaiDate" | "generation">, result: PublicationResult): Promise<void> {
+export async function notifyPublicationSuccess(
+  deps: PublicationServiceDeps,
+  prepared: Pick<PreparedPublication, "thaiDate" | "generation">,
+  result: PublicationResult,
+): Promise<void> {
   const job = await readJob(deps, result.publicationRunId);
-  if (job.generation !== (prepared.generation ?? 1)) throw new OperationalError("publication_generation_stale", "Publication generation is stale", false);
-  const card = docsSuccessCard({ thaiDate: prepared.thaiDate, productIds: result.productIds, googleDocUrl: result.googleDocUrl }, deps.config.publicBaseUrl);
+  if (job.generation !== (prepared.generation ?? 1))
+    throw new OperationalError(
+      "publication_generation_stale",
+      "Publication generation is stale",
+      false,
+    );
+  const card = docsSuccessCard(
+    {
+      thaiDate: prepared.thaiDate,
+      productIds: result.productIds,
+      googleDocUrl: result.googleDocUrl,
+    },
+    deps.config.publicBaseUrl,
+  );
   await deps.notify(card.text, card.contents);
 }
 
@@ -337,26 +745,81 @@ export async function failPublicationAfterExhaustion(
   generation = 1,
 ): Promise<void> {
   const job = await readJob(deps, publicationRunId);
-  if (job.generation !== generation) throw new OperationalError("publication_generation_stale", "Publication generation is stale", false);
+  if (job.generation !== generation)
+    throw new OperationalError(
+      "publication_generation_stale",
+      "Publication generation is stale",
+      false,
+    );
   if (job.state === "succeeded") return;
   // Only a generating job could have created a copy. Validation failures must
   // not initiate Google discovery; a failed row already completed its cleanup.
-  if (!job.finalizationJson && job.state !== "failed" && (job.tempDocId || job.state === "generating")) {
-    const tokens = createGoogleAuthClient(deps.googleOAuthCredentials, deps.clock, deps.fetcher);
-    const identity = generation === 1 ? publicationRunId : publicationWorkflowId(publicationRunId, generation);
-    const docId = job.tempDocId ?? await findTemporaryDocument(deps.fetcher, tokens, deps.config.googleDriveFolderId, identity);
+  if (
+    !job.finalizationJson &&
+    job.state !== "failed" &&
+    (job.tempDocId || job.state === "generating")
+  ) {
+    const tokens = createGoogleAuthClient(
+      deps.googleOAuthCredentials,
+      deps.clock,
+      deps.fetcher,
+    );
+    const identity =
+      generation === 1
+        ? publicationRunId
+        : publicationWorkflowId(publicationRunId, generation);
+    const docId =
+      job.tempDocId ??
+      (await findTemporaryDocument(
+        deps.fetcher,
+        tokens,
+        deps.config.googleDriveFolderId,
+        identity,
+      ));
     if (docId) {
-      if (docId === job.googleDocId) throw new OperationalError("publication_finalization_conflict", "Cannot delete a successful Doc", false);
+      if (docId === job.googleDocId)
+        throw new OperationalError(
+          "publication_finalization_conflict",
+          "Cannot delete a successful Doc",
+          false,
+        );
       requireActiveJob(await readJob(deps, publicationRunId), generation);
       await deleteDocument(deps.fetcher, tokens, docId);
-      await setTempDocId(deps.db, deps.clock, publicationRunId, null, generation);
+      await setTempDocId(
+        deps.db,
+        deps.clock,
+        publicationRunId,
+        null,
+        generation,
+      );
     }
   }
-  await setJobState(deps.db, deps.clock, publicationRunId, "failed", undefined, generation);
-  await markRunFailed(deps.fetcher, deps.config, deps.airtableToken, publicationRunId, reason);
-  const card = docsWorkflowFailureCard({
-    thaiDate: displayDate ?? (job.finalizationJson ? parseFinalizationIntent(job).thaiDate : "ไม่สามารถอ่านวันที่รายการได้"), reason,
-    airtableRunUrl: airtableRunUrl(deps.config, publicationRunId),
-  }, deps.config.publicBaseUrl);
+  await setJobState(
+    deps.db,
+    deps.clock,
+    publicationRunId,
+    "failed",
+    undefined,
+    generation,
+  );
+  await markRunFailed(
+    deps.fetcher,
+    deps.config,
+    deps.airtableToken,
+    publicationRunId,
+    reason,
+  );
+  const card = docsWorkflowFailureCard(
+    {
+      thaiDate:
+        displayDate ??
+        (job.finalizationJson
+          ? parseFinalizationIntent(job).thaiDate
+          : "ไม่สามารถอ่านวันที่รายการได้"),
+      reason,
+      airtableRunUrl: airtableRunUrl(deps.config, publicationRunId),
+    },
+    deps.config.publicBaseUrl,
+  );
   await deps.notify(card.text, card.contents);
 }

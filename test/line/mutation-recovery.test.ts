@@ -249,3 +249,19 @@ it('keeps approved uncertain requests recognizable after a newer revert', async 
   expect((await checkLateMutation({pendingToken:pending.token,productId:pending.productId},'monitor',deps)).status).toBe('repaired');
   expect(current.inventoryStatus).toBe('In');
 });
+
+it('reads abandoned mutations through their original connection after settings change', async () => {
+  const { pending, mutations, repo, owner } = await mutationFixture();
+  await mutations.setOperationOwner(pending.token, owner, 'Mint (U1)', 'original-corr');
+  const current = { ...pending.after, productId: pending.productId, recordId: 'original-record', uploadDate: null, airtableUrl: 'https://airtable.example' };
+  const currentInventory = { findByProductId: vi.fn(), updateSaleValues: vi.fn(), listSalesForDay: vi.fn() };
+  const originalInventory = { ...currentInventory, findByProductId: vi.fn(async () => current) };
+  const result = await recoverAbandonedMutation(pending.productId, pending.groupId, 'settings-recovery', {
+    mutationRepo: mutations, repo, inventory: currentInventory,
+    inventoryForToken: async token => { expect(token).toBe(pending.token); return originalInventory; },
+    status: async () => 'terminal', registerFollowup: async () => {}, ids: sequentialIdGenerator('settings-recovery'),
+  });
+  expect(result.status).toBe('ready');
+  expect(originalInventory.findByProductId).toHaveBeenCalled();
+  expect(currentInventory.findByProductId).not.toHaveBeenCalled();
+});

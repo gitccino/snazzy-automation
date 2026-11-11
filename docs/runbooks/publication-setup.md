@@ -1,5 +1,7 @@
 # Publication deployment contract
 
+For staging after D1 settings cutover, use the [settings-console runbook](settings-console.md) to enable/disable captions, choose attempts and edit connection IDs. Do not regenerate APP_CONFIG_JSON to change saved D1 settings. Google OAuth credentials remain Worker secrets.
+
 For the Google Picker API key, restrict website referrers to `http://127.0.0.1:8765/*` and `https://docs.google.com/*`. Restrict API access to both the Google Picker API and Google Drive API. The Picker iframe is hosted on `docs.google.com`, so omitting that referrer can cause an invalid developer key error.
 
 Complete these checks in each customer-owned environment before enabling publication traffic. The live setup validator and deployment rehearsal belong to the hardening/handoff plan; local tests do not establish remote permissions or asset availability.

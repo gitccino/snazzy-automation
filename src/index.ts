@@ -8,15 +8,24 @@ export { PublicationWorkflow } from "./publication/workflow";
 export { SettingsService } from "./settings/entrypoint";
 
 export default {
-  fetch(request, env, ctx) {
-    return routeRequest(request, env, ctx);
+  async fetch(request, env, ctx) {
+    try {
+      return await routeRequest(request, env, ctx);
+    } catch (error) {
+      const unavailable =
+        error instanceof Error && error.message === "settings_unavailable";
+      return Response.json(
+        { error: unavailable ? "settings_unavailable" : "internal_error" },
+        { status: unavailable ? 503 : 500 },
+      );
+    }
   },
   scheduled(controller, env, ctx) {
-    ctx.waitUntil(handleScheduled(
-      env,
-      controller.cron,
-      { now: () => new Date(controller.scheduledTime) },
-    ));
+    ctx.waitUntil(
+      handleScheduled(env, controller.cron, {
+        now: () => new Date(controller.scheduledTime),
+      }),
+    );
   },
 } satisfies ExportedHandler<Env>;
 

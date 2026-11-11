@@ -1,4 +1,4 @@
-import { parseConfig } from "../config";
+import { loadSettingsSnapshot } from "../settings/runtime";
 import { getMonthlyUsage, getUsageTotal } from "../db/usage-repository";
 import type { Env } from "../env";
 import { buildCostReport } from "../monitoring/usage-report";
@@ -10,14 +10,16 @@ export async function handleUsage(
   env: Env,
   clock: Clock = { now: () => new Date() },
 ): Promise<Response> {
-  if (!await verifyAdminBearer(request, env.ADMIN_ROUTE_TOKEN)) {
+  if (!(await verifyAdminBearer(request, env.ADMIN_ROUTE_TOKEN))) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
   const yearMonth = todayBangkokDate(clock).slice(0, 7);
   const usage = {
-    ...await getMonthlyUsage(env.DB, yearMonth),
+    ...(await getMonthlyUsage(env.DB, yearMonth)),
     r2_stored_bytes: await getUsageTotal(env.DB, "r2_bytes_added"),
   };
-  return Response.json(buildCostReport(usage, parseConfig(env.APP_CONFIG_JSON), yearMonth));
+  return Response.json(
+    buildCostReport(usage, (await loadSettingsSnapshot(env)).config, yearMonth),
+  );
 }

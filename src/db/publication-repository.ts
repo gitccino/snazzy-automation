@@ -1,3 +1,5 @@
+import type { OperationContext } from "../settings/schema";
+import { serializeContext } from "./execution-context-repository";
 import type { Clock } from "../shared/time";
 import { OperationalError } from "../shared/errors";
 import { publicationWorkflowId } from "../publication/types";
@@ -71,52 +73,124 @@ function toRow(raw: JobRowRaw): PublicationJobRow {
   };
 }
 
-export async function readPublicationJob(db: D1Database, runId: string): Promise<PublicationJobRow | null> {
-  const raw = await db.prepare("SELECT * FROM publication_jobs WHERE publication_run_id = ?").bind(runId).first<JobRowRaw>();
+export async function readPublicationJob(
+  db: D1Database,
+  runId: string,
+): Promise<PublicationJobRow | null> {
+  const raw = await db
+    .prepare("SELECT * FROM publication_jobs WHERE publication_run_id = ?")
+    .bind(runId)
+    .first<JobRowRaw>();
   return raw ? toRow(raw) : null;
 }
 
-export async function assertPublicationGeneration(db: D1Database, runId: string, generation: number): Promise<PublicationJobRow> {
+export async function assertPublicationGeneration(
+  db: D1Database,
+  runId: string,
+  generation: number,
+): Promise<PublicationJobRow> {
   const job = await readPublicationJob(db, runId);
-  if (!job) throw new OperationalError("publication_job_missing", "Publication job missing", false);
-  if (job.generation !== generation) throw new OperationalError("publication_generation_stale", "Publication generation is stale", false);
+  if (!job)
+    throw new OperationalError(
+      "publication_job_missing",
+      "Publication job missing",
+      false,
+    );
+  if (job.generation !== generation)
+    throw new OperationalError(
+      "publication_generation_stale",
+      "Publication generation is stale",
+      false,
+    );
   return job;
 }
 
 export async function reopenSuccessfulJobForRegeneration(
-  db: D1Database, clock: Clock, runId: string, expectedGeneration: number,
+  db: D1Database,
+  clock: Clock,
+  runId: string,
+  expectedGeneration: number,
 ): Promise<PublicationJobRow | null> {
-  const raw = await db.prepare(`UPDATE publication_jobs
+  const raw = await db
+    .prepare(
+      `UPDATE publication_jobs
     SET generation = generation + 1, state = 'locked', correlation_id = ?, temp_doc_id = NULL,
-        validation_result_json = NULL, finalization_json = NULL, attempt_count = 0, updated_at = ?
+        validation_result_json = NULL, finalization_json = NULL, settings_context_json = NULL, attempt_count = 0, updated_at = ?
     WHERE publication_run_id = ? AND state = 'succeeded' AND generation = ? AND successful_generation = generation
-    RETURNING *`).bind(publicationWorkflowId(runId, expectedGeneration + 1), clock.now().toISOString(), runId, expectedGeneration).first<JobRowRaw>();
+    RETURNING *`,
+    )
+    .bind(
+      publicationWorkflowId(runId, expectedGeneration + 1),
+      clock.now().toISOString(),
+      runId,
+      expectedGeneration,
+    )
+    .first<JobRowRaw>();
   return raw ? toRow(raw) : null;
 }
 
 export async function persistFinalizationIntent(
-  db: D1Database, clock: Clock, runId: string, generation: number, intent: PublicationFinalizationIntent,
+  db: D1Database,
+  clock: Clock,
+  runId: string,
+  generation: number,
+  intent: PublicationFinalizationIntent,
 ): Promise<void> {
   const serialized = JSON.stringify(intent);
-  await db.prepare(`UPDATE publication_jobs SET finalization_json = ?, updated_at = ?
+  await db
+    .prepare(
+      `UPDATE publication_jobs SET finalization_json = ?, updated_at = ?
     WHERE publication_run_id = ? AND generation = ? AND finalization_json IS NULL
-      AND state NOT IN ('succeeded','failed','validation_failed')`)
-    .bind(serialized, clock.now().toISOString(), runId, generation).run();
+      AND state NOT IN ('succeeded','failed','validation_failed')`,
+    )
+    .bind(serialized, clock.now().toISOString(), runId, generation)
+    .run();
   const job = await assertPublicationGeneration(db, runId, generation);
-  if (job.finalizationJson !== serialized) throw new OperationalError("publication_finalization_conflict", "Publication finalization intent conflicts", false);
+  if (job.finalizationJson !== serialized)
+    throw new OperationalError(
+      "publication_finalization_conflict",
+      "Publication finalization intent conflicts",
+      false,
+    );
 }
 
 export async function completePublicationGeneration(
-  db: D1Database, clock: Clock, runId: string, generation: number, intent: PublicationFinalizationIntent,
+  db: D1Database,
+  clock: Clock,
+  runId: string,
+  generation: number,
+  intent: PublicationFinalizationIntent,
 ): Promise<void> {
-  const result = await db.prepare(`UPDATE publication_jobs
+  const result = await db
+    .prepare(
+      `UPDATE publication_jobs
     SET state='succeeded',successful_generation=generation,google_doc_id=?,google_doc_url=?,
         temp_doc_id=NULL,finalization_json=NULL,updated_at=?
-    WHERE publication_run_id=? AND generation=? AND finalization_json=? AND state NOT IN ('succeeded','failed','validation_failed')`)
-    .bind(intent.docId, intent.docUrl, clock.now().toISOString(), runId, generation, JSON.stringify(intent)).run();
+    WHERE publication_run_id=? AND generation=? AND finalization_json=? AND state NOT IN ('succeeded','failed','validation_failed')`,
+    )
+    .bind(
+      intent.docId,
+      intent.docUrl,
+      clock.now().toISOString(),
+      runId,
+      generation,
+      JSON.stringify(intent),
+    )
+    .run();
   const job = await assertPublicationGeneration(db, runId, generation);
-  if (result.meta.changes !== 1 && !(job.state === "succeeded" && job.googleDocId === intent.docId && job.googleDocUrl === intent.docUrl)) {
-    throw new OperationalError("publication_finalization_conflict", "Publication finalization result conflicts", false);
+  if (
+    result.meta.changes !== 1 &&
+    !(
+      job.state === "succeeded" &&
+      job.googleDocId === intent.docId &&
+      job.googleDocUrl === intent.docUrl
+    )
+  ) {
+    throw new OperationalError(
+      "publication_finalization_conflict",
+      "Publication finalization result conflicts",
+      false,
+    );
   }
 }
 
@@ -125,7 +199,11 @@ export async function acquireOrResumeJob(
   clock: Clock,
   publicationRunId: string,
   correlationId: string,
-): Promise<{ job: PublicationJobRow; alreadySucceeded: boolean; ownsLock: boolean }> {
+): Promise<{
+  job: PublicationJobRow;
+  alreadySucceeded: boolean;
+  ownsLock: boolean;
+}> {
   const nowIso = clock.now().toISOString();
   const insertResult = await db
     .prepare(
@@ -142,11 +220,17 @@ export async function acquireOrResumeJob(
     .first<JobRowRaw>();
 
   if (!raw) {
-    throw new Error(`publication job row missing immediately after insert for ${publicationRunId}`);
+    throw new Error(
+      `publication job row missing immediately after insert for ${publicationRunId}`,
+    );
   }
 
   const job = toRow(raw);
-  return { job, alreadySucceeded: job.state === "succeeded", ownsLock: insertResult.meta.changes === 1 };
+  return {
+    job,
+    alreadySucceeded: job.state === "succeeded",
+    ownsLock: insertResult.meta.changes === 1,
+  };
 }
 
 /** A claimed date stays with its run through retries, failure, and finalization. */
@@ -157,11 +241,20 @@ export async function claimPublicationDate(
   publicationDate: string,
   generation = 1,
 ): Promise<boolean> {
-  const result = await db.prepare(
-    `UPDATE OR IGNORE publication_jobs SET publication_date = ?, updated_at = ?
+  const result = await db
+    .prepare(
+      `UPDATE OR IGNORE publication_jobs SET publication_date = ?, updated_at = ?
      WHERE publication_run_id = ? AND (publication_date IS NULL OR publication_date = ?)
        AND state NOT IN ('succeeded', 'failed') AND generation = ?`,
-  ).bind(publicationDate, clock.now().toISOString(), publicationRunId, publicationDate, generation).run();
+    )
+    .bind(
+      publicationDate,
+      clock.now().toISOString(),
+      publicationRunId,
+      publicationDate,
+      generation,
+    )
+    .run();
   return result.meta.changes === 1;
 }
 
@@ -172,13 +265,21 @@ export async function reopenFailedJobForRestart(
   publicationRunId: string,
   correlationId: string,
   generation = 1,
+  context?: OperationContext,
 ): Promise<boolean> {
   const result = await db
     .prepare(
-      `UPDATE publication_jobs SET state = 'locked', correlation_id = ?, updated_at = ?
-       WHERE publication_run_id = ? AND state = 'failed' AND generation = ?`,
+      `UPDATE publication_jobs SET settings_context_json = CASE WHEN temp_doc_id IS NULL AND finalization_json IS NULL THEN COALESCE(?, settings_context_json) ELSE settings_context_json END, state = 'locked', correlation_id = ?, updated_at = ?
+       WHERE publication_run_id = ? AND (state = 'failed' OR (state = 'validation_failed' AND ? = 1)) AND generation = ?`,
     )
-    .bind(correlationId, clock.now().toISOString(), publicationRunId, generation)
+    .bind(
+      context ? serializeContext(context) : null,
+      correlationId,
+      clock.now().toISOString(),
+      publicationRunId,
+      context ? 1 : 0,
+      generation,
+    )
     .run();
   return result.meta.changes === 1;
 }
@@ -188,13 +289,33 @@ export async function setJobState(
   clock: Clock,
   publicationRunId: string,
   state: PublicationJobState,
-  patch?: Partial<Pick<PublicationJobRow, "googleDocId" | "googleDocUrl" | "tempDocId" | "validationResultJson" | "finalizationJson">>,
+  patch?: Partial<
+    Pick<
+      PublicationJobRow,
+      | "googleDocId"
+      | "googleDocUrl"
+      | "tempDocId"
+      | "validationResultJson"
+      | "finalizationJson"
+    >
+  >,
   generation = 1,
 ): Promise<void> {
   const nowIso = clock.now().toISOString();
   const columns: string[] = ["state = ?"];
   const values: (string | null)[] = [state];
-  const patchColumns: Array<["googleDocId" | "googleDocUrl" | "tempDocId" | "validationResultJson" | "finalizationJson", string]> = [
+  const patchColumns: Array<
+    [
+      (
+        | "googleDocId"
+        | "googleDocUrl"
+        | "tempDocId"
+        | "validationResultJson"
+        | "finalizationJson"
+      ),
+      string,
+    ]
+  > = [
     ["googleDocId", "google_doc_id"],
     ["googleDocUrl", "google_doc_url"],
     ["tempDocId", "temp_doc_id"],
@@ -220,9 +341,15 @@ export async function setJobState(
   await assertPublicationGeneration(db, publicationRunId, generation);
 }
 
-export async function incrementAttempt(db: D1Database, publicationRunId: string, generation = 1): Promise<number> {
+export async function incrementAttempt(
+  db: D1Database,
+  publicationRunId: string,
+  generation = 1,
+): Promise<number> {
   const raw = await db
-    .prepare("UPDATE publication_jobs SET attempt_count = attempt_count + 1 WHERE publication_run_id = ? AND generation = ? RETURNING attempt_count")
+    .prepare(
+      "UPDATE publication_jobs SET attempt_count = attempt_count + 1 WHERE publication_run_id = ? AND generation = ? RETURNING attempt_count",
+    )
     .bind(publicationRunId, generation)
     .first<{ attempt_count: number }>();
   await assertPublicationGeneration(db, publicationRunId, generation);
@@ -237,7 +364,9 @@ export async function setTempDocId(
   generation = 1,
 ): Promise<void> {
   await db
-    .prepare("UPDATE publication_jobs SET temp_doc_id = ?, updated_at = ? WHERE publication_run_id = ? AND generation = ? AND state NOT IN ('succeeded','failed')")
+    .prepare(
+      "UPDATE publication_jobs SET temp_doc_id = ?, updated_at = ? WHERE publication_run_id = ? AND generation = ? AND state NOT IN ('succeeded','failed')",
+    )
     .bind(tempDocId, clock.now().toISOString(), publicationRunId, generation)
     .run();
   await assertPublicationGeneration(db, publicationRunId, generation);
@@ -249,12 +378,21 @@ export async function getProductCache(
   productId: string,
 ): Promise<ProductOutputCache> {
   const raw = await db
-    .prepare(`SELECT collage_r2_key AS collageR2Key, collage_input_fingerprint AS collageInputFingerprint,
+    .prepare(
+      `SELECT collage_r2_key AS collageR2Key, collage_input_fingerprint AS collageInputFingerprint,
       captions_json AS captionsJson, captions_input_fingerprint AS captionsInputFingerprint
-      FROM publication_product_cache WHERE publication_run_id = ? AND product_id = ?`)
+      FROM publication_product_cache WHERE publication_run_id = ? AND product_id = ?`,
+    )
     .bind(publicationRunId, productId)
     .first<ProductOutputCache>();
-  return raw ?? { collageR2Key: null, collageInputFingerprint: null, captionsJson: null, captionsInputFingerprint: null };
+  return (
+    raw ?? {
+      collageR2Key: null,
+      collageInputFingerprint: null,
+      captionsJson: null,
+      captionsInputFingerprint: null,
+    }
+  );
 }
 
 export async function putProductCollage(
@@ -275,7 +413,15 @@ export async function putProductCollage(
        DO UPDATE SET collage_r2_key = excluded.collage_r2_key,
          collage_input_fingerprint = excluded.collage_input_fingerprint, updated_at = excluded.updated_at`,
     )
-    .bind(publicationRunId, productId, collageR2Key, inputFingerprint, nowIso, publicationRunId, generation)
+    .bind(
+      publicationRunId,
+      productId,
+      collageR2Key,
+      inputFingerprint,
+      nowIso,
+      publicationRunId,
+      generation,
+    )
     .run();
   await assertPublicationGeneration(db, publicationRunId, generation);
 }
@@ -298,7 +444,15 @@ export async function putProductCaptions(
        DO UPDATE SET captions_json = excluded.captions_json,
          captions_input_fingerprint = excluded.captions_input_fingerprint, updated_at = excluded.updated_at`,
     )
-    .bind(publicationRunId, productId, captionsJson, inputFingerprint, nowIso, publicationRunId, generation)
+    .bind(
+      publicationRunId,
+      productId,
+      captionsJson,
+      inputFingerprint,
+      nowIso,
+      publicationRunId,
+      generation,
+    )
     .run();
   await assertPublicationGeneration(db, publicationRunId, generation);
 }

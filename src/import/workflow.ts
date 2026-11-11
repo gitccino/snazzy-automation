@@ -4,7 +4,7 @@ import {
   type WorkflowStep,
 } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
-import { parseConfig } from "../config";
+import { resolveImportContext } from "../settings/runtime";
 import { createAuditLog } from "../db/audit";
 import { createImportRepository } from "../db/import-repository";
 import { createSequenceRepository } from "../db/sequence-repository";
@@ -79,17 +79,20 @@ export async function runImportWorkflow(
   step: WorkflowStepLike,
   operations: ImportWorkflowOperations,
 ): Promise<ImportRunResult> {
-  const retries = { retries: { limit: operations.retryLimit, delay: "10 seconds" as const, backoff: "exponential" as const } };
+  const retries = {
+    retries: {
+      limit: operations.retryLimit,
+      delay: "10 seconds" as const,
+      backoff: "exponential" as const,
+    },
+  };
   let downloadOutcome: DownloadAndGroupOutcome;
   try {
     downloadOutcome = await step.do("download-and-group", retries, async () => {
       try {
         return await operations.downloadAndGroup();
       } catch (error) {
-        const code = durableErrorCode(
-          error,
-          "non_retryable_download_error",
-        );
+        const code = durableErrorCode(error, "non_retryable_download_error");
         if (!isRetryable(error)) {
           const message =
             error instanceof Error
@@ -187,7 +190,12 @@ export class ImportWorkflow extends WorkflowEntrypoint<
     event: WorkflowEvent<ImportWorkflowParams>,
     step: WorkflowStep,
   ): Promise<ImportRunResult> {
-    const config = parseConfig(this.env.APP_CONFIG_JSON, this.env.WORKFLOW_RETRY_LIMIT);
+    const context = await step.do(
+      "settings-context",
+      { retries: { limit: 0, delay: "1 second" } },
+      () => resolveImportContext(this.env, event.payload),
+    );
+    const config = context.settings.config;
     const clock = { now: () => new Date() };
     const ids = { next: () => newCorrelationId() };
     const fetcher = fetch.bind(globalThis);
@@ -228,33 +236,49 @@ export class ImportWorkflow extends WorkflowEntrypoint<
       fetch: fetcher,
     });
 
-    return runImportWorkflow(deps, event.payload, step as unknown as WorkflowStepLike, {
-      retryLimit: config.importRetryLimit,
-      downloadAndGroup: () =>
-        downloadAndGroupSnapshot(deps, event.payload.importRunId),
-      recordRunFailure: (failureReason) =>
-        repo.failImportRun({
-          id: event.payload.importRunId,
-          sourceAlbumId: event.payload.sourceAlbumId,
-          failureReason,
-        }),
-      processGroupAttempt: processProductGroupAttempt,
-      recordExhaustedFailure: recordExhaustedGroupFailure,
-      finalize: (hadFailures, orphanPhotoCount, checkpointPosition) =>
-        finalizeImportRun(
-          repo,
-          event.payload.importRunId,
-          event.payload.sourceAlbumId,
-          hadFailures,
-          orphanPhotoCount,
-          checkpointPosition,
-        ),
-      notify: (result, orphanRange) =>
-        sendImportSummary(line, config.lineAllowedGroupId, {
-          result,
-          orphanRange,
-          nowThaiText: bangkokDateTimeThai(clock),
-        }, config.publicBaseUrl),
-    });
+    return runImportWorkflow(
+      deps,
+      event.payload,
+      step as unknown as WorkflowStepLike,
+      {
+        retryLimit: config.importRetryLimit,
+        downloadAndGroup: () =>
+          downloadAndGroupSnapshot(deps, event.payload.importRunId),
+        recordRunFailure: (failureReason) =>
+          repo.failImportRun({
+            id: event.payload.importRunId,
+            sourceAlbumId: event.payload.sourceAlbumId,
+            failureReason,
+          }),
+        processGroupAttempt: processProductGroupAttempt,
+        recordExhaustedFailure: recordExhaustedGroupFailure,
+        finalize: (hadFailures, orphanPhotoCount, checkpointPosition) =>
+          finalizeImportRun(
+            repo,
+            event.payload.importRunId,
+            event.payload.sourceAlbumId,
+            hadFailures,
+            orphanPhotoCount,
+            checkpointPosition,
+          ),
+        notify: async (result, orphanRange) => {
+          if (!context.replyGroupId) return;
+          try {
+            await sendImportSummary(
+              line,
+              context.replyGroupId,
+              {
+                result,
+                orphanRange,
+                nowThaiText: bangkokDateTimeThai(clock),
+              },
+              config.publicBaseUrl,
+            );
+          } catch {
+            console.error("import_notification_failed");
+          }
+        },
+      },
+    );
   }
 }
