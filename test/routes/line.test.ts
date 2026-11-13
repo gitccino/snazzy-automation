@@ -188,3 +188,13 @@ it("persists before acknowledging, deduplicates IDs, and returns 503 if persiste
   expect(createBatch.mock.calls[0]![0]).toEqual(createBatch.mock.calls[1]![0]);
   expect((await handleLineRoute(request(), env, immediateContext)).status).toBe(503);
 });
+
+it.each(['แมสเลย A-2','invalid'])('sanitizes messenger text before durable Workflow creation: %s',async instruction=>{
+ const {createTestEnv}=await import('../helpers/env');
+ const body=new TextEncoder().encode(JSON.stringify({events:[{type:'message',timestamp:Date.parse('2026-11-14T01:00:00Z'),webhookEventId:'mess-safe',replyToken:'r',source:{type:'group',groupId:'CtestGroup',userId:'Ustaff'},message:{type:'text',id:'m',quoteToken:'private-quote',text:'/mess\n'+instruction+'\n065 663 5369\nSTAY Hotel'}}]}));
+ const createBatch=vi.fn(async()=>[]);
+ const e={...testEnv(),...createTestEnv(),CONFIGURATION_MODE:'legacy' as const,LINE_CHANNEL_SECRET:'secret',LINE_COMMAND_WORKFLOW:{createBatch} as any};
+ const response=await handleLineRoute(new Request('https://worker/line/webhook',{method:'POST',headers:{'x-line-signature':await sign(body,'secret')},body}),e,immediateContext);
+ expect(response.status).toBe(200);expect(createBatch).toHaveBeenCalledTimes(1);
+ const params=createBatch.mock.calls[0] as unknown as [unknown];expect(JSON.stringify(params)).not.toMatch(/065|STAY Hotel/);expect(JSON.stringify(params)).toContain('private-quote');
+});

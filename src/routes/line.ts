@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { sanitizeMessengerEvent } from "../messenger/parser";
+import { createMessengerAirtable } from "../messenger/airtable";
+import { createMessengerRepository } from "../messenger/repository";
+import { loadSettingsSnapshot } from "../settings/runtime";
 import { createLineMutationRepository } from "../db/line-mutation-repository";
 import {
   createMutationCoordinator,
@@ -79,6 +83,8 @@ export async function handleLineRoute(
   } catch {
     return new Response("invalid payload", { status: 400 });
   }
+
+  events = events.map(sanitizeMessengerEvent);
 
   if (override !== undefined) {
     ctx.waitUntil(override.process(events));
@@ -237,7 +243,12 @@ export async function createWebhookDeps(
       },
     },
   );
+  const connection = config.airtableMessengerDeliveriesTableId ? {baseId:config.airtableBaseId,productsTableId:config.airtableProductsTableId,deliveriesTableId:config.airtableMessengerDeliveriesTableId} : null;
   return {
+    ...(connection ? {messenger:{connection,airtable:createMessengerAirtable({connection,token:env.AIRTABLE_TOKEN,fetch:fetcher}),repo:createMessengerRepository(env.DB),clock,ids,
+      profile:(groupId:string,userId:string)=>line.getGroupMemberProfile(groupId,userId),
+      async currentPolicy(){const current=(await loadSettingsSnapshot(env)).config;return {allowedGroupIds:current.lineAllowedGroupIds,completionUserIds:current.messengerCompletionUserIds,connection:current.airtableMessengerDeliveriesTableId?{baseId:current.airtableBaseId,productsTableId:current.airtableProductsTableId,deliveriesTableId:current.airtableMessengerDeliveriesTableId}:null};}
+    }} : {}),
     mutation,
     context: operationContext,
     publicBaseUrl: config.publicBaseUrl,

@@ -1,3 +1,4 @@
+import { isMessengerEvent, messengerAccessAllowed } from "../messenger/line";
 import { captureOperationContext } from "../settings/runtime";
 import { readPendingContext } from "../db/execution-context-repository";
 import type { OperationContext } from "../settings/schema";
@@ -8,7 +9,7 @@ import {
 } from "cloudflare:workers";
 import type { Env } from "../env";
 import { createWebhookDeps, fetchForLineCommand } from "../routes/line";
-import { isRetryable } from "../shared/errors";
+import { OperationalError, isRetryable } from "../shared/errors";
 import { createLineClient } from "./client";
 import type { CommandReply } from "./soldout";
 import type { SupportedLineEvent } from "./types";
@@ -121,7 +122,7 @@ export class LineCommandWorkflow extends WorkflowEntrypoint<
       "settings-context",
       attemptOptions,
       async () => {
-        if (event.type === "postback") {
+        if (event.type === "postback" && !isMessengerEvent(event)) {
           const token = new URLSearchParams(event.postback.data).get("token");
           if (token) {
             const saved = await readPendingContext(this.env.DB, token);
@@ -164,12 +165,17 @@ export class LineCommandWorkflow extends WorkflowEntrypoint<
       });
     const outcome = await runLineCommandRecovery(step, {
       async prepare() {
-        return (
-          (await deps.repo.findEventReply(event.webhookEventId)) ??
-          (await prepareLineReply(event, deps))
-        );
+        if (isMessengerEvent(event)) {
+          try { return await prepareLineReply(event, deps); }
+          catch (error) { throw new OperationalError("messenger_operation_failed", "Messenger operation failed", isRetryable(error)); }
+        }
+        return (await deps.repo.findEventReply(event.webhookEventId)) ?? (await prepareLineReply(event, deps));
       },
       async deliver(reply, retryKey) {
+        if (isMessengerEvent(event) && deps.messenger && !(await messengerAccessAllowed(event, deps.messenger))) {
+          await client(retryKey).replyText(event.replyToken, "⚠️ สิทธิ์หรือการตั้งค่าเปลี่ยนแล้ว กรุณาขอรายการใหม่");
+          return;
+        }
         await deps.repo.saveEventReply(event.webhookEventId, reply);
         await sendCommandReply(
           event.replyToken,

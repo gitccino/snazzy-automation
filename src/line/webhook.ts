@@ -1,3 +1,5 @@
+import { isMessengerEvent, prepareMessengerReply, messengerAccessAllowed } from "../messenger/line";
+import type { MessengerDeps } from "../messenger/types";
 import type { AuditLog } from "../db/audit";
 import type { LineRepository } from "../db/line-repository";
 import type { IdGenerator } from "../shared/ids";
@@ -19,6 +21,7 @@ import {
 import type { LineActor, SupportedLineEvent } from "./types";
 
 export interface WebhookDeps extends ReadOnlyDeps, SoldoutDeps {
+  messenger?: MessengerDeps;
   allowedGroupId?: string;
   allowedGroupIds?: string[];
   confirmationEnabled: boolean;
@@ -108,7 +111,8 @@ export async function sendCommandReply(
   publicBaseUrl: string,
 ): Promise<void> {
   if (reply.kind === "quoted-text") {
-    await line.replyQuotedText(replyToken, reply.text, reply.quoteToken);
+    try { await line.replyQuotedText(replyToken, reply.text, reply.quoteToken); }
+    catch { await line.replyText(replyToken, `⚠️ ไม่สามารถอ้างอิงข้อความเดิมได้ · ${reply.text}`); }
     return;
   }
   if (reply.kind === "flex") {
@@ -194,6 +198,7 @@ export async function prepareLineReply(
   deps: WebhookDeps,
   correlationId = event.webhookEventId,
 ): Promise<CommandReply | null> {
+  if (isMessengerEvent(event)) return prepareMessengerReply(event, deps.messenger);
   if (event.type === "message") {
     const parsed = parseLineCommand(event.message.text);
     if (!parsed.ok)
@@ -266,7 +271,7 @@ export async function processLineEvents(
         continue;
       }
 
-      const savedReply = await deps.repo.findEventReply(event.webhookEventId);
+      const savedReply = isMessengerEvent(event) ? null : await deps.repo.findEventReply(event.webhookEventId);
       if (savedReply !== null) {
         await sendCommandReply(
           event.replyToken,
@@ -277,6 +282,10 @@ export async function processLineEvents(
         continue;
       }
       const deliver = async (reply: CommandReply) => {
+        if (isMessengerEvent(event) && deps.messenger && !(await messengerAccessAllowed(event, deps.messenger))) {
+          await deps.line.replyText(event.replyToken, "⚠️ สิทธิ์หรือการตั้งค่าเปลี่ยนแล้ว กรุณาขอรายการใหม่");
+          return;
+        }
         await deps.repo.saveEventReply(event.webhookEventId, reply);
         await sendCommandReply(
           event.replyToken,

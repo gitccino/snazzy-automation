@@ -203,3 +203,21 @@ it("still replies with validation errors for recognized commands", async () => {
   expect(d.line.replyText).toHaveBeenCalledWith("reply-1", expect.stringContaining("ไม่พบรหัสสินค้า"));
   expect(d.repo.saveEventReply).toHaveBeenCalledTimes(1);
 });
+
+it('routes disabled messenger commands to explicit guidance instead of ignoring them',async()=>{
+ const {prepareLineReply}=await import('../../src/line/webhook');
+ const {sanitizeMessengerEvent}=await import('../../src/messenger/parser');
+ const input=sanitizeMessengerEvent({...event,timestamp:Date.parse('2026-11-14T01:00:00Z'),message:{type:'text',id:'m',text:'/mess แมสเลย A-2'}} as SupportedLineEvent);
+ expect(await prepareLineReply(input,deps())).toMatchObject({kind:'text',text:expect.stringContaining('ตั้งค่า')});
+});
+it('falls back to a product-specific notice when quoting is unavailable',async()=>{
+ const {sendCommandReply}=await import('../../src/line/webhook');const d=deps();d.line.replyQuotedText=async()=>{throw new Error('unavailable');};
+ await sendCommandReply('reply',{kind:'quoted-text',text:'รายการจัดส่ง A-2',quoteToken:'private'},d.line,d.publicBaseUrl);
+ expect(d.line.replyText).toHaveBeenCalledWith('reply',expect.stringContaining('A-2'));
+});
+it('does not replay a saved messenger reply without current preparation',async()=>{
+ const d=deps();vi.mocked(d.repo.findEventReply).mockResolvedValue({kind:'text',text:'stale success'});
+ const {sanitizeMessengerEvent}=await import('../../src/messenger/parser');
+ const safe=sanitizeMessengerEvent({...event,timestamp:Date.parse('2026-11-14T01:00:00Z'),message:{type:'text',id:'m',text:'/mess แมสเลย A-2'}} as SupportedLineEvent);
+ await processLineEvents([safe],d);expect(d.line.replyText).not.toHaveBeenCalledWith('reply-1','stale success');
+});
