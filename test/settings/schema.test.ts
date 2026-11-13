@@ -17,7 +17,7 @@ describe('settings contract', () => {
     expect(() => normalizeGroupIds('C1,,C2')).toThrow();
   });
   it('accepts allowed limits and rejects invalid or secret data', () => {
-    expect(parseStoredSettings(settings)).toEqual({ ...settings, CLAUDE_MODEL: "claude-opus-5" });
+    expect(parseStoredSettings(settings)).toEqual({ ...settings, CLAUDE_MODEL: "claude-opus-5", AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID:null, MESSENGER_COMPLETION_USER_IDS:[] });
     for (const changes of [{ IMPORT_RETRY_LIMIT: 1 }, { IMPORT_RETRY_LIMIT: 0.5 }, { CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150001 }, { FIRST_IMPORT_CUTOFF_DATE: 'invalid' }, { GOOGLE_REFRESH_TOKEN: 'secret' }]) {
       expect(() => parseStoredSettings({ ...settings, ...changes })).toThrow();
     }
@@ -34,4 +34,12 @@ it('accepts editable model IDs and rejects blank or malformed values', () => {
   for (const CLAUDE_MODEL of ['', 'invalid model', 'x'.repeat(201)]) {
     expect(() => parseStoredSettings({ ...settings, CLAUDE_MODEL })).toThrow();
   }
+});
+
+it('defaults messenger off and validates a separate completion allowlist', () => {
+ expect(parseStoredSettings(settings)).toMatchObject({AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID:null,MESSENGER_COMPLETION_USER_IDS:[]});
+ const book='U'+'a'.repeat(32);
+ expect(parseSaveSectionRequest({expectedRevision:1,section:'line',changes:{MESSENGER_COMPLETION_USER_IDS:[book]}}).changes).toEqual({MESSENGER_COMPLETION_USER_IDS:[book]});
+ for(const value of [['Book'],[book,book]])expect(()=>parseStoredSettings({...settings,MESSENGER_COMPLETION_USER_IDS:value})).toThrow();
+ expect(()=>parseStoredSettings({...settings,AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID:'invalid'})).toThrow();
 });

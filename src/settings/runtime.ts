@@ -13,6 +13,8 @@ export function toRuntimeSettings(
   publicBaseUrl: string,
 ): RuntimeSettings {
   return {
+    airtableMessengerDeliveriesTableId: s.AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID,
+    messengerCompletionUserIds: s.MESSENGER_COMPLETION_USER_IDS,
     timeZone: "Asia/Bangkok",
     productIdPrefix: "A",
     claudeModel: s.CLAUDE_MODEL,

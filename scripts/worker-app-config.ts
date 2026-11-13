@@ -38,6 +38,8 @@ export function buildWorkerAppConfig(
   z.string().datetime().parse(value("FIRST_IMPORT_CUTOFF_DATE"));
 
   return {
+    AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID: env.AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID?.trim() || null,
+    MESSENGER_COMPLETION_USER_IDS: (env.MESSENGER_COMPLETION_USER_IDS ?? "").split(",").map(id => id.trim()).filter(Boolean),
     AIRTABLE_BASE_ID: value("AIRTABLE_BASE_ID"),
     AIRTABLE_PRODUCTS_TABLE_ID: value("AIRTABLE_PRODUCTS_TABLE_ID"),
     AIRTABLE_PUBLICATION_RUNS_TABLE_ID: value(

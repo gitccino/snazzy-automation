@@ -7,7 +7,7 @@ export function sampleView(): SettingsView {
       revision: 1,
       updatedAt: new Date().toISOString(),
       settings: {
-        AIRTABLE_BASE_ID: "appSample",
+        AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID:null, MESSENGER_COMPLETION_USER_IDS:[], AIRTABLE_BASE_ID: "appSample",
         AIRTABLE_PRODUCTS_TABLE_ID: "tblProducts",
         AIRTABLE_PUBLICATION_RUNS_TABLE_ID: "tblPublications",
         GOOGLE_DRIVE_FOLDER_ID: "sample-folder",

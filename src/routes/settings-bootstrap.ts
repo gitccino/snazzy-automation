@@ -16,6 +16,7 @@ export async function handleSettingsBootstrap(request: Request, env: Env): Promi
       publicBaseUrl = config.publicBaseUrl;
       if (config.productIdPrefix !== 'A') throw new Error('Unsupported product prefix');
       const settings = parseStoredSettings({
+        AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID: config.airtableMessengerDeliveriesTableId, MESSENGER_COMPLETION_USER_IDS: config.messengerCompletionUserIds,
         AIRTABLE_BASE_ID: config.airtableBaseId, AIRTABLE_PRODUCTS_TABLE_ID: config.airtableProductsTableId,
         AIRTABLE_PUBLICATION_RUNS_TABLE_ID: config.airtablePublicationRunsTableId,
         GOOGLE_DRIVE_FOLDER_ID: config.googleDriveFolderId, GOOGLE_TEMPLATE_DOC_ID: config.googleTemplateDocId,

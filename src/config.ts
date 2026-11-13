@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 const RawAppConfigSchema = z.object({
+  AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID: z.string().regex(/^tbl[A-Za-z0-9]+$/).nullable().default(null),
+  MESSENGER_COMPLETION_USER_IDS: z.array(z.string().regex(/^U[0-9a-f]{32}$/)).refine(ids => new Set(ids).size === ids.length).default([]),
   TIME_ZONE: z.literal("Asia/Bangkok"),
   UPLOAD_CUTOFF_MINUTES: z.number().int().positive(),
   PRODUCT_ID_PREFIX: z.string().min(1),
@@ -29,6 +31,8 @@ const RawAppConfigSchema = z.object({
 });
 
 export interface AppConfig {
+  airtableMessengerDeliveriesTableId: string | null;
+  messengerCompletionUserIds: string[];
   timeZone: "Asia/Bangkok";
   uploadCutoffMinutes: number;
   productIdPrefix: string;
@@ -62,6 +66,8 @@ export function parseConfig(raw: unknown, workflowRetryLimit?: string): AppConfi
   const retryLimit = workflowRetryLimit === undefined ? undefined
     : z.enum(["0", "5"]).transform(value => value === "0" ? 0 as const : 5 as const).parse(workflowRetryLimit);
   return {
+    airtableMessengerDeliveriesTableId: parsed.AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID,
+    messengerCompletionUserIds: parsed.MESSENGER_COMPLETION_USER_IDS,
     timeZone: parsed.TIME_ZONE,
     uploadCutoffMinutes: parsed.UPLOAD_CUTOFF_MINUTES,
     productIdPrefix: parsed.PRODUCT_ID_PREFIX,
