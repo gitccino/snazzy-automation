@@ -34,7 +34,7 @@ export type StoredSettings = z.infer<typeof storedSettingsSchema>;
 export const sectionSchemas = {
   connections: z
     .strictObject({
-      AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID: fields.AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID,
+      AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID: fields.AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID.unwrap(),
       AIRTABLE_BASE_ID: fields.AIRTABLE_BASE_ID,
       AIRTABLE_PRODUCTS_TABLE_ID: fields.AIRTABLE_PRODUCTS_TABLE_ID,
       AIRTABLE_PUBLICATION_RUNS_TABLE_ID:
@@ -45,7 +45,7 @@ export const sectionSchemas = {
     .partial(),
   line: z
     .strictObject({
-      MESSENGER_COMPLETION_USER_IDS: fields.MESSENGER_COMPLETION_USER_IDS,
+      MESSENGER_COMPLETION_USER_IDS: fields.MESSENGER_COMPLETION_USER_IDS.unwrap(),
       LINE_ALLOWED_GROUP_IDS: fields.LINE_ALLOWED_GROUP_IDS,
       SOLDOUT_CONFIRMATION_ENABLED: fields.SOLDOUT_CONFIRMATION_ENABLED,
     })

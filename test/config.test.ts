@@ -27,6 +27,8 @@ describe("parseConfig", () => {
     const config = parseConfig(JSON.stringify(validRawConfig));
 
     expect(config).toEqual({
+      airtableMessengerDeliveriesTableId: null,
+      messengerCompletionUserIds: [],
       timeZone: "Asia/Bangkok",
       uploadCutoffMinutes: 30,
       productIdPrefix: "A",

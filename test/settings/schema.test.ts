@@ -43,3 +43,8 @@ it('defaults messenger off and validates a separate completion allowlist', () =>
  for(const value of [['Book'],[book,book]])expect(()=>parseStoredSettings({...settings,MESSENGER_COMPLETION_USER_IDS:value})).toThrow();
  expect(()=>parseStoredSettings({...settings,AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID:'invalid'})).toThrow();
 });
+
+it('does not reset messenger settings during unrelated section edits', () => {
+ expect(parseSaveSectionRequest({expectedRevision:1,section:'line',changes:{SOLDOUT_CONFIRMATION_ENABLED:false}}).changes).toEqual({SOLDOUT_CONFIRMATION_ENABLED:false});
+ expect(parseSaveSectionRequest({expectedRevision:1,section:'connections',changes:{AIRTABLE_BASE_ID:'appOther'}}).changes).toEqual({AIRTABLE_BASE_ID:'appOther'});
+});
