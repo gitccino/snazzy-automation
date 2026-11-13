@@ -33,7 +33,7 @@ function deps(): WebhookDeps {
   const line = {
     pushMessage: vi.fn(),
     replyFlex: vi.fn().mockResolvedValue(undefined),
-    replyText: vi.fn().mockResolvedValue(undefined),
+    replyQuotedText: async () => undefined, replyText: vi.fn().mockResolvedValue(undefined),
     replyButtons: vi.fn().mockResolvedValue(undefined),
     getGroupMemberProfile: vi.fn().mockResolvedValue({ userId: "U1", displayName: "Mint" }),
   } satisfies LineClient;

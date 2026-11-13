@@ -107,6 +107,10 @@ export async function sendCommandReply(
   line: LineClient,
   publicBaseUrl: string,
 ): Promise<void> {
+  if (reply.kind === "quoted-text") {
+    await line.replyQuotedText(replyToken, reply.text, reply.quoteToken);
+    return;
+  }
   if (reply.kind === "flex") {
     await line.replyFlex(
       replyToken,

@@ -207,7 +207,7 @@ async function buildHarness(
         sendImportSummary({
           pushMessage: push,
           replyFlex: async () => undefined,
-          replyText: async () => undefined,
+          replyQuotedText: async () => undefined, replyText: async () => undefined,
           replyButtons: async () => undefined,
           getGroupMemberProfile: async () => ({
             userId: "unused",

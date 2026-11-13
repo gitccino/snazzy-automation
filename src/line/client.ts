@@ -16,6 +16,7 @@ export interface LineButton {
 export interface LineClient {
   pushMessage(toGroupId: string, text: string, contents?: Record<string, unknown>): Promise<void>;
   replyFlex(replyToken: string, altText: string, contents: Record<string, unknown>): Promise<void>;
+  replyQuotedText(replyToken: string, text: string, quoteToken: string): Promise<void>;
   replyText(replyToken: string, text: string): Promise<void>;
   replyButtons(replyToken: string, altText: string, text: string, buttons: LineButton[]): Promise<void>;
   getGroupMemberProfile(groupId: string, userId: string): Promise<{ userId: string; displayName: string }>;
@@ -69,6 +70,10 @@ export function createLineClient(config: {
         { replyToken, messages: [{ type: "flex", altText: altText.slice(0, 1500).replace(/[\uD800-\uDBFF]$/, ""), contents }] },
         "line_reply_failed",
       );
+    },
+
+    replyQuotedText(replyToken, text, quoteToken) {
+      return send("https://api.line.me/v2/bot/message/reply", { replyToken, messages: [{ type: "text", text, quoteToken }] }, "line_quote_failed");
     },
 
     replyText(replyToken, text) {
