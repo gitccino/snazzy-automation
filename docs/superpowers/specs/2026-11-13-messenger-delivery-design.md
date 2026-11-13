@@ -1,7 +1,7 @@
 # Messenger delivery tracking
 
 Date: 2026-11-13
-Status: Draft for user review. No implementation or deployment authorized by this document.
+Status: Approved for implementation planning on 2026-11-14. Implementation and deployment are separate steps.
 Branch: `messenger-demo`
 
 ## Intent
@@ -22,15 +22,15 @@ Book needs a compact LINE list of products requiring messenger delivery today or
 - Completion uses a separate configurable LINE user-ID allowlist, initially containing only Book; more users can be added later. Registration and overview access remain available to all staff in allowed groups.
 - Replies and quote actions stay in the originating allowed group.
 
-## Approaches for approval
+## Approaches considered
 
 1. **Recommended: Airtable delivery table; D1 technical coordination.** Staff can inspect delivery records in the familiar existing base. Airtable holds delivery status; D1 handles webhook deduplication, action scope, and recovery. Avoid two authoritative copies of delivery status.
 2. D1-only delivery table. Fewer Airtable calls and transactional writes, but delivery records would not be visible in Airtable without a separate management interface.
 3. Store delivery fields directly on Products. Small schema change, but overwrites delivery history and mixes inventory state with delivery tasks. Not recommended.
 
-The recommendation is a proposal, not an already approved storage decision. No new website, cron job, AI extraction, or long-running Workflow is needed.
+Selected: Airtable delivery table with D1 technical coordination. The user accepted the proposed defaults and requested the implementation plan on 2026-11-14. No new website, cron job, AI extraction, or long-running Workflow is needed. Reuse the existing LINE command recovery Workflow where appropriate.
 
-## Command and date contract (proposed)
+## Command and date contract
 
 | Input | Result |
 | --- | --- |
@@ -48,9 +48,9 @@ Use `Asia/Bangkok` throughout. Resolve relative dates from the original webhook 
 
 Product must resolve to exactly one existing Airtable product. Do not create inventory or alter inventory status, sale fields, prices, publication state, or product numbering. Delivery completion is independent of `/soldout`.
 
-Proposed first-version responsibility rule: the sender is responsible, using their LINE user ID and a display-name snapshot from the group profile API. The `(เจ)` text in a pasted contact line does not override identity. Registering on behalf of another staff member is out of scope unless requested.
+First-version responsibility rule: the sender is responsible, using their LINE user ID and a display-name snapshot from the group profile API. The `(เจ)` text in a pasted contact line does not override identity. Registering on behalf of another staff member is out of scope unless requested.
 
-## Persistence (proposed)
+## Persistence
 
 Create `Messenger Deliveries` in the existing configured Airtable base. Logical fields:
 
@@ -73,7 +73,7 @@ No original command body, contact details, or destination is persisted as applic
 
 D1 stores only coordination data needed for durable deduplication/action recovery, scoped to the existing environment. Reuse existing infrastructure where safe; do not persist another independently editable copy of Status. Never log quote tokens. Set up table/field mapping using the project's configuration conventions; implementation plan must enumerate configuration/schema/setup changes explicitly.
 
-Webhook redelivery must not create another delivery. Reconcile ambiguous Airtable create outcomes using Source Event ID before creating again. Proposed business duplicate rule: reject a new command for the same product, group, and scheduled Bangkok day, even if the existing row is Done; direct the user to the existing task. A separate day may have a separate task. Cross-group behavior stays isolated.
+Webhook redelivery must not create another delivery. Reconcile ambiguous Airtable create outcomes using Source Event ID; an empty reconciliation read after a timeout does not prove a create failed, so do not blindly create again. Business duplicate rule: reject a new command for the same product, group, and scheduled Bangkok day, even if the existing row is Done; direct the user to the existing task. A separate day may have a separate task. Cross-group behavior stays isolated.
 
 ## Compact overview
 
@@ -94,7 +94,7 @@ A-12981                         [อ้างอิง] ✓ เสร็จแ�
 - Pending items offer `อ้างอิง` and `เสร็จแล้ว`. Completed items retain `อ้างอิง` and a non-actionable completion indicator.
 - Completion uses text/checkmark, not color alone. Do not reduce hit areas just to save space.
 - Sort all statuses together by Scheduled At ascending, numeric Product ID, then stable Delivery ID. Do not move Done rows to the bottom.
-- Proposed page size: five rows. Fetch all matching Airtable pages before calculating totals/selecting the requested page; never silently omit Done records or later Airtable pages.
+- Page size: five rows. Fetch all matching Airtable pages before calculating totals/selecting the requested page; never silently omit Done records or later Airtable pages.
 - Footer offers previous/next pages and today/tomorrow with explicit absolute dates in actions, so old buttons do not shift meaning after midnight.
 - Empty day: `ไม่มีรายการแมสเซนเจอร์สำหรับวันนี้` or the selected date. A day containing only Done items is not empty.
 - Overview reads current Airtable status, restricted to the requesting group and selected scheduled day. On incomplete reads or invalid required fields, return an error rather than a misleading partial or empty list.
@@ -134,11 +134,11 @@ Acceptance checks for the implementation plan:
 7. Validate Flex payloads and inspect compact rows, long names, five-row pages, and Done state on actual LINE mobile clients. The HTML mock is illustrative, not LINE integration proof.
 8. Regression checks for existing commands; no live data mutations or deployment as part of spec review.
 
-## Approval decisions still needed
+## Approval and setup prerequisites
 
-- Approve Airtable delivery table plus D1 coordination, or choose D1-only storage.
+- Approved: Airtable delivery table plus D1 coordination.
 - Completion authorization is decided: configurable user-ID allowlist, initially Book only. Book's verified LINE user ID is a setup prerequisite, not yet configured by this specification.
-- Approve proposed sender-as-responsible rule, group-scoped delivery lists, duplicate-per-product/group/day rule, five-row pagination, and the explicit command grammar above.
+- Approved: sender-as-responsible rule, group-scoped delivery lists, duplicate-per-product/group/day rule, five-row pagination, and the explicit command grammar above.
 
 ## Draft review
 
