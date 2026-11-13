@@ -19,6 +19,7 @@ Book needs a compact LINE list of products requiring messenger delivery today or
 - No thumbnail, recipient/contact, destination, or retained original message body.
 - Compact rows have product ID and reference/completion actions.
 - Completed rows show `✓ เสร็จแล้ว` and stay visible, including after a new command, pagination, or worker restart.
+- Completion uses a separate configurable LINE user-ID allowlist, initially containing only Book; more users can be added later. Registration and overview access remain available to all staff in allowed groups.
 - Replies and quote actions stay in the originating allowed group.
 
 ## Approaches for approval
@@ -100,7 +101,7 @@ A-12981                         [อ้างอิง] ✓ เสร็จแ�
 
 ## Completion action
 
-Permission is an open user decision: Book only (recommended) versus any staff in an allowed group. Never authorize using a display name. Book-only requires an explicitly configured LINE user ID; do not infer it from contact text, Google email, or staff name.
+Permission is controlled by a separate configurable allowlist of LINE user IDs. Initially configure only Book's verified LINE user ID; additional users can be added later without changing the command-access policy. Never authorize using a display name, contact text, Google email, or staff name. There is no implicit Book identity: obtain and explicitly configure the actual LINE user ID during setup. A missing or empty allowlist permits nobody to complete a delivery. Check the current allowlist on every completion action, including presses on older cards, so removal takes effect without reissuing cards. Membership does not bypass the allowed-group or task/source-group checks.
 
 Validate signature, current allowed-group membership at the application boundary, actor permission, task ID, task/source group match, and action data before writing. Do not trust a group/date/product supplied by the button. Bind actions to stored task identity and the overview's explicit date/page.
 
@@ -136,7 +137,7 @@ Acceptance checks for the implementation plan:
 ## Approval decisions still needed
 
 - Approve Airtable delivery table plus D1 coordination, or choose D1-only storage.
-- Who can mark Done: Book only or all allowed staff? If Book only, supply identity through configuration during implementation/setup.
+- Completion authorization is decided: configurable user-ID allowlist, initially Book only. Book's verified LINE user ID is a setup prerequisite, not yet configured by this specification.
 - Approve proposed sender-as-responsible rule, group-scoped delivery lists, duplicate-per-product/group/day rule, five-row pagination, and the explicit command grammar above.
 
 ## Draft review
