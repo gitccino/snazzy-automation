@@ -1,3 +1,4 @@
+import type { MessengerInput } from "../messenger/types";
 import { z } from "zod";
 import type { OperationContext } from "../settings/schema";
 
@@ -88,11 +89,13 @@ export interface ReversibleLineAction {
 }
 
 export interface LineTextEvent {
+  timestamp?: number;
+  messenger?: MessengerInput;
   type: "message";
   webhookEventId: string;
   replyToken: string;
   source: { type: "group"; groupId: string; userId: string };
-  message: { type: "text"; id: string; text: string };
+  message: { type: "text"; id: string; text: string; quoteToken?: string };
 }
 
 export interface LinePostbackEvent {
@@ -117,7 +120,8 @@ const SupportedLineEventSchema = z.discriminatedUnion("type", [
     webhookEventId: z.string().min(1),
     replyToken: z.string().min(1),
     source: GroupSourceSchema,
-    message: z.object({ type: z.literal("text"), id: z.string().min(1), text: z.string() }),
+    timestamp: z.number().int().nonnegative().optional(),
+    message: z.object({ type: z.literal("text"), id: z.string().min(1), text: z.string(), quoteToken: z.string().min(1).optional() }),
   }),
   z.object({
     type: z.literal("postback"),
