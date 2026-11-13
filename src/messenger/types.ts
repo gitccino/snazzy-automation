@@ -14,3 +14,11 @@ export type Overview = {day:string;page:number;total:number;done:number;items:De
 export type MessengerResult = {kind:'overview';overview:Overview}|{kind:'text';text:string}|{kind:'quote';text:string;quoteToken:string};
 export type RegistrationIntent = {id:string;phase:'prepared'|'dispatched'|'observed';recordId:string|null;delivery:CreateDelivery;connection:DeliveryConnection;day:string};
 export type CompletionIntent = {id:string;phase:'prepared'|'dispatched'|'observed';recordId:string;deliveryId:string;groupId:string;connection:DeliveryConnection;completion:Completion};
+export interface MessengerDeps {
+ connection:DeliveryConnection;
+ airtable:ReturnType<typeof import('./airtable').createMessengerAirtable>;
+ repo:ReturnType<typeof import('./repository').createMessengerRepository>;
+ clock:import('../shared/time').Clock;ids:import('../shared/ids').IdGenerator;
+ profile(groupId:string,userId:string):Promise<{displayName:string}>;
+ currentPolicy():Promise<{allowedGroupIds:string[];completionUserIds:string[];connection:DeliveryConnection|null}>;
+}

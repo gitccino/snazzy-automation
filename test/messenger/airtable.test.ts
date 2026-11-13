@@ -31,7 +31,7 @@ it('sends only delivery fields and completes without touching inventory',async()
  expect(String(fetcher.mock.calls[0]![1]!.body)).not.toMatch(/Inventory Status|Sold Price/);
 });
 it('escapes formula literals and rejects Done without completion metadata',async()=>{
- const fetcher=vi.fn(async()=>Response.json({records:[]}));
+ const fetcher=vi.fn(async(_url:RequestInfo|URL)=>Response.json({records:[]}));
  await createMessengerAirtable({connection,token:'s',fetch:fetcher}).findBySourceEvent("e'\\x");
  expect(new URL(String(fetcher.mock.calls[0]![0])).searchParams.get('filterByFormula')).toBe("{Source Event ID}='e\\'\\\\x'");
  const api=createMessengerAirtable({connection,token:'s',fetch:async()=>Response.json(record({...delivery,status:'Done'}))});
