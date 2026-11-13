@@ -44,7 +44,7 @@ export interface AppConfig {
   googleDriveFolderId: string;
   googleTemplateDocId: string;
   aiCaptionsEnabled: boolean;
-  claudeModel: "claude-opus-5";
+  claudeModel: string;
   claudeRequestInputTokenLimit: number;
   lineAllowedGroupId: string;
   soldoutConfirmationEnabled: boolean;

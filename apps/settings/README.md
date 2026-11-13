@@ -18,6 +18,6 @@ npm --prefix apps/settings run build
 npm --prefix apps/settings run deploy:dry-run
 ```
 
-The production Worker has no auth bypass and no D1/provider-secret bindings. Its private service binding calls SettingsService on the automation Worker. Before exposure, configure its own Cloudflare Access policy and the real ACCESS_TEAM_DOMAIN (hostname only), ACCESS_AUD and SETTINGS_ORIGIN (exact HTTPS origin). Every page and API request verifies the Access JWT. Alternate origins are rejected. Preview URLs and workers.dev are disabled.
+The production Worker has no auth bypass and no D1/provider-secret bindings. Its private service binding calls SettingsService on the automation Worker. Before exposure, configure its own Cloudflare Access policy and the real ACCESS_TEAM_DOMAIN (hostname only), ACCESS_AUD and SETTINGS_ORIGIN (exact HTTPS origin). Every page and API request verifies the Access JWT. Alternate origins are rejected. Preview URLs are disabled. Staging uses the separately Access-protected snazzy-settings-staging.clicky-worker.workers.dev hostname.
 
 See ../../docs/runbooks/settings-console.md for bootstrap, cutover and rollback. Do not deploy the settings site before the automation cutover is verified.

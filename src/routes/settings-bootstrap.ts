@@ -21,7 +21,7 @@ export async function handleSettingsBootstrap(request: Request, env: Env): Promi
         GOOGLE_DRIVE_FOLDER_ID: config.googleDriveFolderId, GOOGLE_TEMPLATE_DOC_ID: config.googleTemplateDocId,
         LINE_ALLOWED_GROUP_IDS: [config.lineAllowedGroupId], SOLDOUT_CONFIRMATION_ENABLED: config.soldoutConfirmationEnabled,
         FIRST_IMPORT_CUTOFF_DATE: config.firstImportCutoffDate, IMPORT_RETRY_LIMIT: config.importRetryLimit,
-        PUBLICATION_RETRY_LIMIT: config.publicationRetryLimit, AI_CAPTIONS_ENABLED: config.aiCaptionsEnabled,
+        PUBLICATION_RETRY_LIMIT: config.publicationRetryLimit, AI_CAPTIONS_ENABLED: config.aiCaptionsEnabled, CLAUDE_MODEL: config.claudeModel,
         PRODUCT_ID_INITIAL_NUMBER: config.productIdInitialNumber, CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: config.claudeRequestInputTokenLimit,
         MONTHLY_BUDGET_THB: config.monthlyBudgetThb, USD_TO_THB_RATE: config.usdToThbRate,
         CLAUDE_INPUT_PRICE_USD_PER_MTOK: config.claudeInputPriceUsdPerMtok, CLAUDE_OUTPUT_PRICE_USD_PER_MTOK: config.claudeOutputPriceUsdPerMtok,

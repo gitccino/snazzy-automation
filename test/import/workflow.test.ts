@@ -471,11 +471,12 @@ describe("ignore sections workflow outcomes", () => {
     const record = vi.fn().mockResolvedValue({ productId: null, errorCode: "insufficient_product_photos" });
     const result = await runImportWorkflow(processDeps(), { importRunId: "ignore-run", sourceAlbumId: "album-1", trigger: "line" }, step, {
       retryLimit: 5,
-      downloadAndGroup: async () => ({ pendingGroups: mixed ? [group("incomplete", 0), group("valid", 1)] : [], orphanRange: null, checkpointPosition: 12 }),
+      downloadAndGroup: async () => ({ pendingGroups: mixed ? [group("incomplete", 0), group("valid", 1)] : [], orphanRange: null, checkpointPosition: 12, ignoredGroupCount: 2 }),
       recordRunFailure: vi.fn(), processGroupAttempt: process, recordExhaustedFailure: record, finalize, notify,
     });
     expect(result.succeededProductIds).toEqual(mixed ? ["A-501"] : []);
     expect(result.failedGroups).toEqual(mixed ? [{ groupId: "row-incomplete", productId: null, errorCode: "insufficient_product_photos" }] : []);
+    expect(result.ignoredGroupCount).toBe(2);
     expect(finalize).toHaveBeenCalledWith(mixed, 0, 12);
     expect(notify).toHaveBeenCalledWith(result, null);
     if (mixed) expect(step.calls.find(c => c.name === "process-group-row-incomplete")?.attempts).toBe(1);

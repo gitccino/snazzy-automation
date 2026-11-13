@@ -37,6 +37,10 @@ export function buildImportSummaryMessage(input: ImportSummaryInput): string {
     lines.push("แก้ไขแล้วพิมพ์ /upload เพื่อลองใหม่");
   }
 
+  if (result.ignoredGroupCount) {
+    lines.push(`ข้ามสินค้าซ้ำ ${result.ignoredGroupCount} รายการ`);
+  }
+
   if (orphanRange !== null) {
     lines.push(
       `พบภาพ ${orphanRange.count} ภาพก่อนมาร์กเกอร์แรก — เพิ่มมาร์กเกอร์ก่อนภาพสินค้า แล้วลอง /upload อีกครั้ง`,
@@ -79,6 +83,9 @@ export function buildImportSummaryCard(input: ImportSummaryInput, publicBaseUrl:
       ],
     },
   ];
+  if (result.ignoredGroupCount) {
+    contents.push({ ...text(`ข้ามสินค้าซ้ำ ${result.ignoredGroupCount} รายการ`, "#949494"), margin: "lg" });
+  }
   if (succeeded) {
     // ponytail: keep one card compact; paginate if users need full large-run lists in LINE.
     const ids = result.succeededProductIds.slice(0, 40).join(", ");

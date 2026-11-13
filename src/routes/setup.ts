@@ -689,6 +689,17 @@ export async function handleSetup(
 ): Promise<Response> {
   if (!(await verifyAdminBearer(request, env.ADMIN_ROUTE_TOKEN)))
     return Response.json({ error: "unauthorized" }, { status: 401 });
+  if (new URL(request.url).searchParams.get("check") === "caption-access") {
+    const modelId = (await loadSettingsSnapshot(env)).config.claudeModel;
+    try {
+      const model = await new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, fetch: fetcher, maxRetries: 0 }).models.retrieve(modelId);
+      return Response.json({ ok: true, requestedModel: modelId, resolvedModel: model.id, matchesConfiguredModel: model.id === modelId }, { headers: { "Cache-Control": "no-store" } });
+    } catch (error) {
+      return Response.json({ ok: false, requestedModel: modelId, providerStatus: error instanceof Anthropic.APIError ? error.status : null,
+        category: error instanceof Anthropic.AuthenticationError ? "authentication" : error instanceof Anthropic.PermissionDeniedError ? "permission" : error instanceof Anthropic.NotFoundError ? "model_not_found" : "provider_error" },
+        { status: 503, headers: { "Cache-Control": "no-store" } });
+    }
+  }
   const report = await runSetupChecks(env, fetcher, clock, probes);
   return Response.json(report, { status: report.ok ? 200 : 503 });
 }

@@ -75,6 +75,12 @@ export const fields: Field[] = [
     section: "import",
   },
   {
+    key: "CLAUDE_MODEL",
+    label: "Claude model",
+    description: "Model ID for new AI captions. Access is checked when captioning is enabled. Update estimated token rates in Advanced when switching models.",
+    section: "documents",
+  },
+  {
     key: "AI_CAPTIONS_ENABLED",
     label: "AI auto-captioning",
     description:
@@ -144,3 +150,19 @@ export function fromBangkok(value: string): string | null {
     throw new Error("Enter a valid calendar date.");
   return date.toISOString();
 }
+
+// Approved model aliases: https://platform.claude.com/docs/en/models/overview
+export const claudeModels = [
+  { value: "claude-haiku-4-5", label: "Claude Haiku 4.5", group: "Haiku" },
+  { value: "claude-haiku-5-5", label: "Claude Haiku 5.5", group: "Haiku" },
+  { value: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", group: "Sonnet" },
+  { value: "claude-sonnet-5", label: "Claude Sonnet 5", group: "Sonnet" },
+  { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", group: "Sonnet" },
+  { value: "claude-sonnet-4-5", label: "Claude Sonnet 4.5", group: "Sonnet" },
+  { value: "claude-opus-5-5", label: "Claude Opus 5.5", group: "Opus" },
+  { value: "claude-opus-5", label: "Claude Opus 5", group: "Opus" },
+  { value: "claude-opus-4-8", label: "Claude Opus 4.8", group: "Opus" },
+  { value: "claude-opus-4-7", label: "Claude Opus 4.7", group: "Opus" },
+  { value: "claude-opus-4-6", label: "Claude Opus 4.6", group: "Opus" },
+  { value: "claude-opus-4-5", label: "Claude Opus 4.5", group: "Opus" },
+];

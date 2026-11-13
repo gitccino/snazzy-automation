@@ -1,3 +1,4 @@
+import { saveNextProductNumber } from "./product-number";
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { z } from "zod";
 import { readSettings } from "../db/settings-repository";
@@ -21,9 +22,11 @@ export async function getSettingsView(
     const publicBaseUrl = z.url().parse(env.PUBLIC_BASE_URL);
     const environment = z.string().min(1).parse(env.ENVIRONMENT);
     if (!record) return { ok: false, code: "settings_unavailable" };
+    const sequence = await env.DB.prepare("SELECT next_value FROM sequences WHERE name = 'product_id' AND bootstrapped_at IS NOT NULL").first<{ next_value: number }>();
     return {
       ok: true,
       value: {
+        nextProductNumber: sequence?.next_value ?? null,
         record,
         deployment: {
           environment,
@@ -113,6 +116,7 @@ export async function testSettingsConnection(
   }
 }
 export class SettingsService extends WorkerEntrypoint<Env> {
+  saveNextProductNumber(input: unknown) { return saveNextProductNumber(this.env, input); }
   get() {
     return getSettingsView(this.env);
   }

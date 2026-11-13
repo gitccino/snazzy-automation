@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest';
 import { testEnv, createTestEnv } from '../helpers/env';
 import { loadSettingsSnapshot } from '../../src/settings/runtime';
-import { readImportContext, saveImportContextIfAbsent } from '../../src/db/execution-context-repository';
+import { readImportContext, saveImportContextIfAbsent, savePublicationAttemptContext, readPublicationContext } from '../../src/db/execution-context-repository';
 
 it('pins the first import context and cannot replace it with a later setting', async () => {
   const db = testEnv().DB;
@@ -13,4 +13,14 @@ it('pins the first import context and cannot replace it with a later setting', a
   expect(await saveImportContextIfAbsent(db, 'settings-context-run', first)).toEqual(first);
   expect(await saveImportContextIfAbsent(db, 'settings-context-run', later)).toEqual(first);
   expect(await readImportContext(db, 'settings-context-run')).toEqual(first);
+});
+
+it('persists publication context for a selected non-Opus model before starting the workflow', async () => {
+  const db = testEnv().DB;
+  const runId = 'selected-model-publication';
+  await db.prepare("INSERT INTO publication_jobs (publication_run_id, state, correlation_id, created_at, updated_at) VALUES (?, 'locked', ?, ?, ?)").bind(runId, runId, '2026-11-12', '2026-11-12').run();
+  const settings = await loadSettingsSnapshot({ ...testEnv(), ...createTestEnv(), CONFIGURATION_MODE: 'legacy' });
+  const context = { settings: { ...settings, config: { ...settings.config, claudeModel: 'claude-haiku-5-5' } }, replyGroupId: 'C1' };
+  expect(await savePublicationAttemptContext(db, runId, 1, context)).toBe(true);
+  expect(await readPublicationContext(db, runId)).toEqual(context);
 });

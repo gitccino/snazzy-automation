@@ -8,6 +8,9 @@ import {
 } from "../../src/settings/schema.ts";
 
 export default defineConfig({
+  server: {
+    allowedHosts: [".trycloudflare.com"],
+  },
   plugins: [
     react(),
     tailwind(),
@@ -34,7 +37,13 @@ export default defineConfig({
               settings: view.record.settings,
               deployment: view.deployment,
             });
-          if (req.method === "POST" && req.url === "/settings/test-connection")
+          if (req.method === "POST" && req.url === "/settings/next-product-number")
+            return send({ ok: false, code: "provider_unavailable" }, 503);
+          if (
+            req.method === "POST" &&
+            (req.url === "/settings/test-connection" ||
+              req.url?.startsWith("/settings/test/"))
+          )
             return send({ ok: false, code: "provider_unavailable" }, 503);
           if (
             req.method === "PATCH" &&

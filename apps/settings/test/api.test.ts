@@ -13,6 +13,7 @@ it("rejects cross-origin, non-JSON, oversized and mismatched writes before RPC",
       get: vi.fn(),
       saveSection,
       testConnection: vi.fn(),
+      saveNextProductNumber: vi.fn(),
       exportConfiguration: vi.fn(),
     },
   };
@@ -56,4 +57,21 @@ it("rejects cross-origin, non-JSON, oversized and mismatched writes before RPC",
     env,
   );
   expect(missing.status).toBe(404);
+});
+
+it("validates counter writes before RPC and returns allocation conflicts as 409", async () => {
+  const saveNextProductNumber = vi.fn(async () => ({ ok: false as const, code: "sequence_conflict" as const }));
+  const env = { SETTINGS_ORIGIN: "https://settings.example", SETTINGS_SERVICE: {
+    get: vi.fn(), saveSection: vi.fn(), testConnection: vi.fn(), exportConfiguration: vi.fn(), saveNextProductNumber,
+  } };
+  const payload = { expectedRevision: 1, expectedNextValue: 100, nextValue: 200 };
+  const request = (origin: string, body: unknown) => new Request("https://settings.example/api/settings/next-product-number", {
+    method: "POST", headers: { Origin: origin, "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  expect((await api(request("https://evil.example", payload), env)).status).toBe(403);
+  expect((await api(request(env.SETTINGS_ORIGIN, { ...payload, nextValue: 1.5 }), env)).status).toBe(400);
+  expect((await api(request(env.SETTINGS_ORIGIN, { ...payload, GOOGLE_REFRESH_TOKEN: "forbidden" }), env)).status).toBe(400);
+  expect(saveNextProductNumber).not.toHaveBeenCalled();
+  expect((await api(request(env.SETTINGS_ORIGIN, payload), env)).status).toBe(409);
+  expect(saveNextProductNumber).toHaveBeenCalledWith(payload);
 });

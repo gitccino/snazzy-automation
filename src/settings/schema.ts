@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 const id = z.string().trim().min(1);
+export const claudeModelSchema = z.string().trim().min(1).max(200).regex(/^claude-[A-Za-z0-9._-]+$/);
 const retry = z.union([z.literal(0), z.literal(5)]);
 const fields = {
   AIRTABLE_BASE_ID: id,
@@ -16,6 +17,7 @@ const fields = {
   FIRST_IMPORT_CUTOFF_DATE: z.iso.datetime().nullable(),
   IMPORT_RETRY_LIMIT: retry,
   PUBLICATION_RETRY_LIMIT: retry,
+  CLAUDE_MODEL: claudeModelSchema.default("claude-opus-5"),
   AI_CAPTIONS_ENABLED: z.boolean(),
   PRODUCT_ID_INITIAL_NUMBER: z.number().int().positive(),
   CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: z.number().int().positive().max(150_000),
@@ -52,6 +54,7 @@ export const sectionSchemas = {
     .partial(),
   documents: z
     .strictObject({
+      CLAUDE_MODEL: claudeModelSchema,
       AI_CAPTIONS_ENABLED: fields.AI_CAPTIONS_ENABLED,
       PUBLICATION_RETRY_LIMIT: fields.PUBLICATION_RETRY_LIMIT,
     })
@@ -88,7 +91,7 @@ export type SettingsRecord = {
 export type RuntimeSettings = {
   timeZone: "Asia/Bangkok";
   productIdPrefix: "A";
-  claudeModel: "claude-opus-5";
+  claudeModel: string;
   publicBaseUrl: string;
   lineAllowedGroupIds: string[];
   soldoutConfirmationEnabled: boolean;
@@ -119,6 +122,7 @@ export type OperationContext = {
   replyGroupId: string | null;
 };
 export type SettingsView = {
+  nextProductNumber: number | null;
   record: SettingsRecord;
   deployment: {
     environment: string;
@@ -129,6 +133,7 @@ export type SettingsView = {
 };
 export type SettingsErrorCode =
   | "invalid_settings"
+  | "sequence_conflict"
   | "revision_conflict"
   | "confirmation_required"
   | "connection_validation_failed"
@@ -182,3 +187,9 @@ export function parseSaveSectionRequest(value: unknown): SaveSectionRequest {
     changes: sectionSchemas[request.section].parse(request.changes),
   };
 }
+
+export const nextProductNumberRequest = z.strictObject({
+  expectedRevision: z.number().int().positive(),
+  expectedNextValue: z.number().int().positive().max(Number.MAX_SAFE_INTEGER - 1),
+  nextValue: z.number().int().positive().max(Number.MAX_SAFE_INTEGER - 1),
+});

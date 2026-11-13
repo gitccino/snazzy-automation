@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { OperationContext } from "../settings/schema";
+import { claudeModelSchema, type OperationContext } from "../settings/schema";
 
 const id = z.string().trim().min(1);
 const retry = z.union([z.literal(0), z.literal(5)]);
@@ -10,7 +10,7 @@ const contextSchema = z.strictObject({
     config: z.strictObject({
       timeZone: z.literal("Asia/Bangkok"),
       productIdPrefix: z.literal("A"),
-      claudeModel: z.literal("claude-opus-5"),
+      claudeModel: claudeModelSchema,
       publicBaseUrl: z.url(),
       airtableBaseId: id,
       airtableProductsTableId: id,

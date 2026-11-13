@@ -17,7 +17,7 @@ describe('settings contract', () => {
     expect(() => normalizeGroupIds('C1,,C2')).toThrow();
   });
   it('accepts allowed limits and rejects invalid or secret data', () => {
-    expect(parseStoredSettings(settings)).toEqual(settings);
+    expect(parseStoredSettings(settings)).toEqual({ ...settings, CLAUDE_MODEL: "claude-opus-5" });
     for (const changes of [{ IMPORT_RETRY_LIMIT: 1 }, { IMPORT_RETRY_LIMIT: 0.5 }, { CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150001 }, { FIRST_IMPORT_CUTOFF_DATE: 'invalid' }, { GOOGLE_REFRESH_TOKEN: 'secret' }]) {
       expect(() => parseStoredSettings({ ...settings, ...changes })).toThrow();
     }
@@ -27,4 +27,11 @@ describe('settings contract', () => {
     expect(() => parseSaveSectionRequest({ expectedRevision: 1, section: 'import', changes: { AI_CAPTIONS_ENABLED: true } })).toThrow();
     expect(() => parseSaveSectionRequest({ expectedRevision: 1, section: 'advanced', changes: { GOOGLE_REFRESH_TOKEN: 'secret' } })).toThrow();
   });
+});
+
+it('accepts editable model IDs and rejects blank or malformed values', () => {
+  expect(parseSaveSectionRequest({ expectedRevision: 1, section: 'documents', changes: { CLAUDE_MODEL: 'claude-sonnet-4-5' } }).changes).toEqual({ CLAUDE_MODEL: 'claude-sonnet-4-5' });
+  for (const CLAUDE_MODEL of ['', 'invalid model', 'x'.repeat(201)]) {
+    expect(() => parseStoredSettings({ ...settings, CLAUDE_MODEL })).toThrow();
+  }
 });

@@ -168,6 +168,7 @@ export async function runImportWorkflow(
     importRunId: payload.importRunId,
     succeededProductIds,
     failedGroups,
+    ...(downloadOutcome.ignoredGroupCount ? { ignoredGroupCount: downloadOutcome.ignoredGroupCount } : {}),
   };
   await step.do("finalize-checkpoint", retries, () =>
     operations.finalize(

@@ -116,15 +116,14 @@ export async function validateSettingsConnections(
       }
     }
     if (
-      changedKeys.includes("AI_CAPTIONS_ENABLED") &&
       candidate.AI_CAPTIONS_ENABLED &&
-      !current.AI_CAPTIONS_ENABLED
+      ((changedKeys.includes("AI_CAPTIONS_ENABLED") && !current.AI_CAPTIONS_ENABLED) ||
+        changedKeys.includes("CLAUDE_MODEL"))
     ) {
-      const model = await new Anthropic({
+      await new Anthropic({
         apiKey: env.ANTHROPIC_API_KEY,
         fetch: fetcher,
-      }).models.retrieve("claude-opus-5");
-      if (model.id !== "claude-opus-5") throw new Error();
+      }).models.retrieve(candidate.CLAUDE_MODEL);
     }
     return { ok: true, value: undefined };
   } catch {

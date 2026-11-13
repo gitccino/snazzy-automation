@@ -15,7 +15,7 @@ export function toRuntimeSettings(
   return {
     timeZone: "Asia/Bangkok",
     productIdPrefix: "A",
-    claudeModel: "claude-opus-5",
+    claudeModel: s.CLAUDE_MODEL,
     publicBaseUrl: z.url().parse(publicBaseUrl),
     airtableBaseId: s.AIRTABLE_BASE_ID,
     airtableProductsTableId: s.AIRTABLE_PRODUCTS_TABLE_ID,

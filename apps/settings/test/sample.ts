@@ -1,6 +1,7 @@
 import type { SettingsView } from "../../../src/settings/schema";
 export function sampleView(): SettingsView {
   return {
+    nextProductNumber: 100,
     record: {
       schemaVersion: 1,
       revision: 1,
@@ -16,7 +17,7 @@ export function sampleView(): SettingsView {
         FIRST_IMPORT_CUTOFF_DATE: null,
         IMPORT_RETRY_LIMIT: 0,
         PUBLICATION_RETRY_LIMIT: 0,
-        AI_CAPTIONS_ENABLED: false,
+        AI_CAPTIONS_ENABLED: false, CLAUDE_MODEL: "claude-opus-5",
         PRODUCT_ID_INITIAL_NUMBER: 1,
         CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150000,
         MONTHLY_BUDGET_THB: 1000,

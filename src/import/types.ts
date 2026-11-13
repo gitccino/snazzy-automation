@@ -28,6 +28,7 @@ export interface ProductGroup {
 }
 
 export interface ImportRunResult {
+  ignoredGroupCount?: number;
   importRunId: string;
   succeededProductIds: string[];
   failedGroups: Array<{

@@ -155,3 +155,17 @@ describe("sendImportSummary", () => {
     );
   });
 });
+
+it.each([0, 1, 3])("shows ignored count only when positive (%s)", ignoredGroupCount => {
+  const input = { result: { importRunId: "ignore-run", succeededProductIds: [], failedGroups: [], ignoredGroupCount }, orphanRange: null, nowThaiText };
+  const message = buildImportSummaryMessage(input);
+  const card = JSON.stringify(buildImportSummaryCard(input, "https://worker.example"));
+  if (ignoredGroupCount) {
+    expect(message).toContain(`ข้ามสินค้าซ้ำ ${ignoredGroupCount} รายการ`);
+    expect(card).toContain(`ข้ามสินค้าซ้ำ ${ignoredGroupCount} รายการ`);
+    expect(card).not.toContain("alert-v1");
+  } else {
+    expect(message).not.toContain("ข้ามสินค้าซ้ำ");
+    expect(card).not.toContain("ข้ามสินค้าซ้ำ");
+  }
+});
