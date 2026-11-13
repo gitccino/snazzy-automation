@@ -19,7 +19,8 @@ import {
 import type { LineActor, SupportedLineEvent } from "./types";
 
 export interface WebhookDeps extends ReadOnlyDeps, SoldoutDeps {
-  allowedGroupId: string;
+  allowedGroupId?: string;
+  allowedGroupIds?: string[];
   confirmationEnabled: boolean;
   line: LineClient;
   repo: LineRepository;
@@ -37,9 +38,11 @@ function parsePostback(data: string): {
   const values = new URLSearchParams(data);
   const keys = Array.from(values.keys());
   if (
-    keys.length !== 3
-    || new Set(keys).size !== 3
-    || !keys.every((key) => key === "action" || key === "decision" || key === "token")
+    keys.length !== 3 ||
+    new Set(keys).size !== 3 ||
+    !keys.every(
+      (key) => key === "action" || key === "decision" || key === "token",
+    )
   ) {
     return null;
   }
@@ -47,18 +50,24 @@ function parsePostback(data: string): {
   const decision = values.get("decision");
   const token = values.get("token");
   if (
-    (action !== "soldout" && action !== "revert")
-    || (decision !== "approve" && decision !== "reject")
-    || token === null
-    || token.length === 0
+    (action !== "soldout" && action !== "revert") ||
+    (decision !== "approve" && decision !== "reject") ||
+    token === null ||
+    token.length === 0
   ) {
     return null;
   }
   return { action, decision, token };
 }
 
-async function actorFor(event: SupportedLineEvent, line: LineClient): Promise<LineActor> {
-  const profile = await line.getGroupMemberProfile(event.source.groupId, event.source.userId);
+async function actorFor(
+  event: SupportedLineEvent,
+  line: LineClient,
+): Promise<LineActor> {
+  const profile = await line.getGroupMemberProfile(
+    event.source.groupId,
+    event.source.userId,
+  );
   return {
     userId: event.source.userId,
     displayName: profile.displayName,
@@ -66,68 +75,162 @@ async function actorFor(event: SupportedLineEvent, line: LineClient): Promise<Li
   };
 }
 
-function addRecoveryWarning(contents: Record<string, unknown>, warning?: string): Record<string, unknown> {
+function addRecoveryWarning(
+  contents: Record<string, unknown>,
+  warning?: string,
+): Record<string, unknown> {
   if (!warning) return contents;
   const body = contents.body as Record<string, unknown> | undefined;
   if (!body || !Array.isArray(body.contents)) return contents;
-  return {...contents,body:{...body,contents:[...body.contents,{type:"text",text:warning,size:"xs",color:"#FF3344",wrap:true,margin:"md"}]}};
+  return {
+    ...contents,
+    body: {
+      ...body,
+      contents: [
+        ...body.contents,
+        {
+          type: "text",
+          text: warning,
+          size: "xs",
+          color: "#FF3344",
+          wrap: true,
+          margin: "md",
+        },
+      ],
+    },
+  };
 }
 
-export async function sendCommandReply(replyToken: string, reply: CommandReply, line: LineClient, publicBaseUrl: string): Promise<void> {
+export async function sendCommandReply(
+  replyToken: string,
+  reply: CommandReply,
+  line: LineClient,
+  publicBaseUrl: string,
+): Promise<void> {
   if (reply.kind === "flex") {
-    await line.replyFlex(replyToken, reply.text, addRecoveryWarning(reply.contents,reply.recoveryWarning));
+    await line.replyFlex(
+      replyToken,
+      reply.text,
+      addRecoveryWarning(reply.contents, reply.recoveryWarning),
+    );
     return;
   }
   if (reply.kind === "text") {
     if (reply.alreadyOut) {
       const card = alreadyOutCard(reply.alreadyOut, publicBaseUrl);
-      await line.replyFlex(replyToken, card.text, addRecoveryWarning(card.contents,reply.recoveryWarning));
+      await line.replyFlex(
+        replyToken,
+        card.text,
+        addRecoveryWarning(card.contents, reply.recoveryWarning),
+      );
       return;
     }
     if (reply.revertSuccess) {
-      await line.replyFlex(replyToken, reply.text, addRecoveryWarning(revertSuccessCard(publicBaseUrl),reply.recoveryWarning));
+      await line.replyFlex(
+        replyToken,
+        reply.text,
+        addRecoveryWarning(
+          revertSuccessCard(publicBaseUrl),
+          reply.recoveryWarning,
+        ),
+      );
       return;
     }
     if (reply.saleSuccess) {
       const { productId, soldPrice, product } = reply.saleSuccess;
-      const card = saleSuccessCard(productId, soldPrice, publicBaseUrl, product);
-      await line.replyFlex(replyToken, card.text, addRecoveryWarning(card.contents,reply.recoveryWarning));
+      const card = saleSuccessCard(
+        productId,
+        soldPrice,
+        publicBaseUrl,
+        product,
+      );
+      await line.replyFlex(
+        replyToken,
+        card.text,
+        addRecoveryWarning(card.contents, reply.recoveryWarning),
+      );
       return;
     }
-    await line.replyText(replyToken, reply.recoveryWarning ? `${reply.recoveryWarning}\n${reply.text}` : reply.text);
+    await line.replyText(
+      replyToken,
+      reply.recoveryWarning
+        ? `${reply.recoveryWarning}\n${reply.text}`
+        : reply.text,
+    );
     return;
   }
   // Flex text components allow 2,000 characters. Keep the existing lossless
   // multi-message path for unusually large legacy confirmation details.
   if (reply.text.length <= 2000) {
-    await line.replyFlex(replyToken, reply.text, addRecoveryWarning(confirmationCard(reply, publicBaseUrl),reply.recoveryWarning));
+    await line.replyFlex(
+      replyToken,
+      reply.text,
+      addRecoveryWarning(
+        confirmationCard(reply, publicBaseUrl),
+        reply.recoveryWarning,
+      ),
+    );
     return;
   }
-  await line.replyButtons(replyToken, reply.text, reply.recoveryWarning ? `${reply.recoveryWarning}\n${reply.text}` : reply.text, [
-    { label: "ยืนยัน", data: reply.approveData, style: "primary" },
-    { label: "ยกเลิก", data: reply.rejectData, style: "secondary" },
-  ]);
+  await line.replyButtons(
+    replyToken,
+    reply.text,
+    reply.recoveryWarning
+      ? `${reply.recoveryWarning}\n${reply.text}`
+      : reply.text,
+    [
+      { label: "ยืนยัน", data: reply.approveData, style: "primary" },
+      { label: "ยกเลิก", data: reply.rejectData, style: "secondary" },
+    ],
+  );
 }
 
-export async function prepareLineReply(event: SupportedLineEvent, deps: WebhookDeps, correlationId = event.webhookEventId): Promise<CommandReply | null> {
+export async function prepareLineReply(
+  event: SupportedLineEvent,
+  deps: WebhookDeps,
+  correlationId = event.webhookEventId,
+): Promise<CommandReply | null> {
   if (event.type === "message") {
     const parsed = parseLineCommand(event.message.text);
-    if (!parsed.ok) return parsed.code === "unknown_command" ? null : { kind: "text", text: parseErrorText(parsed.code) };
+    if (!parsed.ok)
+      return parsed.code === "unknown_command"
+        ? null
+        : { kind: "text", text: parseErrorText(parsed.code) };
     const actor = await actorFor(event, deps.line);
     if (parsed.command.type !== "soldout" && parsed.command.type !== "revert") {
       const reply = await handleReadOnlyCommand(parsed.command, deps);
       return typeof reply === "string" ? { kind: "text", text: reply } : reply;
     }
     return parsed.command.type === "soldout"
-      ? prepareSoldout(parsed.command, actor, event.webhookEventId, deps.confirmationEnabled, deps)
+      ? prepareSoldout(
+          parsed.command,
+          actor,
+          event.webhookEventId,
+          deps.confirmationEnabled,
+          deps,
+        )
       : prepareRevert(actor, event.webhookEventId, deps);
   }
   const postback = parsePostback(event.postback.data);
   if (postback === null) return { kind: "text", text: "คำยืนยันไม่ถูกต้อง" };
   const actor = await actorFor(event, deps.line);
   return postback.action === "soldout"
-    ? resolveSoldout(postback.decision, postback.token, actor, event.webhookEventId, correlationId, deps)
-    : resolveRevert(postback.decision, postback.token, actor, event.webhookEventId, correlationId, deps);
+    ? resolveSoldout(
+        postback.decision,
+        postback.token,
+        actor,
+        event.webhookEventId,
+        correlationId,
+        deps,
+      )
+    : resolveRevert(
+        postback.decision,
+        postback.token,
+        actor,
+        event.webhookEventId,
+        correlationId,
+        deps,
+      );
 }
 
 export async function processLineEvents(
@@ -138,10 +241,17 @@ export async function processLineEvents(
   for (const event of events) {
     let claimed = false;
     try {
-      claimed = await deps.repo.claimEvent(event.webhookEventId, event.source.groupId);
+      claimed = await deps.repo.claimEvent(
+        event.webhookEventId,
+        event.source.groupId,
+      );
       if (!claimed) continue;
       const correlationId = deps.ids.next();
-      if (event.source.groupId !== deps.allowedGroupId) {
+      if (
+        !(deps.allowedGroupIds ?? [deps.allowedGroupId]).includes(
+          event.source.groupId,
+        )
+      ) {
         await deps.audit.record({
           correlationId,
           actor: `line:${event.source.userId}`,
@@ -154,12 +264,22 @@ export async function processLineEvents(
 
       const savedReply = await deps.repo.findEventReply(event.webhookEventId);
       if (savedReply !== null) {
-        await sendCommandReply(event.replyToken, savedReply, deps.line, deps.publicBaseUrl);
+        await sendCommandReply(
+          event.replyToken,
+          savedReply,
+          deps.line,
+          deps.publicBaseUrl,
+        );
         continue;
       }
       const deliver = async (reply: CommandReply) => {
         await deps.repo.saveEventReply(event.webhookEventId, reply);
-        await sendCommandReply(event.replyToken, reply, deps.line, deps.publicBaseUrl);
+        await sendCommandReply(
+          event.replyToken,
+          reply,
+          deps.line,
+          deps.publicBaseUrl,
+        );
       };
       const reply = await prepareLineReply(event, deps, correlationId);
       if (reply !== null) await deliver(reply);
@@ -175,5 +295,6 @@ export async function processLineEvents(
     }
   }
   if (failures.length === 1) throw failures[0];
-  if (failures.length > 1) throw new AggregateError(failures, "LINE webhook batch failed");
+  if (failures.length > 1)
+    throw new AggregateError(failures, "LINE webhook batch failed");
 }

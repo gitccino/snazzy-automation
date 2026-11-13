@@ -11,10 +11,18 @@ const requiredValues = [
   "FIRST_IMPORT_CUTOFF_DATE",
 ] as const;
 
-export function buildWorkerAppConfig(env: Readonly<Record<string, string | undefined>>) {
+export function buildWorkerAppConfig(
+  env: Readonly<Record<string, string | undefined>>,
+) {
+  if (env.CONFIGURATION_MODE === "d1")
+    throw new Error(
+      "Settings are stored in D1. Export and edit them through the settings website.",
+    );
   const missing = requiredValues.filter((name) => !env[name]?.trim());
   if (missing.length > 0) {
-    throw new Error(`Missing required Worker config values: ${missing.join(", ")}`);
+    throw new Error(
+      `Missing required Worker config values: ${missing.join(", ")}`,
+    );
   }
 
   const value = (name: (typeof requiredValues)[number]) => env[name]!.trim();
@@ -22,7 +30,9 @@ export function buildWorkerAppConfig(env: Readonly<Record<string, string | undef
     .url()
     .refine((url) => {
       const parsed = new URL(url);
-      return parsed.protocol === "https:" && !parsed.username && !parsed.password;
+      return (
+        parsed.protocol === "https:" && !parsed.username && !parsed.password
+      );
     })
     .parse(value("WORKER_BASE_URL"));
   z.string().datetime().parse(value("FIRST_IMPORT_CUTOFF_DATE"));
@@ -30,7 +40,9 @@ export function buildWorkerAppConfig(env: Readonly<Record<string, string | undef
   return {
     AIRTABLE_BASE_ID: value("AIRTABLE_BASE_ID"),
     AIRTABLE_PRODUCTS_TABLE_ID: value("AIRTABLE_PRODUCTS_TABLE_ID"),
-    AIRTABLE_PUBLICATION_RUNS_TABLE_ID: value("AIRTABLE_PUBLICATION_RUNS_TABLE_ID"),
+    AIRTABLE_PUBLICATION_RUNS_TABLE_ID: value(
+      "AIRTABLE_PUBLICATION_RUNS_TABLE_ID",
+    ),
     LINE_ALLOWED_GROUP_ID: value("LINE_ALLOWED_GROUP_ID"),
     GOOGLE_DRIVE_FOLDER_ID: value("GOOGLE_DRIVE_FOLDER_ID"),
     GOOGLE_TEMPLATE_DOC_ID: value("GOOGLE_TEMPLATE_DOC_ID"),

@@ -1,11 +1,18 @@
+import type { OperationContext } from "../settings/schema";
 export interface PublicationWorkflowParams {
   publicationRunId: string;
   trigger: "cron" | "line" | "admin";
+  context?: OperationContext;
   generation?: number;
 }
 
-export function publicationWorkflowId(runId: string, generation: number): string {
-  return generation === 1 ? `publication-${runId}` : `publication-${runId}-v${generation}`;
+export function publicationWorkflowId(
+  runId: string,
+  generation: number,
+): string {
+  return generation === 1
+    ? `publication-${runId}`
+    : `publication-${runId}-v${generation}`;
 }
 
 export interface PublicationProduct {
@@ -44,7 +51,12 @@ export interface PublicationFinalizationIntent {
   generatedAt: string;
 }
 
-export type PublicationRunStatus = "Draft" | "Ready" | "Generating" | "Generated" | "Failed";
+export type PublicationRunStatus =
+  | "Draft"
+  | "Ready"
+  | "Generating"
+  | "Generated"
+  | "Failed";
 
 export interface PublicationRun {
   airtableRunId: string;
@@ -61,12 +73,21 @@ export interface ProductAttachment {
   width?: number;
   height?: number;
 }
-export type RawPublicationProduct = Omit<PublicationProduct, "orderedImageKeys"> & { attachments: ProductAttachment[] };
-export type RawPublicationRun = Omit<PublicationRun, "products"> & { products: RawPublicationProduct[] };
-export interface DownloadableProductAttachment extends ProductAttachment { url: string }
+export type RawPublicationProduct = Omit<
+  PublicationProduct,
+  "orderedImageKeys"
+> & { attachments: ProductAttachment[] };
+export type RawPublicationRun = Omit<PublicationRun, "products"> & {
+  products: RawPublicationProduct[];
+};
+export interface DownloadableProductAttachment extends ProductAttachment {
+  url: string;
+}
 export interface ProductAttachmentRecord {
   airtableRecordId: string;
   productId: string;
   attachments: DownloadableProductAttachment[];
 }
-export type ProductImagePatch = { id: string } | { url: string; filename: string };
+export type ProductImagePatch =
+  | { id: string }
+  | { url: string; filename: string };

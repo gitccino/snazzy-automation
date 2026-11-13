@@ -1654,6 +1654,28 @@ describe("ignore marker storage and minimum photos", () => {
     return { deps, runId, snapshot };
   }
 
+  it("counts nonempty new ignore groups once and excludes checkpointed groups", async () => {
+    const { deps, runId, snapshot } = await setup(["ignore", "extra", "extra2"]);
+    const first = await downloadAndGroupSnapshot(deps, runId);
+    expect(first.ignoredGroupCount).toBe(1);
+    // A retry before finalization must retain the count even with cached assets.
+    expect((await downloadAndGroupSnapshot(deps, runId)).ignoredGroupCount).toBe(1);
+    await finalizeImportRun(deps.repo, runId, deps.sourceAlbumId, false, 0, 3);
+    const nextRun = crypto.randomUUID();
+    await deps.repo.createImportRun({ id: nextRun, sourceAlbumId: deps.sourceAlbumId, trigger: "line" });
+    expect((await downloadAndGroupSnapshot(deps, nextRun)).ignoredGroupCount).toBe(0);
+    snapshot.photos.push(...["ignore2", "ignore3", "new-photo", "ignore4"].map((id, i) => ({ ...sourcePhoto(id, i + 4), sourceAlbumId: deps.sourceAlbumId })));
+    deps.marker.detect = async bytes => new TextDecoder().decode(bytes).startsWith("product-ignore") ? "ignore_start" : "none";
+    expect((await downloadAndGroupSnapshot(deps, nextRun)).ignoredGroupCount).toBe(1);
+  });
+
+  it("counts separate ignored products without counting their individual photos", async () => {
+    const { deps, runId } = await setup(["ignore", "p1", "p2", "ignore2", "p3", "p4", "m1", "normal"]);
+    const outcome = await downloadAndGroupSnapshot(deps, runId);
+    expect(outcome.ignoredGroupCount).toBe(2);
+    expect(outcome.pendingGroups[0]?.attachablePhotos.map(photo => photo.applePhotoId)).toEqual(["normal"]);
+  });
+
   it("stores only product sections and retries cached ignore markers without downloading", async () => {
     const { deps, runId } = await setup(["m1", "p1", "p2", "p3", "p4", "ignore", "extra", "m2", "q1", "q2", "q3", "q4"]);
     const put = vi.spyOn(deps.assets, "putIfAbsent");

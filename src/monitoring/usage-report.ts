@@ -10,12 +10,25 @@ export interface CostReport {
 
 export function buildCostReport(
   usage: Record<string, number>,
-  config: AppConfig,
+  config: Pick<
+    AppConfig,
+    | "monthlyBudgetThb"
+    | "usdToThbRate"
+    | "claudeInputPriceUsdPerMtok"
+    | "claudeOutputPriceUsdPerMtok"
+    | "r2PriceUsdPerGbMonth"
+  >,
   yearMonth: string,
 ): CostReport {
-  const claudeInputUsd = ((usage.claude_input_tokens ?? 0) / 1_000_000) * config.claudeInputPriceUsdPerMtok;
-  const claudeOutputUsd = ((usage.claude_output_tokens ?? 0) / 1_000_000) * config.claudeOutputPriceUsdPerMtok;
-  const r2Usd = ((usage.r2_stored_bytes ?? 0) / (1024 * 1024 * 1024)) * config.r2PriceUsdPerGbMonth;
+  const claudeInputUsd =
+    ((usage.claude_input_tokens ?? 0) / 1_000_000) *
+    config.claudeInputPriceUsdPerMtok;
+  const claudeOutputUsd =
+    ((usage.claude_output_tokens ?? 0) / 1_000_000) *
+    config.claudeOutputPriceUsdPerMtok;
+  const r2Usd =
+    ((usage.r2_stored_bytes ?? 0) / (1024 * 1024 * 1024)) *
+    config.r2PriceUsdPerGbMonth;
   const estimatedUsd = claudeInputUsd + claudeOutputUsd + r2Usd;
   const estimatedThb = estimatedUsd * config.usdToThbRate;
 

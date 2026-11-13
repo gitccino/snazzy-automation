@@ -36,6 +36,8 @@ export interface PersistedGroup {
 }
 
 export interface DownloadAndGroupOutcome {
+  // Optional for workflow steps persisted before ignored counts were introduced.
+  ignoredGroupCount?: number;
   pendingGroups: PersistedGroup[];
   orphanRange: OrphanRange | null;
   checkpointPosition: number;
@@ -141,14 +143,26 @@ export async function downloadAndGroupSnapshot(
         );
 
   let ignoring = false;
+  let ignoredGroupCount = 0;
+  let uncountedNewIgnoreGroup = false;
   const groupingPhotos: GroupingPhoto[] = [];
   for (const photo of [...eligiblePhotos].sort((a, b) => a.position - b.position)) {
     const asset = await deps.repo.findAssetByApplePhotoId(deps.sourceAlbumId, photo.applePhotoId);
     let bytes: ArrayBuffer | undefined;
     const loadBytes = async () => bytes ??= await (await deps.imageSource.download(photo)).arrayBuffer();
     const markerKind = asset?.markerKind ?? await deps.marker.detect(await loadBytes());
-    if (markerKind === "product_start") ignoring = false;
-    if (markerKind === "ignore_start") ignoring = true;
+    if (markerKind === "product_start") {
+      ignoring = false;
+      uncountedNewIgnoreGroup = false;
+    }
+    if (markerKind === "ignore_start") {
+      ignoring = true;
+      uncountedNewIgnoreGroup = photo.position > (savedCheckpoint ?? -1);
+    }
+    if (markerKind === "none" && uncountedNewIgnoreGroup) {
+      ignoredGroupCount++;
+      uncountedNewIgnoreGroup = false;
+    }
     let r2Key = asset?.r2Key ?? null;
     if (asset === null || (!ignoring && r2Key === null)) {
       const contentHash = await sha256Hex(await loadBytes());
@@ -220,7 +234,7 @@ export async function downloadAndGroupSnapshot(
     savedCheckpoint ?? -1,
   );
 
-  return { pendingGroups, orphanRange, checkpointPosition };
+  return { pendingGroups, orphanRange, checkpointPosition, ignoredGroupCount };
 }
 
 export async function processProductGroupAttempt(

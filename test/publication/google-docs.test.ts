@@ -33,6 +33,17 @@ function documentWithRuns(runs: { content: string; startIndex?: number }[]) {
 }
 
 describe("template population", () => {
+  it("omits caption headings when drafts are disabled while preserving product content", () => {
+    const requests = buildBatchUpdateRequests("Today", [{ ...product, captionDrafts: [] }], "Contact us", 1, 20, 500);
+    const text = requests.flatMap(request => "insertText" in request ? [request.insertText.text] : []).join("");
+    expect(text).toContain("รหัสสินค้า A-1001");
+    expect(text).toContain("Good condition");
+    expect(text).toContain("Contact us");
+    expect(text).not.toContain("Caption");
+    expect(text).not.toContain("undefined");
+    expect(requests.some(request => "insertInlineImage" in request)).toBe(true);
+  });
+
   it("fills, verifies, and safely retries when template text precedes the marker on its line", async () => {
     let documentText = "{{PUBLICATION_DATE}}\nListings: {{PRODUCTS}}suffix{{END_PRODUCTS}}\nFooter\n";
     let batchCount = 0;

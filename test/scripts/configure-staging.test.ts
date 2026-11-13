@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { commandCalls } = vi.hoisted(() => ({ commandCalls: [] as unknown[][] }));
+const { commandCalls } = vi.hoisted(() => ({
+  commandCalls: [] as unknown[][],
+}));
 
 vi.mock("node:child_process", () => ({
   execFileSync: (...args: unknown[]) => {
@@ -10,6 +12,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 const environmentKeys = [
+  "CONFIGURATION_MODE",
   "AIRTABLE_BASE_ID",
   "AIRTABLE_PRODUCTS_TABLE_ID",
   "AIRTABLE_PUBLICATION_RUNS_TABLE_ID",
@@ -21,6 +24,7 @@ const environmentKeys = [
 ] as const;
 
 const productionEnvironment = {
+  CONFIGURATION_MODE: "legacy",
   AIRTABLE_BASE_ID: "app-production",
   AIRTABLE_PRODUCTS_TABLE_ID: "tbl-products-production",
   AIRTABLE_PUBLICATION_RUNS_TABLE_ID: "tbl-runs-production",
@@ -31,7 +35,9 @@ const productionEnvironment = {
   FIRST_IMPORT_CUTOFF_DATE: "2026-09-01T12:00:00.000Z",
 };
 
-const originalEnvironment = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
+const originalEnvironment = Object.fromEntries(
+  environmentKeys.map((key) => [key, process.env[key]]),
+);
 const originalArgument = process.argv[2];
 
 describe("worker configuration command", () => {
@@ -56,13 +62,29 @@ describe("worker configuration command", () => {
     await import("../../scripts/configure-worker");
 
     expect(commandCalls.map(([command, args]) => [command, args])).toEqual([
-      ["npx", ["wrangler", "secret", "put", "APP_CONFIG_JSON", "--env", "production"]],
+      [
+        "npx",
+        ["wrangler", "secret", "put", "APP_CONFIG_JSON", "--env", "production"],
+      ],
       ["npm", ["run", "deploy:production"]],
     ]);
     const options = commandCalls[0]?.[2] as { input?: string } | undefined;
-    const uploadedConfig = JSON.parse(options?.input ?? "{}") as Record<string, unknown>;
+    const uploadedConfig = JSON.parse(options?.input ?? "{}") as Record<
+      string,
+      unknown
+    >;
     expect(uploadedConfig.AIRTABLE_BASE_ID).toBe("app-production");
-    expect(uploadedConfig.PUBLIC_BASE_URL).toBe(productionEnvironment.WORKER_BASE_URL);
+    expect(uploadedConfig.PUBLIC_BASE_URL).toBe(
+      productionEnvironment.WORKER_BASE_URL,
+    );
+  });
+
+  it("rejects legacy-secret regeneration in D1 mode", async () => {
+    process.env.CONFIGURATION_MODE = "d1";
+    await expect(import("../../scripts/configure-worker")).rejects.toThrow(
+      "D1 settings must be edited",
+    );
+    expect(commandCalls).toEqual([]);
   });
 
   it("rejects unsupported environments before uploading a secret", async () => {

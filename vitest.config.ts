@@ -11,7 +11,9 @@ export default defineConfig({
       wrangler: { configPath: "./wrangler.jsonc" },
       miniflare: {
         bindings: {
-          TEST_MIGRATIONS: await readD1Migrations(path.join(root, "migrations")),
+          TEST_MIGRATIONS: await readD1Migrations(
+            path.join(root, "migrations"),
+          ),
           ASSET_URL_SIGNING_SECRET: "test-secret",
           ADMIN_ROUTE_TOKEN: "test-admin-route-token",
         },
@@ -20,5 +22,6 @@ export default defineConfig({
   ],
   test: {
     setupFiles: ["./test/apply-migrations.ts"],
+    exclude: ["**/node_modules/**", "**/.worktrees/**", "apps/**"],
   },
 });

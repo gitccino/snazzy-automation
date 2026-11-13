@@ -1,0 +1,24 @@
+{
+  "name": "snazzy-settings-staging",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-09-03",
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": {
+    "ACCESS_TEAM_DOMAIN": "yoppa.cloudflareaccess.com",
+    "ACCESS_AUD": "afb03a63baf3d48818f3dde1711f5b6f1fe8d6b96c8663462434cb14e53d0d6f",
+    "SETTINGS_ORIGIN": "https://snazzy-settings-staging.clicky-worker.workers.dev"
+  },
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+  },
+  "services": [
+    {
+      "binding": "SETTINGS_SERVICE",
+      "service": "snazzy-automation-staging",
+      "entrypoint": "SettingsService",
+    },
+  ],
+}

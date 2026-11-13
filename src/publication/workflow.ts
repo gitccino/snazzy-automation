@@ -1,8 +1,16 @@
-import { preparePublicationImages, ProductImagePreparationFailure } from "./product-images";
+import {
+  preparePublicationImages,
+  ProductImagePreparationFailure,
+} from "./product-images";
 import Anthropic from "@anthropic-ai/sdk";
-import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
+import {
+  WorkflowEntrypoint,
+  type WorkflowEvent,
+  type WorkflowStep,
+} from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
-import { parseConfig } from "../config";
+import { resolvePublicationContext } from "../settings/runtime";
+import type { OperationContext } from "../settings/schema";
 import type { Env } from "../env";
 import { createAssetStore } from "../import/asset-store";
 import { createLineClient } from "../line/client";
@@ -23,41 +31,82 @@ import {
 import type { PublicationResult, PublicationWorkflowParams } from "./types";
 import { publicationWorkflowId } from "./types";
 
-function depsFor(env: Env, clock: Clock): PublicationServiceDeps {
-  const config = parseConfig(env.APP_CONFIG_JSON);
+function depsFor(
+  env: Env,
+  clock: Clock,
+  context: OperationContext,
+): PublicationServiceDeps {
+  const config = context.settings.config;
   const fetcher = fetch.bind(globalThis);
-  const line = createLineClient({ channelAccessToken: env.LINE_CHANNEL_ACCESS_TOKEN, fetch: fetcher });
+  const line = createLineClient({
+    channelAccessToken: env.LINE_CHANNEL_ACCESS_TOKEN,
+    fetch: fetcher,
+  });
+  let anthropic: Anthropic | undefined;
   return {
     db: env.DB,
-    assets: createAssetStore(env.IMAGES_BUCKET, {
-      signingSecret: env.ASSET_URL_SIGNING_SECRET,
-      publicBaseUrl: config.publicBaseUrl,
-    }, clock, env.DB),
+    assets: createAssetStore(
+      env.IMAGES_BUCKET,
+      {
+        signingSecret: env.ASSET_URL_SIGNING_SECRET,
+        publicBaseUrl: config.publicBaseUrl,
+      },
+      clock,
+      env.DB,
+    ),
     bucket: env.IMAGES_BUCKET,
     images: env.IMAGES,
     fetcher,
-    anthropic: new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, maxRetries: 0 }),
+    get anthropic() {
+      return (anthropic ??= new Anthropic({
+        apiKey: env.ANTHROPIC_API_KEY,
+        maxRetries: 0,
+      }));
+    },
     clock,
     config,
     airtableToken: env.AIRTABLE_TOKEN,
     imageExecutionStatus: async (id) => {
       try {
-        const status = (await (await env.PUBLICATION_WORKFLOW.get(id)).status()).status;
-        if (["complete", "errored", "terminated"].includes(status)) return "terminal";
-        if (["queued", "running", "paused", "waiting", "waitingForPause"].includes(status)) return "active";
+        const status = (await (await env.PUBLICATION_WORKFLOW.get(id)).status())
+          .status;
+        if (["complete", "errored", "terminated"].includes(status))
+          return "terminal";
+        if (
+          [
+            "queued",
+            "running",
+            "paused",
+            "waiting",
+            "waitingForPause",
+          ].includes(status)
+        )
+          return "active";
         return "unknown";
-      } catch { return "unknown"; }
+      } catch {
+        return "unknown";
+      }
     },
     googleOAuthCredentials: {
       clientId: env.GOOGLE_OAUTH_CLIENT_ID,
       clientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
       refreshToken: env.GOOGLE_REFRESH_TOKEN,
     },
-    notify: (text, contents) => line.pushMessage(config.lineAllowedGroupId, text, contents),
+    notify: async (text, contents) => {
+      if (!context.replyGroupId) return;
+      try {
+        await line.pushMessage(context.replyGroupId, text, contents);
+      } catch {
+        console.error("publication_notification_failed");
+      }
+    },
   };
 }
 
-async function workflowCall<T>(reason: string, call: () => Promise<T>): Promise<T> {
+async function workflowCall<T>(
+  reason: string,
+  call: () => Promise<T>,
+): Promise<T> {
   try {
     return await call();
   } catch (error) {
@@ -71,10 +120,17 @@ async function workflowCall<T>(reason: string, call: () => Promise<T>): Promise<
 }
 
 function isContenderRejection(error: unknown): boolean {
-  const code = error instanceof OperationalError
-    ? error.code
-    : error instanceof Error ? error.name : null;
-  return code === "publication_job_locked" || code === "publication_job_terminal" || code === "publication_generation_stale";
+  const code =
+    error instanceof OperationalError
+      ? error.code
+      : error instanceof Error
+        ? error.name
+        : null;
+  return (
+    code === "publication_job_locked" ||
+    code === "publication_job_terminal" ||
+    code === "publication_generation_stale"
+  );
 }
 
 export async function runPublicationWorkflow(
@@ -97,18 +153,30 @@ export async function runPublicationWorkflow(
   let recovered: Awaited<ReturnType<typeof recoverPublicationFinalization>>;
   try {
     recovered = await step.do("recover finalization", retries, () =>
-      workflowCall("Unable to finalize the publication.", () => recoverPublicationFinalization(deps, runId, generation)),
+      workflowCall("Unable to finalize the publication.", () =>
+        recoverPublicationFinalization(deps, runId, generation),
+      ),
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
     await step.do("record exhausted publication failure", retries, () =>
-      workflowCall("Unable to record publication failure.", () => failPublicationAfterExhaustion(deps, runId, "Unable to finalize the publication.", null, ...generationArgs)),
+      workflowCall("Unable to record publication failure.", () =>
+        failPublicationAfterExhaustion(
+          deps,
+          runId,
+          "Unable to finalize the publication.",
+          null,
+          ...generationArgs,
+        ),
+      ),
     );
     throw error;
   }
   if (recovered) {
     await step.do("notify publication success", retries, () =>
-      workflowCall("Unable to send publication success notification.", () => notifyPublicationSuccess(deps, recovered, recovered.result)),
+      workflowCall("Unable to send publication success notification.", () =>
+        notifyPublicationSuccess(deps, recovered, recovered.result),
+      ),
     );
     return recovered.result;
   }
@@ -116,21 +184,42 @@ export async function runPublicationWorkflow(
   try {
     validation = await step.do("validate publication", retries, () =>
       workflowCall("Unable to read or validate publication data.", () =>
-        validatePublication(deps, runId, publicationWorkflowId(runId, generation), ...generationArgs)),
+        validatePublication(
+          deps,
+          runId,
+          publicationWorkflowId(runId, generation),
+          ...generationArgs,
+        ),
+      ),
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
     await step.do("record exhausted publication failure", retries, () =>
       workflowCall("Unable to record the publication failure.", () =>
-        failPublicationAfterExhaustion(deps, runId, "Unable to read or validate publication data.", null, ...generationArgs)),
+        failPublicationAfterExhaustion(
+          deps,
+          runId,
+          "Unable to read or validate publication data.",
+          null,
+          ...generationArgs,
+        ),
+      ),
     );
     throw error;
   }
   if (validation.kind === "already_succeeded") return validation.result;
   if (validation.kind === "validation_failed") {
     await step.do("notify validation failure", retries, () =>
-      workflowCall("Unable to send the publication validation notification.", () =>
-        notifyPublicationValidationFailure(deps, runId, validation.thaiDate, validation.validation)),
+      workflowCall(
+        "Unable to send the publication validation notification.",
+        () =>
+          notifyPublicationValidationFailure(
+            deps,
+            runId,
+            validation.thaiDate,
+            validation.validation,
+          ),
+      ),
     );
     return null;
   }
@@ -142,54 +231,99 @@ export async function runPublicationWorkflow(
   try {
     let imagePrepared;
     try {
-      imagePrepared = await preparePublicationImages({ ...deps, executionStatus: deps.imageExecutionStatus ?? (async () => "unknown") }, validation.value,
-        instanceId ?? publicationWorkflowId(runId, generation), step);
+      imagePrepared = await preparePublicationImages(
+        {
+          ...deps,
+          executionStatus: deps.imageExecutionStatus ?? (async () => "unknown"),
+        },
+        validation.value,
+        instanceId ?? publicationWorkflowId(runId, generation),
+        step,
+      );
     } catch (error) {
-      if (error instanceof ProductImagePreparationFailure) failureReason = error.message;
+      if (error instanceof ProductImagePreparationFailure)
+        failureReason = error.message;
       throw error;
     }
     failureReason = "Unable to prepare publication images and captions.";
     prepared = await step.do("prepare outputs", retries, () =>
-      workflowCall(failureReason, () => preparePublicationOutputs(deps, imagePrepared)),
+      workflowCall(failureReason, () =>
+        preparePublicationOutputs(deps, imagePrepared),
+      ),
     );
     failureReason = "Unable to create the temporary Google document.";
     const tempDocId = await step.do("ensure temporary document", retries, () =>
-      workflowCall(failureReason, () => ensureTemporaryDocument(deps, prepared)),
+      workflowCall(failureReason, () =>
+        ensureTemporaryDocument(deps, prepared),
+      ),
     );
     failureReason = "Unable to fill or verify the Google document.";
     await step.do("fill and verify document", retries, () =>
-      workflowCall(failureReason, () => fillAndVerifyDocument(deps, prepared, tempDocId)),
+      workflowCall(failureReason, () =>
+        fillAndVerifyDocument(deps, prepared, tempDocId),
+      ),
     );
     failureReason = "Unable to finalize the publication.";
     result = await step.do("finalize publication", retries, () =>
-      workflowCall(failureReason, () => finalizePublication(deps, prepared, tempDocId)),
+      workflowCall(failureReason, () =>
+        finalizePublication(deps, prepared, tempDocId),
+      ),
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
     await step.do("record exhausted publication failure", retries, () =>
       workflowCall("Unable to record the publication failure.", () =>
-        failPublicationAfterExhaustion(deps, runId, failureReason, validation.value.thaiDate, ...generationArgs)),
+        failPublicationAfterExhaustion(
+          deps,
+          runId,
+          failureReason,
+          validation.value.thaiDate,
+          ...generationArgs,
+        ),
+      ),
     );
     throw error;
   }
   // Notification failure must not delete or downgrade a completed document.
   await step.do("notify publication success", retries, () =>
     workflowCall("Unable to send the publication success notification.", () =>
-      notifyPublicationSuccess(deps, prepared, result)),
+      notifyPublicationSuccess(deps, prepared, result),
+    ),
   );
   return result;
 }
 
-export class PublicationWorkflow extends WorkflowEntrypoint<Env, PublicationWorkflowParams> {
+export class PublicationWorkflow extends WorkflowEntrypoint<
+  Env,
+  PublicationWorkflowParams
+> {
   async run(
     event: WorkflowEvent<PublicationWorkflowParams>,
     step: WorkflowStep,
   ): Promise<PublicationResult | null> {
     const generation = event.payload.generation ?? 1;
-    if (!Number.isSafeInteger(generation) || generation < 1 ||
-      (generation > 1 && event.instanceId !== publicationWorkflowId(event.payload.publicationRunId, generation))) {
-      throw new NonRetryableError("Invalid publication generation owner", "publication_generation_stale");
+    if (
+      !Number.isSafeInteger(generation) ||
+      generation < 1 ||
+      (generation > 1 &&
+        event.instanceId !==
+          publicationWorkflowId(event.payload.publicationRunId, generation))
+    ) {
+      throw new NonRetryableError(
+        "Invalid publication generation owner",
+        "publication_generation_stale",
+      );
     }
-    return runPublicationWorkflow(event.payload, step, depsFor(this.env, { now: () => new Date() }), event.instanceId);
+    const context = await step.do(
+      "settings-context",
+      { retries: { limit: 0, delay: "1 second" } },
+      () => resolvePublicationContext(this.env, event.payload),
+    );
+    return runPublicationWorkflow(
+      event.payload,
+      step,
+      depsFor(this.env, { now: () => new Date() }, context),
+      event.instanceId,
+    );
   }
 }

@@ -39,6 +39,7 @@
   "env": {
     "staging": {
       "name": "snazzy-automation-staging",
+      "limits": { "cpu_ms": 300000 },
       "observability": {
         "logs": {
           "enabled": true,
@@ -46,10 +47,13 @@
         }
       },
       "vars": {
+        "CONFIGURATION_MODE": "d1",
+        "ENVIRONMENT": "staging",
+        "PUBLIC_BASE_URL": "https://snazzy-automation-staging.clicky-worker.workers.dev",
         "GOOGLE_OAUTH_CLIENT_ID": "891460059017-fg9acj1nhbtjb133d6vgoj7ljh8ng5n4.apps.googleusercontent.com"
       },
       "triggers": {
-        "crons": ["45 22 * * *", "0 23 * * *", "30 23 * * *"]
+        "crons": []
       },
       "d1_databases": [
         {

@@ -38,6 +38,17 @@ it("returns 401 before parsing an invalidly signed body", async () => {
   expect(process).not.toHaveBeenCalled();
 });
 
+it('rejects signed new events during maintenance without starting workflows', async () => {
+  const body = new TextEncoder().encode(JSON.stringify({ events: [] }));
+  const process = vi.fn();
+  const env = { ...testEnv(), LINE_CHANNEL_SECRET: 'secret', CONFIGURATION_MODE: 'maintenance' as const };
+  const response = await handleLineRoute(new Request('https://worker/line/webhook', {
+    method: 'POST', headers: { 'x-line-signature': await sign(body, 'secret') }, body,
+  }), env, immediateContext, { process });
+  expect(response.status).toBe(503);
+  expect(process).not.toHaveBeenCalled();
+});
+
 it("passes only schema-validated supported events", async () => {
   const body = new TextEncoder().encode(JSON.stringify({
     events: [

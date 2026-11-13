@@ -1,12 +1,18 @@
+import type { OperationContext } from "../settings/schema";
 import type { SourcePhoto } from "../icloud/types";
 
 export interface ImportWorkflowParams {
   importRunId: string;
   sourceAlbumId: string;
   trigger: "cron" | "line" | "admin";
+  context?: OperationContext;
 }
 
-export type ProductGroupState = "pending" | "importing" | "succeeded" | "failed";
+export type ProductGroupState =
+  | "pending"
+  | "importing"
+  | "succeeded"
+  | "failed";
 
 export interface OrphanRange {
   firstApplePhotoId: string;
@@ -22,7 +28,12 @@ export interface ProductGroup {
 }
 
 export interface ImportRunResult {
+  ignoredGroupCount?: number;
   importRunId: string;
   succeededProductIds: string[];
-  failedGroups: Array<{ groupId: string; productId: string | null; errorCode: string }>;
+  failedGroups: Array<{
+    groupId: string;
+    productId: string | null;
+    errorCode: string;
+  }>;
 }

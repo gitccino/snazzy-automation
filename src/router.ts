@@ -5,12 +5,17 @@ import { handleDocsRoute } from "./routes/docs";
 import { handleLineRoute } from "./routes/line";
 import { handleHealth } from "./routes/health";
 import { handleBootstrapSequence, handleSetup } from "./routes/setup";
+import { handleSettingsBootstrap } from "./routes/settings-bootstrap";
 import { handleUploadTrigger } from "./routes/upload";
 import { handleUsage } from "./routes/usage";
 import { verifyAdminBearer } from "./shared/admin-auth";
 
 export async function routeRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
+  if (env.CONFIGURATION_MODE === "maintenance" && request.method === "POST" && (url.pathname === "/upload" || url.pathname === "/docs")) {
+    if (!(await verifyAdminBearer(request, env.ADMIN_ROUTE_TOKEN))) return Response.json({ error: "unauthorized" }, { status: 401 });
+    return Response.json({ error: "maintenance" }, { status: 503, headers: { "Retry-After": "60" } });
+  }
   if (request.method === "GET" && url.pathname.startsWith("/line/icons/")) {
     return handleLineIcon(url.pathname);
   }
@@ -40,6 +45,9 @@ export async function routeRequest(request: Request, env: Env, ctx: ExecutionCon
   }
   if (request.method === "POST" && url.pathname === "/setup/bootstrap-sequence") {
     return handleBootstrapSequence(request, env);
+  }
+  if (request.method === "POST" && url.pathname === "/setup/settings-bootstrap") {
+    return handleSettingsBootstrap(request, env);
   }
   return Response.json({ error: "not_found" }, { status: 404 });
 }
