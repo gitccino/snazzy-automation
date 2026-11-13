@@ -18,6 +18,27 @@ const connectionKey = (c: DeliveryConnection) => [
   c.productsTableId,
   c.deliveriesTableId,
 ];
+const registrationKey = (
+  c: DeliveryConnection,
+  g: string,
+  day: string,
+  productId: string,
+) => JSON.stringify(["register", ...connectionKey(c), g, day, productId]);
+const sourceKey = (c: DeliveryConnection, eventId: string) =>
+  JSON.stringify([...connectionKey(c), eventId]);
+const completionKey = (c: DeliveryConnection, recordId: string) =>
+  JSON.stringify(["complete", ...connectionKey(c), recordId]);
+const registrationIntent = (row: Row): RegistrationIntent => ({
+  ...JSON.parse(row.payload_json),
+  id: row.id,
+  phase: row.phase,
+  recordId: row.record_id,
+});
+const completionIntent = (row: Row): CompletionIntent => ({
+  ...JSON.parse(row.payload_json),
+  id: row.id,
+  phase: row.phase,
+});
 export function createMessengerRepository(db: D1Database) {
   async function claim(
     kind: "registration" | "completion",
@@ -42,6 +63,36 @@ export function createMessengerRepository(db: D1Database) {
     return { created: inserted.meta.changes === 1, row };
   }
   return {
+    async findRegistration(
+      connection: DeliveryConnection,
+      groupId: string,
+      day: string,
+      productId: string,
+      eventId: string,
+    ): Promise<RegistrationIntent | null> {
+      const row = await db
+        .prepare(
+          "SELECT id,payload_json,phase,record_id FROM messenger_write_intents WHERE business_key=? OR source_key=?",
+        )
+        .bind(
+          registrationKey(connection, groupId, day, productId),
+          sourceKey(connection, eventId),
+        )
+        .first<Row>();
+      return row ? registrationIntent(row) : null;
+    },
+    async findCompletion(
+      connection: DeliveryConnection,
+      recordId: string,
+    ): Promise<CompletionIntent | null> {
+      const row = await db
+        .prepare(
+          "SELECT id,payload_json,phase,record_id FROM messenger_write_intents WHERE business_key=?",
+        )
+        .bind(completionKey(connection, recordId))
+        .first<Row>();
+      return row ? completionIntent(row) : null;
+    },
     async claimRegistration(input: {
       delivery: CreateDelivery;
       connection: DeliveryConnection;
@@ -50,22 +101,11 @@ export function createMessengerRepository(db: D1Database) {
       const { delivery: d, connection: c, day } = input;
       const { created, row } = await claim(
         "registration",
-        JSON.stringify([
-          "register",
-          ...connectionKey(c),
-          d.sourceGroupId,
-          day,
-          d.productId,
-        ]),
-        JSON.stringify([...connectionKey(c), d.sourceEventId]),
+        registrationKey(c, d.sourceGroupId, day, d.productId),
+        sourceKey(c, d.sourceEventId),
         input,
       );
-      const intent: RegistrationIntent = {
-        ...JSON.parse(row.payload_json),
-        id: row.id,
-        phase: row.phase,
-        recordId: row.record_id,
-      };
+      const intent = registrationIntent(row);
       return { created, intent };
     },
     async claimCompletion(input: {
@@ -77,19 +117,11 @@ export function createMessengerRepository(db: D1Database) {
     }) {
       const { created, row } = await claim(
         "completion",
-        JSON.stringify([
-          "complete",
-          ...connectionKey(input.connection),
-          input.recordId,
-        ]),
+        completionKey(input.connection, input.recordId),
         null,
         input,
       );
-      const intent: CompletionIntent = {
-        ...JSON.parse(row.payload_json),
-        id: row.id,
-        phase: row.phase,
-      };
+      const intent = completionIntent(row);
       return { created, intent };
     },
     async beginDispatch(id: string) {

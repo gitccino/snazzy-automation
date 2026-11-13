@@ -280,3 +280,171 @@ it("rejects a provider duplicate outside the requested group instead of leaking 
   );
   expect(api.create).not.toHaveBeenCalled();
 });
+
+it.each(["connection", "group", "disabled"])(
+  "rechecks registration policy after profile lookup: %s",
+  async (change) => {
+    const { deps, api, policy } = setup();
+    deps.profile = async () => {
+      if (change === "connection")
+        policy.connection = { ...connection, baseId: "different" };
+      if (change === "group") policy.allowedGroupIds = [];
+      if (change === "disabled")
+        (policy as { connection: typeof connection | null }).connection = null;
+      return { displayName: "เจ" };
+    };
+    await registerDelivery(command, source, deps);
+    expect(api.create).not.toHaveBeenCalled();
+    const { intent } = await deps.repo.claimRegistration({
+      delivery: input,
+      connection,
+      day: "2026-11-14",
+    });
+    expect(intent.phase).toBe("prepared");
+  },
+);
+
+it("keeps a confirmed completion successful when D1 observation bookkeeping fails", async () => {
+  const { deps, api } = setup([delivery]);
+  const view = await getOverview("2026-11-14", 1, "C1", deps);
+  if (view.kind !== "overview") throw new Error();
+  deps.repo.recordObserved = async () => {
+    throw new Error("D1 unavailable");
+  };
+  const result = await handleMessengerAction(
+    { kind: "complete", token: view.overview.actions[delivery.id]!.complete! },
+    { groupId: "C1", userId: "book" },
+    deps,
+  );
+  expect(api.complete).toHaveBeenCalledTimes(1);
+  expect(result).toMatchObject({
+    kind: "overview",
+    overview: { done: 1, items: [{ status: "Done" }] },
+  });
+});
+
+it("recovers registration uncertainty before fallible duplicate and profile lookups", async () => {
+  const { deps, api } = setup();
+  const { intent } = await deps.repo.claimRegistration({
+    delivery: input,
+    connection,
+    day: "2026-11-14",
+  });
+  await deps.repo.beginDispatch(intent.id);
+  api.findDuplicate.mockRejectedValue(new Error("provider offline"));
+  api.findBySourceEvent.mockRejectedValue(new Error("provider offline"));
+  await expect(registerDelivery(command, source, deps)).resolves.toMatchObject({
+    kind: "text",
+    text: expect.stringContaining("ยังยืนยัน"),
+  });
+  expect(api.create).not.toHaveBeenCalled();
+  expect(api.findDuplicate).not.toHaveBeenCalled();
+});
+
+it("preserves completion uncertainty when a re-entry reconciliation read fails", async () => {
+  const { deps, api } = setup([delivery]);
+  const view = await getOverview("2026-11-14", 1, "C1", deps);
+  if (view.kind !== "overview") throw new Error();
+  const { intent } = await deps.repo.claimCompletion({
+    deliveryId: delivery.id,
+    recordId: delivery.recordId,
+    groupId: "C1",
+    connection,
+    completion: { at: "2026-11-14T04:00:00Z", userId: "book", name: "Book" },
+  });
+  await deps.repo.beginDispatch(intent.id);
+  api.get.mockRejectedValue(new Error("provider offline"));
+  await expect(
+    handleMessengerAction(
+      {
+        kind: "complete",
+        token: view.overview.actions[delivery.id]!.complete!,
+      },
+      { groupId: "C1", userId: "book" },
+      deps,
+    ),
+  ).resolves.toMatchObject({
+    kind: "text",
+    text: expect.stringContaining("ยังยืนยัน"),
+  });
+  expect(api.complete).not.toHaveBeenCalled();
+});
+
+it("does not let a failed profile lookup erase an existing completion write uncertainty", async () => {
+  const { deps, api } = setup([delivery]);
+  const view = await getOverview("2026-11-14", 1, "C1", deps);
+  if (view.kind !== "overview") throw new Error();
+  const { intent } = await deps.repo.claimCompletion({
+    deliveryId: delivery.id,
+    recordId: delivery.recordId,
+    groupId: "C1",
+    connection,
+    completion: { at: "2026-11-14T04:00:00Z", userId: "book", name: "Book" },
+  });
+  await deps.repo.beginDispatch(intent.id);
+  deps.profile = async () => {
+    throw new Error("profile offline");
+  };
+  await expect(
+    handleMessengerAction(
+      {
+        kind: "complete",
+        token: view.overview.actions[delivery.id]!.complete!,
+      },
+      { groupId: "C1", userId: "book" },
+      deps,
+    ),
+  ).resolves.toMatchObject({
+    kind: "text",
+    text: expect.stringContaining("ยังยืนยัน"),
+  });
+  expect(api.complete).not.toHaveBeenCalled();
+});
+
+it("preserves uncertainty when a concurrent completion claim wins before the second read", async () => {
+  const { deps, api } = setup([delivery]);
+  const view = await getOverview("2026-11-14", 1, "C1", deps);
+  if (view.kind !== "overview") throw new Error();
+  const { intent } = await deps.repo.claimCompletion({
+    deliveryId: delivery.id,
+    recordId: delivery.recordId,
+    groupId: "C1",
+    connection,
+    completion: { at: "2026-11-14T04:00:00Z", userId: "book", name: "Book" },
+  });
+  await deps.repo.beginDispatch(intent.id);
+  // Simulate another request winning after this request's initial intent lookup.
+  deps.repo.findCompletion = async () => null;
+  api.get
+    .mockResolvedValueOnce(delivery)
+    .mockRejectedValueOnce(new Error("offline"));
+  await expect(
+    handleMessengerAction(
+      {
+        kind: "complete",
+        token: view.overview.actions[delivery.id]!.complete!,
+      },
+      { groupId: "C1", userId: "book" },
+      deps,
+    ),
+  ).resolves.toMatchObject({
+    kind: "text",
+    text: expect.stringContaining("ยังยืนยัน"),
+  });
+  expect(api.complete).not.toHaveBeenCalled();
+});
+
+it("still reports a different command as a duplicate when it recovers the original intent", async () => {
+  const { deps, api } = setup();
+  await registerDelivery(command, source, deps);
+  const result = await registerDelivery(
+    command,
+    { ...source, eventId: "different-command" },
+    deps,
+  );
+  expect(result).toMatchObject({
+    kind: "text",
+    text: expect.stringContaining("มีรายการจัดส่ง"),
+  });
+  expect(api.create).toHaveBeenCalledTimes(1);
+});

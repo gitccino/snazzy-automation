@@ -7,6 +7,7 @@ import type {
   MessengerCommand,
   MessengerDeps,
   MessengerResult,
+  RegistrationIntent,
 } from "./types";
 const message = (text: string): MessengerResult => ({ kind: "text", text });
 const unavailable = () =>
@@ -116,6 +117,22 @@ export async function registerDelivery(
 ): Promise<MessengerResult> {
   if (!(await policyFor(source.groupId, deps))) return unavailable();
   const day = bangkokDay(Date.parse(command.scheduledAt));
+  const prior = await deps.repo.findRegistration(
+    deps.connection,
+    source.groupId,
+    day,
+    command.productId,
+    source.eventId,
+  );
+  if (prior) {
+    if (
+      prior.delivery.sourceGroupId !== source.groupId ||
+      prior.delivery.productId !== command.productId ||
+      prior.day !== day
+    )
+      return unavailable();
+    return reconcileRegistration(prior, source, deps);
+  }
   const existing = await deps.airtable.findDuplicate(
     source.groupId,
     day,
@@ -155,6 +172,25 @@ export async function registerDelivery(
       quoteToken: source.quoteToken,
     },
   });
+  return reconcileRegistration(intent, source, deps);
+}
+
+async function recordConfirmedObservation(
+  intentId: string,
+  recordId: string,
+  deps: MessengerDeps,
+): Promise<void> {
+  try {
+    await deps.repo.recordObserved(intentId, recordId);
+  } catch {
+    console.warn("messenger_observation_failed", { intentId });
+  }
+}
+async function reconcileRegistration(
+  intent: RegistrationIntent,
+  source: { groupId: string; eventId: string },
+  deps: MessengerDeps,
+): Promise<MessengerResult> {
   const expected = intent.delivery;
   const matches = (d: Delivery) =>
     d.id === expected.id &&
@@ -163,7 +199,15 @@ export async function registerDelivery(
     d.productId === expected.productId &&
     d.productRecordId === expected.productRecordId &&
     d.scheduledAt === expected.scheduledAt;
-  let observed = await deps.airtable.findBySourceEvent(expected.sourceEventId);
+  let observed: Delivery | null;
+  try {
+    observed = await deps.airtable.findBySourceEvent(expected.sourceEventId);
+  } catch (error) {
+    if (intent.phase !== "prepared") return uncertain();
+    throw error;
+  }
+  if (!observed && !(await policyFor(source.groupId, deps)))
+    return unavailable();
   if (!observed && (await deps.repo.beginDispatch(intent.id))) {
     try {
       observed = await deps.airtable.create(expected);
@@ -178,7 +222,11 @@ export async function registerDelivery(
     }
   }
   if (!observed || !matches(observed)) return uncertain();
-  await deps.repo.recordObserved(intent.id, observed.recordId);
+  await recordConfirmedObservation(intent.id, observed.recordId, deps);
+  if (source.eventId !== expected.sourceEventId)
+    return message(
+      `มีรายการจัดส่ง ${observed.productId} สำหรับวันที่ ${intent.day.split("-").reverse().join("/")} แล้ว${observed.status === "Done" ? " · ✓ เสร็จแล้ว" : ""}`,
+    );
   return message(`บันทึกรายการแมสเซนเจอร์ ${observed.productId} แล้ว`);
 }
 
@@ -202,7 +250,17 @@ export async function handleMessengerAction(
     !policy.completionUserIds.includes(actor.userId)
   )
     return message("⚠️ คุณไม่มีสิทธิ์ทำเครื่องหมายรายการนี้ว่าเสร็จแล้ว");
-  const d = await deps.airtable.get(binding.recordId);
+  const prior =
+    action.kind === "complete"
+      ? await deps.repo.findCompletion(deps.connection, binding.recordId)
+      : null;
+  let d: Delivery | null;
+  try {
+    d = await deps.airtable.get(binding.recordId);
+  } catch (error) {
+    if (prior && prior.phase !== "prepared") return uncertain();
+    throw error;
+  }
   if (!d || !sameTask(d, binding)) return unavailable();
   if (action.kind === "quote")
     return d.quoteToken
@@ -221,7 +279,11 @@ export async function handleMessengerAction(
       );
     }
   };
-  if (d.status === "Done") return refreshed();
+  if (d.status === "Done") {
+    if (prior) await recordConfirmedObservation(prior.id, d.recordId, deps);
+    return refreshed();
+  }
+  if (prior && prior.phase !== "prepared") return uncertain();
   const profile = await deps.profile(actor.groupId, actor.userId);
   if (!profile.displayName.trim())
     throw new Error("Messenger profile unavailable");
@@ -237,7 +299,13 @@ export async function handleMessengerAction(
     },
   });
   // Re-read before the sole dispatch; another accepted action or Airtable edit may have completed it.
-  let observed = await deps.airtable.get(intent.recordId);
+  let observed: Delivery | null;
+  try {
+    observed = await deps.airtable.get(intent.recordId);
+  } catch (error) {
+    if (intent.phase !== "prepared") return uncertain();
+    throw error;
+  }
   if (!observed || !sameTask(observed, binding)) return unavailable();
   // A denied operation must not consume the sole provider dispatch.
   const latest = await policyFor(actor.groupId, deps);
@@ -261,6 +329,6 @@ export async function handleMessengerAction(
   }
   if (!observed || !sameTask(observed, binding) || observed.status !== "Done")
     return uncertain();
-  await deps.repo.recordObserved(intent.id, observed.recordId);
+  await recordConfirmedObservation(intent.id, observed.recordId, deps);
   return refreshed();
 }

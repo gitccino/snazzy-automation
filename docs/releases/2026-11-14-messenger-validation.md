@@ -3,12 +3,25 @@
 Local implementation only, on `messenger-demo`; no rollout performed.
 
 - Root typecheck: PASS.
-- Feature/integration/configuration gate: 149 tests PASS across 18 files.
+- Feature/integration/configuration gate: 158 tests PASS across 18 files.
 - Settings typecheck, 19 tests and production build: PASS.
-- Full root suite: 992 passed, 28 failed (1,020 total). All 28 failure names match the pre-implementation baseline (936 passed, 28 failed, 964 total); no new failures. This is not a green full suite.
+- Full root suite: 1,001 passed, 28 failed (1,029 total). All 28 failure names match the pre-implementation baseline (936 passed, 28 failed, 964 total); no new failures. This is not a green full suite.
 - Acceptance uses real local D1 and mocked Airtable/LINE. Covers sanitized durable handoff, registration/redelivery, today/tomorrow, provider pagination, completion permissions, reply failure, repeated buttons, persistent Done rows, all-Done overview and group isolation.
 - Manual live LINE Flex validation/mobile layout, live Airtable provisioning and Book identity setup remain rollout checks. See [runbook](../runbooks/messenger-delivery.md).
-- Final independent review is recorded separately after this checkpoint.
+- Independent review found three P2 issues; all were fixed in one pass with failing-then-passing regression tests: registration reauthorization, successful-save bookkeeping, and uncertainty-preserving recovery. Concurrent recovery and duplicate-notice regressions also pass. No deferred minor findings.
+- No second reviewer was dispatched; fixes were verified through tests and the full-suite baseline comparison.
+
+## Rulings made during implementation
+
+- Validate an enabled delivery table through the Settings connection validator, not global `/setup`; rollout must run that connection check.
+- Carry the pinned Airtable connection explicitly through service dependencies; a settings change requires a fresh request instead of using a stale adapter.
+- Keep LINE conversion/dispatch in one focused messenger module; this adds one module without changing the existing commands' behavior.
+- Leave the exact 28 pre-existing root failures outside this slice; the full suite remains non-green.
+- D1 does not fence arbitrary Airtable editors; concurrent manual edits can require operator reconciliation.
+- Never automatically release ambiguous write claims; uncertain provider outcomes can require manual inspection.
+- Live LINE rendering, quoting and provider permissions remain rollout checks; live integration is unverified until authorized staging validation.
+
+
 
 ## Unchanged baseline failures
 
