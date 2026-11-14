@@ -224,6 +224,37 @@ it("registers through sanitized Workflow handoff and retains completed items aft
   await command("/mess-overview");
   expect(JSON.stringify(sent.at(-1))).toContain("2 รายการ · เสร็จสิ้น 2");
   expect(JSON.stringify(sent.at(-1))).toContain("A-10");
+  // Airtable edits are authoritative; old cards cannot complete a reopened cycle.
+  Object.assign(tasks[0]!.fields, {
+    Status: "Pending",
+    "Scheduled At": "2026-11-14T08:00:00Z",
+    "Responsible Name": "Edited staff",
+  });
+  delete tasks[0]!.fields["Completed At"];
+  delete tasks[0]!.fields["Completed By User ID"];
+  delete tasks[0]!.fields["Completed By Name"];
+  await run(
+    postback(book, "stale-after-reopen"),
+    context,
+    "stale-after-reopen",
+  );
+  expect(JSON.stringify(sent.at(-1))).toContain("ข้อมูลรายการเปลี่ยนแล้ว");
+  expect(tasks[0]!.fields.Status).toBe("Pending");
+  await command("/mess-overview");
+  expect(JSON.stringify(sent.at(-1))).toContain("Edited staff");
+  expect(JSON.stringify(sent.at(-1))).toContain("15:00");
+  const reopened = postback(book, "reopened");
+  if (reopened.type === "postback")
+    reopened.postback.data = findComplete(sent.at(-1).messages[0])!;
+  vi.setSystemTime(new Date("2026-11-14T05:00:00Z"));
+  await run(reopened, context, "reopened");
+  expect(tasks[0]!.fields).toMatchObject({
+    Status: "Done",
+    "Completed At": "2026-11-14T05:00:00.000Z",
+    "Responsible Name": "Edited staff",
+    "Scheduled At": "2026-11-14T08:00:00Z",
+  });
+  expect(tasks[0]!.fields["Completed At"]).not.toBe(completedAt);
   const before = sent.length;
   await command("/mess-overview", staff, "C-other");
   expect(sent.length).toBe(before);

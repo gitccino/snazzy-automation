@@ -108,11 +108,22 @@ Use real existing test products and separate task/day combinations; the same pro
 - `/mess พรุ่งนี้ 14:00 A-<test ID>` lands on tomorrow's Bangkok date.
 - `/mess-overview` shows today only; `/mess-overview 2` selects page two of today. Date and `tomorrow` overview arguments are rejected. Tomorrow registrations appear when their scheduled day arrives.
 - Inspect five-row pages, a long staff name, small phones and all-Done days. Time/name share a line; product/actions share a second line. Pending and Done remain together in scheduled order with accurate total/completion counts.
-- Confirm Book can mark Done, another unlisted staff member cannot, and a removed user cannot use an old button. Repeated completion preserves the first completion metadata. Inventory remains unchanged.
+- Confirm Book can mark Done, another unlisted staff member cannot, and a removed user cannot use an old button. Repeated completion preserves the first completion metadata within the current Pending → Done cycle. Inventory remains unchanged.
 - A new overview retains completed rows as `✓ เสร็จสิ้น`; previously sent LINE messages remain snapshots and cannot be assumed to update in place.
 - `อ้างอิง` sends a **separate quoted text message** in the original group. Verify quote navigation on the actual mobile client; it is not a direct image/message URL. Missing/invalid quote tokens yield a product-specific notice, not a fabricated link.
 - Validate representative outgoing Flex messages with LINE's `/v2/bot/message/validate/reply` endpoint, using existing credentials only during authorized validation. Check logs omit raw bodies, contact data and quote tokens.
 - Check pagination after midnight queries the current Bangkok day, and an old completion card refreshes today’s first page. Confirm another group's tasks cannot be read or changed.
+
+## Manual Airtable edits
+
+Staff may edit Status, Scheduled At, Schedule Type and Responsible Name in Airtable. A fresh `/mess-overview` reads those values; existing cards remain snapshots. Changing the scheduled date moves the item to that day's overview. Keep the responsible user ID consistent when changing the assigned person.
+
+- Setting Status to Done manually is valid even without Completed At / Completed By fields. The bot displays Done without inventing who completed it or when.
+- To reopen a confirmed completion, set Status to Pending (old completion fields may be retained or cleared), then request a **fresh `/mess-overview`**. Its button can complete the new cycle with new metadata. Old buttons ask for a fresh overview instead of completing the reopened cycle.
+- D1 preserves each previously confirmed completion receipt. Replacement of the active receipt is atomic; concurrent clicks still permit only one provider write per cycle. No new Airtable field or database migration is required.
+- An unresolved dispatched write stays blocked even if Status is manually toggled. A manually set Done status confirms that particular write only when its completion time and actor metadata match the stored receipt. Investigate unresolved writes as below; do not delete their intents.
+
+Delivery ID, Product/Product ID, Registered At and source/reference fields remain app-managed. Product reassignment and moving delivery history between bases are outside this change. Avoid changing Status while a completion request is in flight: Airtable offers no conditional transaction against manual editors.
 
 ## Interrupted or uncertain writes
 
@@ -124,7 +135,7 @@ When the bot says `ยังยืนยันผลการบันทึก�
 
 1. Stop issuing duplicate commands. Identify the source event/task and its intent through owner-controlled diagnostics. A safe initial read is `SELECT id,kind,phase,record_id FROM messenger_write_intents`; do not dump `payload_json` or action bindings into shared logs because these include identity/reference metadata.
 2. Check the **pinned base/table** from that intent privately. For registration, find exactly one Airtable row matching Source Event ID and Delivery ID. For completion, read the specific record and completion metadata. A fresh overview reads actual Airtable status.
-3. Re-entry through normal service logic reconciles observed state without another write. If the matching row exists or the task is Done, keep it; never recreate it to repair a failed LINE reply. If saving succeeded but sending failed, ask for a fresh overview.
+3. Re-entry through normal service logic reconciles observed state without another write. If the matching row exists or the task is Done, keep it (completion intent confirmation also requires matching completion metadata); never recreate it to repair a failed LINE reply. If saving succeeded but sending failed, ask for a fresh overview.
 4. A `dispatched` intent with no visible record is **not proof** that the request failed: it may still be in flight. There is no automatic claim expiry, second POST/PATCH, bulk replay, or lease stealing. Establish the original execution and provider request are finished before considering any operator repair. If uncertainty remains, keep it blocked and investigate; no reset utility is supplied in this release.
 5. Before a manual repair, preserve the intent, original IDs/payload and any Airtable evidence, verify no late request can still arrive, and obtain explicit authorization for the exact repair. Do not delete an intent or change it back to prepared simply because a query returned no rows. Do not silently invent another delivery ID or completion actor/time.
 

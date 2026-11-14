@@ -3,6 +3,7 @@ import type {
   ActionBinding,
   Delivery,
   DeliveryConnection,
+  CompletionIntent,
   MessengerAction,
   MessengerCommand,
   MessengerDeps,
@@ -16,6 +17,14 @@ const unavailable = () =>
   );
 const uncertain = () =>
   message("⚠️ ยังยืนยันผลการบันทึกไม่ได้ กรุณาตรวจสอบก่อนส่งคำสั่งซ้ำ");
+const stale = () =>
+  message("⚠️ ข้อมูลรายการเปลี่ยนแล้ว กรุณาใช้ /mess-overview อีกครั้ง");
+const confirmsCompletion = (d: Delivery, intent: CompletionIntent) =>
+  d.status === "Done" &&
+  d.completedAt !== null &&
+  Date.parse(d.completedAt) === Date.parse(intent.completion.at) &&
+  d.completedByUserId === intent.completion.userId &&
+  d.completedByName === intent.completion.name;
 export const sameConnection = (
   a: DeliveryConnection,
   b: DeliveryConnection | null,
@@ -82,12 +91,18 @@ export async function getOverview(
       connection: deps.connection,
     };
     await deps.repo.putAction({ ...binding, token: quote, kind: "quote" });
-    if (complete)
+    if (complete) {
+      const prior = await deps.repo.findCompletion(deps.connection, d.recordId);
       await deps.repo.putAction({
+        completionCycle:
+          prior?.phase === "observed"
+            ? prior.id
+            : (prior?.previousObservedIntentId ?? null),
         ...binding,
         token: complete,
         kind: "complete",
       });
+    }
     actions[d.id] = { quote, complete };
   }
   return {
@@ -286,14 +301,21 @@ export async function handleMessengerAction(
     }
   };
   if (d.status === "Done") {
-    if (prior) await recordConfirmedObservation(prior.id, d.recordId, deps);
+    if (prior && confirmsCompletion(d, prior))
+      await recordConfirmedObservation(prior.id, d.recordId, deps);
     return refreshed();
   }
-  if (prior && prior.phase !== "prepared") return uncertain();
+  const cycle =
+    prior?.phase === "observed"
+      ? prior.id
+      : (prior?.previousObservedIntentId ?? null);
+  if ((binding.completionCycle ?? null) !== cycle) return stale();
+  if (prior?.phase === "dispatched") return uncertain();
   const profile = await deps.profile(actor.groupId, actor.userId);
   if (!profile.displayName.trim())
     throw new Error("Messenger profile unavailable");
   const { intent } = await deps.repo.claimCompletion({
+    previousObservedIntentId: cycle,
     deliveryId: d.id,
     recordId: d.recordId,
     groupId: actor.groupId,
@@ -304,6 +326,8 @@ export async function handleMessengerAction(
       name: profile.displayName,
     },
   });
+  if ((intent.previousObservedIntentId ?? null) !== cycle) return stale();
+  if (intent.phase === "observed") return stale();
   // Re-read before the sole dispatch; another accepted action or Airtable edit may have completed it.
   let observed: Delivery | null;
   try {
@@ -335,6 +359,7 @@ export async function handleMessengerAction(
   }
   if (!observed || !sameTask(observed, binding) || observed.status !== "Done")
     return uncertain();
-  await recordConfirmedObservation(intent.id, observed.recordId, deps);
+  if (confirmsCompletion(observed, intent))
+    await recordConfirmedObservation(intent.id, observed.recordId, deps);
   return refreshed();
 }

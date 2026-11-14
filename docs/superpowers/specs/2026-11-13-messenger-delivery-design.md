@@ -66,7 +66,7 @@ Create `Messenger Deliveries` in the existing configured Airtable base. Logical 
 | Source Quote Token | Optional token for quoting the original command |
 | Source Event ID | Deduplication/recovery key |
 | Status | Pending / Done; default Pending |
-| Completed At / Completed By User ID / Name | First successful completion metadata |
+| Completed At / Completed By User ID / Name | Latest cycle’s successful completion metadata; optional for manually completed tasks |
 
 No original command body, contact details, or destination is persisted as application data. Inspect existing generic event/recovery storage and logs: `/mess` must not accidentally retain the pasted text there. LINE itself retains the original message; quoting it can show its contents again to the original group.
 
@@ -104,7 +104,7 @@ Permission is controlled by a separate configurable allowlist of LINE user IDs. 
 
 Validate signature, current allowed-group membership at the application boundary, actor permission, task ID, task/source group match, and action data before writing. Do not trust a group/date/product supplied by the button. Bind actions to stored task identity and the overview's explicit date/page.
 
-Mark Pending → Done and persist completion metadata before acknowledging success. Repeated presses, stale cards, and simultaneous requests must leave one completion and preserve the original completion metadata. The implementation plan must choose durable per-task serialization/claiming and recovery compatible with Airtable's lack of transactional conditional updates; a naive read-then-write is insufficient. An already-Done task returns current state without rewriting metadata.
+Mark Pending → Done and persist completion metadata before acknowledging success. Repeated presses and simultaneous requests must leave one completion per Pending → Done cycle and preserve that cycle’s original completion metadata. After a confirmed completion is manually reopened in Airtable, only a fresh overview may start the next completion cycle; D1 retains past receipts. Stale buttons request a fresh overview. Manually setting Done without bot completion metadata is valid. Unknown dispatched writes remain protected against replay even after manual status edits. The implementation plan must choose durable per-task serialization/claiming and recovery compatible with Airtable's lack of transactional conditional updates; a naive read-then-write is insufficient. An already-Done task returns current state without rewriting metadata.
 
 Reply with a newly generated overview for today, retaining the selected page if the task is scheduled today; after an old card completes a previous day’s task, return today’s first page. Completed items scheduled today remain visible. Historical records remain stored in Airtable. **Previously sent LINE Flex messages remain snapshots; do not promise in-place editing.** Their old buttons remain safe through server-side idempotency. If saving succeeds but replying fails, a fresh `/mess-overview` still shows Done; never undo the saved change or report that it was not saved.
 

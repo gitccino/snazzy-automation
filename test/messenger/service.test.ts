@@ -462,3 +462,92 @@ it("refreshes today after completing a task from an older card", async () => {
   );
   expect(api.list).toHaveBeenLastCalledWith("C1", "2026-11-15");
 });
+
+async function completionAction(deps: MessengerDeps) {
+  const view = await getOverview("2026-11-14", 1, "C1", deps);
+  if (view.kind !== "overview") throw new Error("Missing overview");
+  return {
+    kind: "complete" as const,
+    token: view.overview.actions[delivery.id]!.complete!,
+  };
+}
+const book = { groupId: "C1", userId: "book" };
+it.each([false, true])(
+  "completes a manually reopened delivery once, preserving history (clear metadata: %s)",
+  async (clear) => {
+    const { deps, rows, api } = setup([delivery]);
+    const oldAction = await completionAction(deps);
+    await handleMessengerAction(oldAction, book, deps);
+    const first = (await deps.repo.findCompletion(
+      connection,
+      delivery.recordId,
+    ))!;
+    rows[0]!.status = "Pending";
+    if (clear)
+      Object.assign(rows[0]!, {
+        completedAt: null,
+        completedByUserId: null,
+        completedByName: null,
+      });
+    expect(await handleMessengerAction(oldAction, book, deps)).toMatchObject({
+      kind: "text",
+      text: expect.stringContaining("/mess-overview"),
+    });
+    expect(api.complete).toHaveBeenCalledTimes(1);
+    deps.clock.now = () => new Date("2026-11-14T05:00:00Z");
+    const fresh = await completionAction(deps);
+    await Promise.all([
+      handleMessengerAction(fresh, book, deps),
+      handleMessengerAction(fresh, book, deps),
+    ]);
+    expect(api.complete).toHaveBeenCalledTimes(2);
+    expect(rows[0]).toMatchObject({
+      status: "Done",
+      completedAt: "2026-11-14T05:00:00.000Z",
+    });
+    const current = (await deps.repo.findCompletion(
+      connection,
+      delivery.recordId,
+    ))!;
+    expect(current.id).not.toBe(first.id);
+    const history = await (env as unknown as { DB: D1Database }).DB.prepare(
+      "SELECT phase,payload_json FROM messenger_write_intents WHERE id=?",
+    )
+      .bind(first.id)
+      .first<{ phase: string; payload_json: string }>();
+    expect(history?.phase).toBe("observed");
+    expect(JSON.parse(history!.payload_json).completion).toEqual(
+      first.completion,
+    );
+  },
+);
+it.each([false, true])(
+  "does not confirm an uncertain save after manual Done (unrelated metadata: %s)",
+  async (withMetadata) => {
+    const { deps, rows, api } = setup([delivery]);
+    const action = await completionAction(deps);
+    api.complete.mockRejectedValue(new Error("timeout"));
+    await handleMessengerAction(action, book, deps);
+    rows[0]!.status = "Done";
+    if (withMetadata)
+      Object.assign(rows[0]!, {
+        completedAt: "2026-11-14T04:00:00Z",
+        completedByUserId: "other",
+        completedByName: "Manual editor",
+      });
+    expect(await handleMessengerAction(action, book, deps)).toMatchObject({
+      kind: "overview",
+      overview: { done: 1 },
+    });
+    expect(
+      (await deps.repo.findCompletion(connection, delivery.recordId))!.phase,
+    ).toBe("dispatched");
+    rows[0]!.status = "Pending";
+    const fresh = await completionAction(deps);
+    expect(await handleMessengerAction(fresh, book, deps)).toMatchObject({
+      kind: "text",
+      text: expect.stringContaining("ยังยืนยัน"),
+    });
+    expect(api.complete).toHaveBeenCalledTimes(1);
+  },
+);

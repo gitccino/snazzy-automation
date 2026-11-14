@@ -32,16 +32,6 @@ const fieldsSchema = z
   .superRefine((f, ctx) => {
     if (!Number.isSafeInteger(Number(f["Product ID"].slice(2))))
       ctx.addIssue({ code: "custom", message: "Invalid product ID" });
-    if (
-      f.Status === "Done" &&
-      (!f["Completed At"] ||
-        !f["Completed By User ID"] ||
-        !f["Completed By Name"])
-    )
-      ctx.addIssue({
-        code: "custom",
-        message: "Incomplete completion metadata",
-      });
   });
 const rowSchema = z.object({
   id: text,

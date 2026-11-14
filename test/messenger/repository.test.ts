@@ -54,3 +54,38 @@ it("preserves first completion metadata and scopes action bindings", async () =>
   expect(await repo.getAction("t")).toEqual(action);
   expect(await repo.getAction("forged")).toBeNull();
 });
+it("rolls over only a confirmed receipt atomically and retains its history", async () => {
+  const repo = createMessengerRepository(db);
+  const input = {
+    deliveryId: "reopen",
+    recordId: "recReopen",
+    groupId: "C1",
+    connection,
+    completion: { at: "2026-11-14T04:00:00Z", userId: "book", name: "Book" },
+  };
+  const { intent: old } = await repo.claimCompletion(input);
+  await repo.beginDispatch(old.id);
+  const blocked = await repo.claimCompletion({
+    ...input,
+    previousObservedIntentId: old.id,
+  });
+  expect(blocked.intent.id).toBe(old.id);
+  await repo.recordObserved(old.id, input.recordId);
+  const claims = await Promise.all(
+    [1, 2].map(() =>
+      repo.claimCompletion({ ...input, previousObservedIntentId: old.id }),
+    ),
+  );
+  expect(claims.filter((c) => c.created)).toHaveLength(1);
+  expect(claims[0]!.intent.id).toBe(claims[1]!.intent.id);
+  expect(claims[0]!.intent.id).not.toBe(old.id);
+  expect(
+    await Promise.all(claims.map((c) => repo.beginDispatch(c.intent.id))),
+  ).toEqual([true, false]);
+  expect(
+    await db
+      .prepare("SELECT phase FROM messenger_write_intents WHERE id=?")
+      .bind(old.id)
+      .first(),
+  ).toEqual({ phase: "observed" });
+});

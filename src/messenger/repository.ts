@@ -45,14 +45,27 @@ export function createMessengerRepository(db: D1Database) {
     businessKey: string,
     sourceKey: string | null,
     payload: object,
+    previousObservedIntentId?: string | null,
   ) {
     const id = crypto.randomUUID();
-    const inserted = await db
+    const insert = db
       .prepare(
         "INSERT OR IGNORE INTO messenger_write_intents (id,kind,business_key,source_key,payload_json) VALUES (?,?,?,?,?)",
       )
-      .bind(id, kind, businessKey, sourceKey, JSON.stringify(payload))
-      .run();
+      .bind(id, kind, businessKey, sourceKey, JSON.stringify(payload));
+    // Archive only the expected confirmed cycle, in the same transaction as its replacement.
+    const inserted = previousObservedIntentId
+      ? (
+          await db.batch([
+            db
+              .prepare(
+                "UPDATE messenger_write_intents SET business_key=business_key || ':history:' || id WHERE business_key=? AND id=? AND kind='completion' AND phase='observed'",
+              )
+              .bind(businessKey, previousObservedIntentId),
+            insert,
+          ])
+        )[1]!
+      : await insert.run();
     const row = await db
       .prepare(
         "SELECT id,payload_json,phase,record_id FROM messenger_write_intents WHERE business_key=? OR (source_key IS NOT NULL AND source_key=?)",
@@ -114,12 +127,14 @@ export function createMessengerRepository(db: D1Database) {
       groupId: string;
       connection: DeliveryConnection;
       completion: Completion;
+      previousObservedIntentId?: string | null;
     }) {
       const { created, row } = await claim(
         "completion",
         completionKey(input.connection, input.recordId),
         null,
         input,
+        input.previousObservedIntentId,
       );
       const intent = completionIntent(row);
       return { created, intent };

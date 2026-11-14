@@ -90,7 +90,7 @@ it("sends only delivery fields and completes without touching inventory", async 
     /Inventory Status|Sold Price/,
   );
 });
-it("escapes formula literals and rejects Done without completion metadata", async () => {
+it("escapes formula literals and accepts manual Done without completion metadata", async () => {
   const fetcher = vi.fn(async (_url: RequestInfo | URL) =>
     Response.json({ records: [] }),
   );
@@ -109,5 +109,10 @@ it("escapes formula literals and rejects Done without completion metadata", asyn
     token: "s",
     fetch: async () => Response.json(record({ ...delivery, status: "Done" })),
   });
-  await expect(api.get("rec1")).rejects.toThrow();
+  await expect(api.get("rec1")).resolves.toMatchObject({
+    status: "Done",
+    completedAt: null,
+    completedByUserId: null,
+    completedByName: null,
+  });
 });

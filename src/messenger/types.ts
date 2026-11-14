@@ -44,6 +44,7 @@ export type CreateDelivery = Omit<
 export type Completion = { at: string; userId: string; name: string };
 export type MessengerAction = { kind: "complete" | "quote"; token: string };
 export type ActionBinding = {
+  completionCycle?: string | null;
   token: string;
   kind: "complete" | "quote";
   deliveryId: string;
@@ -74,6 +75,7 @@ export type RegistrationIntent = {
   day: string;
 };
 export type CompletionIntent = {
+  previousObservedIntentId?: string | null;
   id: string;
   phase: "prepared" | "dispatched" | "observed";
   recordId: string;
