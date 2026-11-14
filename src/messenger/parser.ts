@@ -62,6 +62,7 @@ export function parseMessengerCommand(
     !schedule?.[0].startsWith("แมสเลย") &&
     Array.from(
       scheduleText
+        .replace(/^(?:วันนี้|พรุ่งนี้|แมส)\s+/, "")
         .split(/\r?\n/, 1)[0]!
         .matchAll(/(?<!\S)\d{1,2}[.:]\d{2}(?!\S)/g),
     ).length !== 1

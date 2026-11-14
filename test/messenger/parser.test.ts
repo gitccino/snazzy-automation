@@ -169,3 +169,9 @@ it.each([
 ])("rejects invalid or conflicting staff courier times: %s", (text) => {
   expect(parseMessengerCommand(text, ts)).toMatchObject({ ok: false });
 });
+it("keeps explicit day and time on separate lines supported", () => {
+  expect(parseMessengerCommand("/mess พรุ่งนี้\n14:30 A-1", ts)).toMatchObject({
+    ok: true,
+    command: { scheduledAt: "2026-11-14T07:30:00.000Z" },
+  });
+});
