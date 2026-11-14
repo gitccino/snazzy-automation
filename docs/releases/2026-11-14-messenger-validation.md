@@ -62,3 +62,9 @@ Implementation on `messenger-demo`; staging rollout explicitly authorized and co
 - Post-deploy checks: backend `/health` HTTP 200 with `ok:true`, no import running; Settings anonymous access redirects HTTP 302 to the existing Cloudflare Access domain; invalid webhook signatures return HTTP 401; Airtable schema validation passed during the configuration save. Direct D1 readback confirms revision 8, configured table and one completion user.
 - An additional read-only connection-test RPC did not return within 60 seconds and its local proxy was stopped; the successful validated save and direct D1 readback above are the configuration evidence.
 - No LINE group messages sent and no delivery/product records created by rollout validation. A real mobile `/mess` → `/mess-overview` → completion/quote round trip remains a user-run acceptance check.
+
+## Bare-time clarification
+
+User clarified `/mess แมสเลย A-…` = now, `/mess 14:30 A-…` = today at 14:30, `/mess พรุ่งนี้ 14:00 A-…` = tomorrow at 14:00. Parser/help/spec/runbook updated; `วันนี้` remains an alias. Bare time must start the command body, so pasted contact lines cannot supply a schedule. Original event's Bangkok day is used on recovery.
+
+Validation: 91 focused tests and typecheck pass. Full suite 1008 passed / 28 failed, exact same 28 baseline failure names, no new failures. No settings or migration changes required.

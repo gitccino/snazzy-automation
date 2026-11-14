@@ -89,3 +89,34 @@ it.each([
 });
 it("ignores other commands", () =>
   expect(parseMessengerCommand("/docs", ts)).toBeNull());
+
+it.each([
+  ["/mess 14:30 A-12977", "2026-11-13T16:59:00Z", "2026-11-13T07:30:00.000Z"],
+  [
+    "/mess\n14:30 A-12977\n065 663 5369\nSTAY Hotel",
+    "2026-11-13T17:01:00Z",
+    "2026-11-14T07:30:00.000Z",
+  ],
+])(
+  "defaults a bare time to the original event Bangkok day: %s",
+  (text, received, scheduledAt) => {
+    expect(parseMessengerCommand(text, Date.parse(received))).toEqual({
+      ok: true,
+      command: {
+        type: "mess-register",
+        productId: "A-12977",
+        scheduledAt,
+        scheduleType: "Scheduled",
+      },
+    });
+  },
+);
+it.each([
+  "/mess 24:00 A-1",
+  "/mess 14:60 A-1",
+  "/mess 14:30 15:00 A-1",
+  "/mess 14:30 พรุ่งนี้ 14:00 A-1",
+  "/mess A-1\nappointment 14:30",
+])("rejects invalid or ambiguous bare times: %s", (text) => {
+  expect(parseMessengerCommand(text, ts)).toMatchObject({ ok: false });
+});

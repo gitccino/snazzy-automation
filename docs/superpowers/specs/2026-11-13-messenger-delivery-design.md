@@ -35,14 +35,15 @@ Selected: Airtable delivery table with D1 technical coordination. The user accep
 | Input | Result |
 | --- | --- |
 | `/mess` followed by `แมสเลยค่า A-12977` | Immediate delivery; scheduled timestamp is the original LINE event timestamp |
-| `/mess` followed by `วันนี้ 14:00 A-12977` | Today at 14:00 Bangkok time |
+| `/mess` followed by `14:30 A-12977` | Today at 14:30 Bangkok time |
+| `/mess` followed by `วันนี้ 14:00 A-12977` | Today at 14:00 Bangkok time (explicit alias) |
 | `/mess` followed by `พรุ่งนี้ 14:00 A-12977` | Tomorrow at 14:00 Bangkok time |
 | `/mess-overview` | Today's deliveries, first page |
 | `/mess-overview tomorrow` | Tomorrow's deliveries, first page |
 | `/mess-overview 14/11/2026` | Explicit Gregorian day, first page; used by navigation |
 | `/mess-overview 14/11/2026 2` | Explicit day, page two |
 
-Accept a multiline message with exactly one explicit `A-<positive integer>` ID. Other pasted lines may be present, but do not store them or interpret phone numbers as IDs or delivery times. Schedule parsing uses explicit `วันนี้ HH:mm` / `พรุ่งนี้ HH:mm` expressions or `แมสเลย` (including `แมสเลยค่า`); it is not unrestricted natural-language inference. Missing, malformed, conflicting schedules or multiple IDs return guidance with no write. Validate hours/minutes and real calendar dates. No implicit schedule when the time is missing.
+Accept a multiline message with exactly one explicit `A-<positive integer>` ID. Other pasted lines may be present, but do not store them or interpret phone numbers as IDs or delivery times. Schedule parsing accepts an unlabelled `HH:mm` at the start of the command body for today, explicit `วันนี้ HH:mm` / `พรุ่งนี้ HH:mm` expressions, or `แมสเลย` (including `แมสเลยค่า`); it is not unrestricted natural-language inference. Missing, malformed, conflicting schedules or multiple IDs return guidance with no write. Validate hours/minutes and real calendar dates. No implicit schedule when the time is missing.
 
 Use `Asia/Bangkok` throughout. Resolve relative dates from the original webhook event timestamp, not retry time; persist that timestamp for recovery. A day is midnight inclusive through next midnight exclusive. Past times today are accepted as overdue; do not move them to tomorrow automatically. Record both requested delivery time and actual registration time.
 
@@ -145,3 +146,5 @@ Acceptance checks for the implementation plan:
 A separate builder review found no additional blocking questions beyond the approval decisions above. This reviewed only the specification; actual LINE behavior and provider integrations remain implementation-time validation.
 
 After design approval, create an implementation plan. Provisioning real Airtable tables, migrations, and deployment require their own concrete rollout steps; this spec does not perform them.
+
+Clarification confirmed by the user after staging rollout: `/mess 14:30 A-…` means today at 14:30; `/mess แมสเลย A-…` means now; `/mess พรุ่งนี้ 14:00 A-…` means tomorrow at 14:00. Product ID remains required.

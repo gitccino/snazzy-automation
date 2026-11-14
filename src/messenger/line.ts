@@ -75,7 +75,7 @@ export async function prepareMessengerReply(
     if (!parsed?.ok)
       return {
         kind: "text",
-        text: "⚠️ ใช้ /mess แมสเลย A-1234 หรือ /mess พรุ่งนี้ 14:00 A-1234 และ /mess-overview สำหรับรายการวันนี้",
+        text: "⚠️ ใช้ /mess แมสเลย A-1234 หรือ /mess 14:30 A-1234 หรือ /mess พรุ่งนี้ 14:00 A-1234 และ /mess-overview สำหรับรายการวันนี้",
       };
     const c = parsed.command;
     result =

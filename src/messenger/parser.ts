@@ -58,9 +58,24 @@ export function parseMessengerCommand(
   const schedules = Array.from(
     body.matchAll(/แมสเลย(?:ค่า)?|วันนี้|พรุ่งนี้/g),
   );
-  if (schedules.length !== 1) return invalid;
-  const schedule = schedules[0]!;
-  if (schedule[0].startsWith("แมสเลย"))
+  if (
+    schedules.length > 1 ||
+    (schedules.length > 0 && /^\s*\d{1,2}:\d{2}(?!\S)/.test(body))
+  )
+    return invalid;
+  const schedule = schedules[0];
+  const scheduleText = schedule ? body.slice(schedule.index) : body.trimStart();
+  // An unlabelled time must start the command body, never come from pasted contact lines.
+  if (
+    !schedule &&
+    Array.from(
+      scheduleText
+        .split(/\r?\n/, 1)[0]!
+        .matchAll(/(?<!\S)\d{1,2}:\d{2}(?!\S)/g),
+    ).length !== 1
+  )
+    return invalid;
+  if (schedule?.[0].startsWith("แมสเลย"))
     return {
       ok: true,
       command: {
@@ -70,8 +85,8 @@ export function parseMessengerCommand(
         scheduleType: "Immediate",
       },
     };
-  const time = /^(วันนี้|พรุ่งนี้)\s+(\d{1,2}):(\d{2})(?!\S)/.exec(
-    body.slice(schedule.index),
+  const time = /^(?:(วันนี้|พรุ่งนี้)\s+)?(\d{1,2}):(\d{2})(?!\S)/.exec(
+    scheduleText,
   );
   if (!time || Number(time[2]) > 23 || Number(time[3]) > 59) return invalid;
   const day = time[1] === "พรุ่งนี้" ? shiftDay(today, 1) : today;
