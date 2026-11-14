@@ -68,3 +68,5 @@ Implementation on `messenger-demo`; staging rollout explicitly authorized and co
 User clarified `/mess แมสเลย A-…` = now, `/mess 14:30 A-…` = today at 14:30, `/mess พรุ่งนี้ 14:00 A-…` = tomorrow at 14:00. Parser/help/spec/runbook updated; `วันนี้` remains an alias. Bare time must start the command body, so pasted contact lines cannot supply a schedule. Original event's Bangkok day is used on recovery.
 
 Validation: 91 focused tests and typecheck pass. Full suite 1008 passed / 28 failed, exact same 28 baseline failure names, no new failures. No settings or migration changes required.
+
+Bare-time fix deployed to staging as Worker version `48a3ef30-c56f-41b0-94a2-bf6d2d745bdb` from application commit `1e5cfee`, within the authorized staging rollout. Post-deploy health: HTTP 200, `ok:true`, no import running. No LINE messages sent by verification.
