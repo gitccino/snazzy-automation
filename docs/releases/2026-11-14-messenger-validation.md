@@ -1,6 +1,6 @@
 # Messenger implementation validation — 2026-11-14
 
-Local implementation only, on `messenger-demo`; no rollout performed.
+Implementation on `messenger-demo`; staging rollout explicitly authorized and completed on 2026-11-14. Production was not changed.
 
 - Root typecheck: PASS.
 - Feature/integration/configuration gate: 158 tests PASS across 18 files.
@@ -48,3 +48,16 @@ Local implementation only, on `messenger-demo`; no rollout performed.
 - `test/acceptance/publication.test.ts :: publication acceptance regenerates edited Airtable inputs after Failed restart while preserving matching product outputs`
 - `test/line/airtable-inventory.test.ts :: reads every daily-sales page with Bangkok boundaries and requested fields`
 - `test/line/soldout.test.ts :: does not persist or mutate for invalid sold price %p`
+
+## Authorized staging rollout
+
+- Reviewed application commit: `2bba9f2`.
+- Automation Worker: `snazzy-automation-staging`, version `76ece33d-dbfa-4a04-86e6-4eba1d4f9bed` (previous `90133b41-5d5d-484a-8509-99ec1cb6ec8f`).
+- Settings Worker: `snazzy-settings-staging`, version `6d03b856-bbfe-45a9-813d-c02eaa236d1b`; its gateway now accepts the new shared settings schema. No new Settings UI controls were added.
+- D1 migration `0012_messenger_delivery_coordination.sql` applied; no migrations remain pending.
+- Settings updated through deployed SettingsService RPC with provider validation and revision checks, revision 6 → 7 → 8. No direct settings SQL writes.
+- Delivery table: `tblNbKrmjg72z9nm1`. Completion allowlist: exactly one user, the user's explicitly provided LINE ID. Full personal ID is retained only in live configuration/private rollout artifacts, not this report.
+- Before/after comparison confirms all unrelated settings preserved, including current AI-caption and retry settings. No credentials changed.
+- Database export, previous settings, previous deployments and readback kept privately under ignored `.wrangler/messenger-rollout/` in this worktree. Keep this directory for rollback; it includes private data and must not be committed/shared.
+- Post-deploy checks: backend `/health` HTTP 200 with `ok:true`, no import running; Settings anonymous access redirects HTTP 302 to the existing Cloudflare Access domain; invalid webhook signatures return HTTP 401; current Airtable connection/schema test passes. Direct D1 readback confirms revision 8, configured table and one completion user.
+- No LINE group messages sent and no delivery/product records created by rollout validation. A real mobile `/mess` → `/mess-overview` → completion/quote round trip remains a user-run acceptance check.
