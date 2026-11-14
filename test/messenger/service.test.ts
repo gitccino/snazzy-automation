@@ -253,7 +253,7 @@ it("reports a confirmed save even when overview refresh fails", async () => {
     ),
   ).toMatchObject({
     kind: "text",
-    text: expect.stringContaining("บันทึกสถานะเสร็จแล้ว"),
+    text: expect.stringContaining("บันทึกสถานะเสร็จสิ้น"),
   });
 });
 it("recovers only by reading after a process interrupted between claim and dispatch response", async () => {
@@ -447,4 +447,18 @@ it("still reports a different command as a duplicate when it recovers the origin
     text: expect.stringContaining("มีรายการจัดส่ง"),
   });
   expect(api.create).toHaveBeenCalledTimes(1);
+});
+
+it("refreshes today after completing a task from an older card", async () => {
+  const { deps, api } = setup([delivery]);
+  const v = await getOverview("2026-11-14", 1, "C1", deps);
+  if (v.kind !== "overview") throw new Error();
+  deps.clock.now = () => new Date("2026-11-15T01:00:00Z");
+  api.list.mockResolvedValue([]);
+  await handleMessengerAction(
+    { kind: "complete", token: v.overview.actions[delivery.id]!.complete! },
+    { groupId: "C1", userId: "book" },
+    deps,
+  );
+  expect(api.list).toHaveBeenLastCalledWith("C1", "2026-11-15");
 });

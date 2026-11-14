@@ -55,8 +55,7 @@ it("does not default a missing event timestamp", () =>
   }));
 it.each([
   ["/mess-overview", "2026-11-13", 1],
-  ["/mess-overview tomorrow", "2026-11-14", 1],
-  ["/mess-overview 14/11/2026 2", "2026-11-14", 2],
+  ["/mess-overview 2", "2026-11-13", 2],
 ])("parses overview %s", (text, day, page) =>
   expect(parseMessengerCommand(text, ts)).toEqual({
     ok: true,
@@ -120,3 +119,13 @@ it.each([
 ])("rejects invalid or ambiguous bare times: %s", (text) => {
   expect(parseMessengerCommand(text, ts)).toMatchObject({ ok: false });
 });
+
+it.each([
+  "/mess-overview tomorrow",
+  "/mess-overview 14/11/2026",
+  "/mess-overview 14/11/2026 2",
+  "/mess-overview 0",
+  "/mess-overview 9007199254740992",
+])("does not allow selecting another overview day: %s", (text) =>
+  expect(parseMessengerCommand(text, ts)).toMatchObject({ ok: false }),
+);

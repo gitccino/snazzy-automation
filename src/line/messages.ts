@@ -51,7 +51,7 @@ export function helpText(): string {
   return [
     "คำสั่งที่ใช้ได้",
     "/mess แมสเลย A-1234 (หรือ 14:30 A-1234 / พรุ่งนี้ 14:00 A-1234)",
-    "/mess-overview (หรือ /mess-overview tomorrow)",
+    "/mess-overview (รายการแมสวันนี้)",
     "/search 1234 (หรือ A1234, a1234, A-1234)",
     "/upload",
     "/docs",

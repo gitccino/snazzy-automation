@@ -147,7 +147,7 @@ export async function registerDelivery(
     throw new Error("Messenger duplicate scope mismatch");
   if (existing)
     return message(
-      `มีรายการจัดส่ง ${existing.productId} สำหรับวันที่ ${day.split("-").reverse().join("/")} แล้ว${existing.status === "Done" ? " · ✓ เสร็จแล้ว" : ""}`,
+      `มีรายการจัดส่ง ${existing.productId} สำหรับวันที่ ${day.split("-").reverse().join("/")} แล้ว${existing.status === "Done" ? " · ✓ เสร็จสิ้น" : ""}`,
     );
   const product = await deps.airtable.findProduct(command.productId);
   if (!product) return message(`⚠️ ไม่พบสินค้า ${command.productId}`);
@@ -225,7 +225,7 @@ async function reconcileRegistration(
   await recordConfirmedObservation(intent.id, observed.recordId, deps);
   if (source.eventId !== expected.sourceEventId)
     return message(
-      `มีรายการจัดส่ง ${observed.productId} สำหรับวันที่ ${intent.day.split("-").reverse().join("/")} แล้ว${observed.status === "Done" ? " · ✓ เสร็จแล้ว" : ""}`,
+      `มีรายการจัดส่ง ${observed.productId} สำหรับวันที่ ${intent.day.split("-").reverse().join("/")} แล้ว${observed.status === "Done" ? " · ✓ เสร็จสิ้น" : ""}`,
     );
   return message(`บันทึกรายการแมสเซนเจอร์ ${observed.productId} แล้ว`);
 }
@@ -249,7 +249,7 @@ export async function handleMessengerAction(
     action.kind === "complete" &&
     !policy.completionUserIds.includes(actor.userId)
   )
-    return message("⚠️ คุณไม่มีสิทธิ์ทำเครื่องหมายรายการนี้ว่าเสร็จแล้ว");
+    return message("⚠️ คุณไม่มีสิทธิ์ทำเครื่องหมายรายการนี้ว่าเสร็จสิ้น");
   const prior =
     action.kind === "complete"
       ? await deps.repo.findCompletion(deps.connection, binding.recordId)
@@ -272,10 +272,16 @@ export async function handleMessengerAction(
       : message(`⚠️ ไม่สามารถอ้างอิงข้อความเดิมของ ${d.productId} ได้`);
   const refreshed = async () => {
     try {
-      return await getOverview(binding.day, binding.page, actor.groupId, deps);
+      const today = bangkokDay(deps.clock.now().getTime());
+      return await getOverview(
+        today,
+        binding.day === today ? binding.page : 1,
+        actor.groupId,
+        deps,
+      );
     } catch {
       return message(
-        "บันทึกสถานะเสร็จแล้ว แต่โหลดรายการล่าสุดไม่สำเร็จ กรุณาใช้ /mess-overview อีกครั้ง",
+        "บันทึกสถานะเสร็จสิ้น แต่โหลดรายการล่าสุดไม่สำเร็จ กรุณาใช้ /mess-overview อีกครั้ง",
       );
     }
   };

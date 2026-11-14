@@ -30,21 +30,11 @@ export function parseMessengerCommand(
     return invalid;
   const today = bangkokDay(eventTimestamp);
   if (/^\/mess-overview(?:\s|$)/.test(text)) {
-    const m =
-      /^\/mess-overview(?:\s+(tomorrow|\d{1,2}\/\d{1,2}\/\d{4})(?:\s+([1-9]\d*))?)?$/.exec(
-        text,
-      );
+    const m = /^\/mess-overview(?:\s+([1-9]\d*))?$/.exec(text);
     if (!m) return invalid;
-    let day = today;
-    if (m[1] === "tomorrow") day = shiftDay(today, 1);
-    else if (m[1]) {
-      const [d, mo, y] = m[1].split("/");
-      day = `${y}-${mo!.padStart(2, "0")}-${d!.padStart(2, "0")}`;
-      if (!validDay(day) || Number(y) === 0) return invalid;
-    }
-    const page = Number(m[2] ?? 1);
+    const page = Number(m[1] ?? 1);
     return Number.isSafeInteger(page)
-      ? { ok: true, command: { type: "mess-overview", day, page } }
+      ? { ok: true, command: { type: "mess-overview", day: today, page } }
       : invalid;
   }
   const body = text.slice(5);

@@ -70,3 +70,11 @@ User clarified `/mess แมสเลย A-…` = now, `/mess 14:30 A-…` = tod
 Validation: 91 focused tests and typecheck pass. Full suite 1008 passed / 28 failed, exact same 28 baseline failure names, no new failures. No settings or migration changes required.
 
 Bare-time fix deployed to staging as Worker version `48a3ef30-c56f-41b0-94a2-bf6d2d745bdb` from application commit `1e5cfee`, within the authorized staging rollout. Post-deploy health: HTTP 200, `ok:true`, no import running. No LINE messages sent by verification.
+
+## Compact today-only overview amendment
+
+User requested compact right-side `อ้างอิง` and `เสร็จสิ้น` controls and removal of day-switching footer navigation. Controls use 12px labels, 40px hit height, 64px/80px widths and an 8px gap in a 152px right-aligned action group. Header date and counts align left/right. Completed rows remain visible. No footer is rendered for a single page; multi-page lists retain only previous/next controls.
+
+Public syntax is `/mess-overview` or `/mess-overview N` for today only; date and `tomorrow` arguments are rejected. Registration for tomorrow still works. Current-day resolution is enforced at the LINE boundary even for old persisted overview commands; completing an old card refreshes today’s first page. Spec/runbook/help/acceptance fixtures updated accordingly.
+
+Validation: 97 focused tests and root typecheck pass; full suite 1014 passed, 28 failed, exact same 28 baseline failure names and no new failures. Native LINE mobile rendering remains a manual check.

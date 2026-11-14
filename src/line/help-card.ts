@@ -3,7 +3,7 @@ import type { SearchCardReply } from "./search-card";
 export function helpCard(publicBaseUrl: string): SearchCardReply {
   const commands = [
     ["/mess", "บันทึกแมส · แมสเลย A-1234 / 14:30 A-1234 / พรุ่งนี้ 14:00 A-1234"],
-    ["/mess-overview", "รายการแมสวันนี้ / tomorrow สำหรับพรุ่งนี้"],
+    ["/mess-overview", "รายการแมสวันนี้"],
     ["/soldout", "ตัด Stock"],
     ["/search", "ตรวจเช็คสินค้า"],
     ["/revert", "ย้อนคำสั่งก่อนหน้า"],

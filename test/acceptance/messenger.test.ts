@@ -6,8 +6,13 @@ import type { Env } from "../../src/env";
 import type { SupportedLineEvent } from "../../src/line/types";
 import { createTestEnv, testEnv } from "../helpers/env";
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 it("registers through sanitized Workflow handoff and retains completed items after a failed reply", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-11-14T04:00:00Z"));
   const book = "U" + "a".repeat(32),
     staff = "U" + "b".repeat(32),
     group = "CtestGroup";
@@ -175,7 +180,7 @@ it("registers through sanitized Workflow handoff and retains completed items aft
   expect(tasks).toHaveLength(2);
   await command("/mess วันนี้ 13:00 A-10");
   expect(tasks).toHaveLength(3);
-  await command("/mess-overview 14/11/2026");
+  await command("/mess-overview");
   const flex = sent.at(-1).messages[0];
   expect(flex.type).toBe("flex");
   function findComplete(v: any): string | undefined {
@@ -208,16 +213,16 @@ it("registers through sanitized Workflow handoff and retains completed items aft
   const completedAt = tasks[0]!.fields["Completed At"];
   await run(postback(book, "again"), context, "again");
   expect(tasks[0]!.fields["Completed At"]).toBe(completedAt);
-  await command("/mess-overview 14/11/2026");
-  expect(JSON.stringify(sent.at(-1))).toContain("✓ เสร็จแล้ว");
+  await command("/mess-overview");
+  expect(JSON.stringify(sent.at(-1))).toContain("✓ เสร็จสิ้น");
   expect(JSON.stringify(sent.at(-1))).toContain("A-2");
   const secondData = findComplete(sent.at(-1).messages[0])!;
   expect(secondData).toBeTruthy();
   const second = postback(book, "second-completion");
   if (second.type === "postback") second.postback.data = secondData;
   await run(second, context, "second-completion");
-  await command("/mess-overview 14/11/2026");
-  expect(JSON.stringify(sent.at(-1))).toContain("2 รายการ · เสร็จแล้ว 2");
+  await command("/mess-overview");
+  expect(JSON.stringify(sent.at(-1))).toContain("2 รายการ · เสร็จสิ้น 2");
   expect(JSON.stringify(sent.at(-1))).toContain("A-10");
   const before = sent.length;
   await command("/mess-overview", staff, "C-other");

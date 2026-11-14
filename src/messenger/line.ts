@@ -80,7 +80,12 @@ export async function prepareMessengerReply(
     const c = parsed.command;
     result =
       c.type === "mess-overview"
-        ? await getOverview(c.day, c.page, event.source.groupId, deps)
+        ? await getOverview(
+            bangkokDay(deps.clock.now().getTime()),
+            c.page,
+            event.source.groupId,
+            deps,
+          )
         : await registerDelivery(
             c,
             {

@@ -6,7 +6,7 @@ Branch: `messenger-demo`
 
 ## Intent
 
-Book needs a compact LINE list of products requiring messenger delivery today or tomorrow. Staff register deliveries through `/mess`; anyone in an allowed group can request `/mess-overview`. Book can mark deliveries done.
+Book needs a compact LINE list of products requiring messenger delivery today; staff may also register tomorrow’s tasks in advance. Staff register deliveries through `/mess`; anyone in an allowed group can request `/mess-overview`. Book can mark deliveries done.
 
 **Completed deliveries remain visible in every fresh overview for their scheduled day.** Completion changes the status, never removes the row or changes its delivery date or sort position.
 
@@ -18,7 +18,7 @@ Book needs a compact LINE list of products requiring messenger delivery today or
 - Show `ผู้รับผิดชอบ · เจ` on the same line as the time, aligned right.
 - No thumbnail, recipient/contact, destination, or retained original message body.
 - Compact rows have product ID and reference/completion actions.
-- Completed rows show `✓ เสร็จแล้ว` and stay visible, including after a new command, pagination, or worker restart.
+- Completed rows show `✓ เสร็จสิ้น` and stay visible, including after a new command, pagination, or worker restart.
 - Completion uses a separate configurable LINE user-ID allowlist, initially containing only Book; more users can be added later. Registration and overview access remain available to all staff in allowed groups.
 - Replies and quote actions stay in the originating allowed group.
 
@@ -39,9 +39,7 @@ Selected: Airtable delivery table with D1 technical coordination. The user accep
 | `/mess` followed by `วันนี้ 14:00 A-12977` | Today at 14:00 Bangkok time (explicit alias) |
 | `/mess` followed by `พรุ่งนี้ 14:00 A-12977` | Tomorrow at 14:00 Bangkok time |
 | `/mess-overview` | Today's deliveries, first page |
-| `/mess-overview tomorrow` | Tomorrow's deliveries, first page |
-| `/mess-overview 14/11/2026` | Explicit Gregorian day, first page; used by navigation |
-| `/mess-overview 14/11/2026 2` | Explicit day, page two |
+| `/mess-overview 2` | Today's deliveries, page two |
 
 Accept a multiline message with exactly one explicit `A-<positive integer>` ID. Other pasted lines may be present, but do not store them or interpret phone numbers as IDs or delivery times. Schedule parsing accepts an unlabelled `HH:mm` at the start of the command body for today, explicit `วันนี้ HH:mm` / `พรุ่งนี้ HH:mm` expressions, or `แมสเลย` (including `แมสเลยค่า`); it is not unrestricted natural-language inference. Missing, malformed, conflicting schedules or multiple IDs return guidance with no write. Validate hours/minutes and real calendar dates. No implicit schedule when the time is missing.
 
@@ -78,27 +76,27 @@ Webhook redelivery must not create another delivery. Reconcile ambiguous Airtabl
 
 ## Compact overview
 
-Header: `แมสเซนเจอร์วันนี้` / `แมสเซนเจอร์พรุ่งนี้` / selected date, plus total count and completion count (e.g. `3 รายการ · เสร็จแล้ว 1`).
+Header: `แมสเซนเจอร์วันนี้`, plus total count and completion count (e.g. `3 รายการ · เสร็จสิ้น 1`).
 
 Each row:
 
 ```text
 ทันที · 09:10                      ผู้รับผิดชอบ · เจ
-A-12977                         [อ้างอิง] [เสร็จแล้ว]
+A-12977                         [อ้างอิง] [เสร็จสิ้น]
 
 13:00                             ผู้รับผิดชอบ · เมย์
-A-12981                         [อ้างอิง] ✓ เสร็จแล้ว
+A-12981                         [อ้างอิง] ✓ เสร็จสิ้น
 ```
 
 - Time left; responsible name right. Long names truncate visually without changing stored identity.
-- Two lines per item, subtle separators, no image, large empty areas, or per-item cards.
-- Pending items offer `อ้างอิง` and `เสร็จแล้ว`. Completed items retain `อ้างอิง` and a non-actionable completion indicator.
+- Two lines per item, subtle separators, no image, large empty areas, or per-item cards. The right-aligned action group is 152px wide with 8px spacing; quote and completion controls are 64px/80px wide, 40px tall, with 12px labels and 8px corners.
+- Pending items offer `อ้างอิง` and `เสร็จสิ้น`. Completed items retain `อ้างอิง` and a non-actionable completion indicator.
 - Completion uses text/checkmark, not color alone. Do not reduce hit areas just to save space.
 - Sort all statuses together by Scheduled At ascending, numeric Product ID, then stable Delivery ID. Do not move Done rows to the bottom.
 - Page size: five rows. Fetch all matching Airtable pages before calculating totals/selecting the requested page; never silently omit Done records or later Airtable pages.
-- Footer offers previous/next pages and today/tomorrow with explicit absolute dates in actions, so old buttons do not shift meaning after midnight.
+- No today/tomorrow footer buttons. Show previous/next page controls only when needed, using `/mess-overview N`. Every overview request and pagination action resolves the current Bangkok day; date and `tomorrow` arguments are rejected. Old messages remain snapshots; a fresh request always shows today.
 - Empty day: `ไม่มีรายการแมสเซนเจอร์สำหรับวันนี้` or the selected date. A day containing only Done items is not empty.
-- Overview reads current Airtable status, restricted to the requesting group and selected scheduled day. On incomplete reads or invalid required fields, return an error rather than a misleading partial or empty list.
+- Overview reads current Airtable status, restricted to the requesting group and current Bangkok scheduled day. On incomplete reads or invalid required fields, return an error rather than a misleading partial or empty list.
 
 ## Completion action
 
@@ -108,7 +106,7 @@ Validate signature, current allowed-group membership at the application boundary
 
 Mark Pending → Done and persist completion metadata before acknowledging success. Repeated presses, stale cards, and simultaneous requests must leave one completion and preserve the original completion metadata. The implementation plan must choose durable per-task serialization/claiming and recovery compatible with Airtable's lack of transactional conditional updates; a naive read-then-write is insufficient. An already-Done task returns current state without rewriting metadata.
 
-Reply with a newly generated overview for the selected day/page, including the completed row. **Previously sent LINE Flex messages remain snapshots; do not promise in-place editing.** Their old buttons remain safe through server-side idempotency. If saving succeeds but replying fails, a fresh `/mess-overview` still shows Done; never undo the saved change or report that it was not saved.
+Reply with a newly generated overview for today, retaining the selected page if the task is scheduled today; after an old card completes a previous day’s task, return today’s first page. Completed items scheduled today remain visible. Historical records remain stored in Airtable. **Previously sent LINE Flex messages remain snapshots; do not promise in-place editing.** Their old buttons remain safe through server-side idempotency. If saving succeeds but replying fails, a fresh `/mess-overview` still shows Done; never undo the saved change or report that it was not saved.
 
 Completion has no undo, deletion, rescheduling, or inventory effects in this first version. Do not automatically purge completed records.
 
@@ -148,3 +146,5 @@ A separate builder review found no additional blocking questions beyond the appr
 After design approval, create an implementation plan. Provisioning real Airtable tables, migrations, and deployment require their own concrete rollout steps; this spec does not perform them.
 
 Clarification confirmed by the user after staging rollout: `/mess 14:30 A-…` means today at 14:30; `/mess แมสเลย A-…` means now; `/mess พรุ่งนี้ 14:00 A-…` means tomorrow at 14:00. Product ID remains required.
+
+Layout clarification after rollout: use compact right-side `อ้างอิง` / `เสร็จสิ้น` actions, remove today/tomorrow footer navigation, and make the public overview today-only. Tomorrow scheduling remains supported; those tasks appear when that Bangkok day arrives.

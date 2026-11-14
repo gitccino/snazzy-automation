@@ -106,13 +106,13 @@ Use real existing test products and separate task/day combinations; the same pro
 - `/mess` followed by `แมสเลยค่า A-<test ID>` records sender identity and original event time. Additional contact/address lines are ignored and not persisted by this feature.
 - `/mess 14:30 A-<test ID>` means today at 14:30 Bangkok time; a past time stays today. `วันนี้ 14:30` remains accepted.
 - `/mess พรุ่งนี้ 14:00 A-<test ID>` lands on tomorrow's Bangkok date.
-- `/mess-overview` shows today; `/mess-overview tomorrow` shows tomorrow. Explicit historical date uses Gregorian `DD/MM/YYYY`.
+- `/mess-overview` shows today only; `/mess-overview 2` selects page two of today. Date and `tomorrow` overview arguments are rejected. Tomorrow registrations appear when their scheduled day arrives.
 - Inspect five-row pages, a long staff name, small phones and all-Done days. Time/name share a line; product/actions share a second line. Pending and Done remain together in scheduled order with accurate total/completion counts.
 - Confirm Book can mark Done, another unlisted staff member cannot, and a removed user cannot use an old button. Repeated completion preserves the first completion metadata. Inventory remains unchanged.
-- A new overview retains completed rows as `✓ เสร็จแล้ว`; previously sent LINE messages remain snapshots and cannot be assumed to update in place.
+- A new overview retains completed rows as `✓ เสร็จสิ้น`; previously sent LINE messages remain snapshots and cannot be assumed to update in place.
 - `อ้างอิง` sends a **separate quoted text message** in the original group. Verify quote navigation on the actual mobile client; it is not a direct image/message URL. Missing/invalid quote tokens yield a product-specific notice, not a fabricated link.
 - Validate representative outgoing Flex messages with LINE's `/v2/bot/message/validate/reply` endpoint, using existing credentials only during authorized validation. Check logs omit raw bodies, contact data and quote tokens.
-- Check page/date buttons after midnight still address their explicit date. Confirm another group's tasks cannot be read or changed.
+- Check pagination after midnight queries the current Bangkok day, and an old completion card refreshes today’s first page. Confirm another group's tasks cannot be read or changed.
 
 ## Interrupted or uncertain writes
 

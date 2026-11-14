@@ -1,4 +1,3 @@
-import { shiftDay } from "./parser";
 import type { Overview } from "./types";
 const text = (value: string, muted = false) => ({
   type: "text",
@@ -6,23 +5,38 @@ const text = (value: string, muted = false) => ({
   size: "xs",
   color: muted ? "#949494" : "#2C2C2C",
 });
-const command = (day: string, page: number) =>
-  `/mess-overview ${day.split("-").reverse().join("/")} ${page}`;
-const nav = (label: string, day: string, page: number) => ({
+const command = (page: number) => `/mess-overview ${page}`;
+const nav = (label: string, page: number) => ({
   type: "button",
   height: "sm",
   style: "link",
-  action: { type: "message", label, text: command(day, page) },
+  action: { type: "message", label, text: command(page) },
 });
 const postback = (
   label: string,
   kind: "complete" | "quote",
   token: string,
 ) => ({
-  type: "button",
-  height: "sm",
-  style: kind === "complete" ? "primary" : "link",
-  ...(kind === "complete" ? { color: "#2C2C2C" } : {}),
+  type: "box",
+  layout: "vertical",
+  width: kind === "quote" ? "64px" : "80px",
+  height: "40px",
+  cornerRadius: "8px",
+  borderWidth: "1px",
+  borderColor: kind === "quote" ? "#D9DDE3" : "#2C2C2C",
+  backgroundColor: kind === "quote" ? "#F3F4F6" : "#2C2C2C",
+  justifyContent: "center",
+  alignItems: "center",
+  contents: [
+    {
+      type: "text",
+      text: label,
+      size: "12px",
+      flex: 0,
+      align: "center",
+      color: kind === "quote" ? "#535B66" : "#FFFFFF",
+    },
+  ],
   action: {
     type: "postback",
     label,
@@ -33,13 +47,8 @@ export function messengerOverviewCard(
   overview: Overview,
   today: string,
 ): { text: string; contents: Record<string, unknown> } {
-  const title =
-    overview.day === today
-      ? "แมสเซนเจอร์วันนี้"
-      : overview.day === shiftDay(today, 1)
-        ? "แมสเซนเจอร์พรุ่งนี้"
-        : `แมสเซนเจอร์ ${overview.day.split("-").reverse().join("/")}`;
-  const count = `${overview.total} รายการ · เสร็จแล้ว ${overview.done}`;
+  const title = "แมสเซนเจอร์วันนี้";
+  const count = `${overview.total} รายการ · เสร็จสิ้น ${overview.done}`;
   const items = overview.items.slice(0, 5).map((d) => {
     const time = new Intl.DateTimeFormat("en-GB", {
       timeZone: "Asia/Bangkok",
@@ -54,9 +63,9 @@ export function messengerOverviewCard(
     return {
       type: "box",
       layout: "vertical",
-      paddingTop: "12px",
-      paddingBottom: "12px",
-      spacing: "sm",
+      paddingTop: "10px",
+      paddingBottom: "10px",
+      spacing: "6px",
       contents: [
         {
           type: "box",
@@ -97,19 +106,22 @@ export function messengerOverviewCard(
               type: "box",
               layout: "horizontal",
               flex: 0,
+              width: "152px",
+              spacing: "8px",
               contents: [
                 postback("อ้างอิง", "quote", tokens.quote),
                 ...(d.status === "Done"
                   ? [
                       {
-                        ...text("✓ เสร็จแล้ว"),
+                        ...text("✓ เสร็จสิ้น"),
                         color: "#178647",
                         gravity: "center",
-                        margin: "sm",
+                        align: "end",
+                        flex: 1,
                       },
                     ]
                   : tokens.complete
-                    ? [postback("เสร็จแล้ว", "complete", tokens.complete)]
+                    ? [postback("เสร็จสิ้น", "complete", tokens.complete)]
                     : []),
               ],
             },
@@ -120,12 +132,8 @@ export function messengerOverviewCard(
   });
   const pages = Math.max(1, Math.ceil(overview.total / 5));
   const navigation = [
-    ...(overview.page > 1
-      ? [nav("← ก่อนหน้า", overview.day, overview.page - 1)]
-      : []),
-    ...(overview.page < pages
-      ? [nav("ถัดไป →", overview.day, overview.page + 1)]
-      : []),
+    ...(overview.page > 1 ? [nav("← ก่อนหน้า", overview.page - 1)] : []),
+    ...(overview.page < pages ? [nav("ถัดไป →", overview.page + 1)] : []),
   ];
   return {
     text: `${title} · ${count}`,
@@ -149,11 +157,14 @@ export function messengerOverviewCard(
             wrap: true,
           },
           {
-            ...text(
-              `${overview.day.split("-").reverse().join("/")} · ${count}`,
-              true,
-            ),
-            margin: "xs",
+            type: "box",
+            layout: "horizontal",
+            margin: "sm",
+            spacing: "sm",
+            contents: [
+              { ...text(today.split("-").reverse().join("/"), true), flex: 0 },
+              { ...text(count, true), align: "end", flex: 1, wrap: true },
+            ],
           },
           ...(items.length
             ? items.flatMap((item) => [
@@ -162,29 +173,17 @@ export function messengerOverviewCard(
               ])
             : [
                 {
-                  ...text(
-                    "ไม่มีรายการแมสเซนเจอร์สำหรับ" +
-                      (overview.day === today
-                        ? "วันนี้"
-                        : overview.day.split("-").reverse().join("/")),
-                    true,
-                  ),
+                  ...text("ไม่มีรายการแมสเซนเจอร์สำหรับวันนี้", true),
                   margin: "lg",
                   wrap: true,
                 },
               ]),
-          { type: "separator", margin: "sm" },
           ...(navigation.length
-            ? [{ type: "box", layout: "horizontal", contents: navigation }]
+            ? [
+                { type: "separator", margin: "sm" },
+                { type: "box", layout: "horizontal", contents: navigation },
+              ]
             : []),
-          {
-            type: "box",
-            layout: "horizontal",
-            contents: [
-              nav("วันนี้", today, 1),
-              nav("พรุ่งนี้ →", shiftDay(today, 1), 1),
-            ],
-          },
         ],
       },
     },

@@ -25,12 +25,31 @@ it("renders compact two-line rows with right-aligned responsibility and persiste
   const json = JSON.stringify(card.contents);
   expect(json).toContain("ผู้รับผิดชอบ · เจ");
   expect(json).toContain('"align":"end"');
-  expect(json).toContain("✓ เสร็จแล้ว");
+  expect(json).toContain("✓ เสร็จสิ้น");
   expect(json).toContain("A-10");
   expect(json).not.toContain('"type":"image"');
   expect(json.match(/messenger=complete/g)).toHaveLength(1);
   expect(json.match(/messenger=quote/g)).toHaveLength(2);
-  expect(json).toContain("/mess-overview 15/11/2026 1");
+  expect(json).not.toContain("พรุ่งนี้");
+  expect(json).not.toContain('"label":"วันนี้"');
+  expect(json).toContain('"label":"เสร็จสิ้น"');
+  const body = card.contents.body as { contents: any[] };
+  const rows = body.contents.filter(
+    (n) => n.type === "box" && n.layout === "vertical",
+  );
+  const actionRow = rows[0].contents[1];
+  expect(actionRow.contents[0].text).toBe("A-2");
+  const actions = actionRow.contents[1];
+  expect(actions).toMatchObject({ flex: 0, width: "152px", spacing: "8px" });
+  expect(actions.contents.map((b: any) => b.action.label)).toEqual([
+    "อ้างอิง",
+    "เสร็จสิ้น",
+  ]);
+  expect(
+    actions.contents.every(
+      (b: any) => b.height === "40px" && b.contents[0].size === "12px",
+    ),
+  ).toBe(true);
   expect(card.text).toContain("2 รายการ");
 });
 it("limits rendering to five and truncates long names without changing the source data", () => {
@@ -49,5 +68,5 @@ it("limits rendering to five and truncates long names without changing the sourc
   );
   expect(JSON.stringify(card)).not.toContain(name);
   expect(d.responsibleName).toBe(name);
-  expect(JSON.stringify(card)).toContain("/mess-overview 14/11/2026 2");
+  expect(JSON.stringify(card)).toContain("/mess-overview 2");
 });

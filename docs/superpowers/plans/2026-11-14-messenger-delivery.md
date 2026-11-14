@@ -10,6 +10,8 @@
 
 **Spec:** [2026-11-13-messenger-delivery-design.md](../specs/2026-11-13-messenger-delivery-design.md)
 
+Post-implementation user amendment: the public overview is today-only with `/mess-overview N` pagination; the day-switching footer is removed and completion copy is `เสร็จสิ้น`. Earlier dated-navigation steps below are historical and superseded by the updated spec.
+
 ## Global Constraints
 
 - “Completed deliveries remain visible in every fresh overview for their scheduled day.”
