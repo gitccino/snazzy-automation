@@ -255,6 +255,16 @@ it("registers through sanitized Workflow handoff and retains completed items aft
     "Scheduled At": "2026-11-14T08:00:00Z",
   });
   expect(tasks[0]!.fields["Completed At"]).not.toBe(completedAt);
+  await command(
+    "/mess\nรหัส A-12676\n🛵 แมส 14.30 ค่าแมสปลายทาง\n065 663 5369\nSTAY Hotel",
+  );
+  expect(tasks.at(-1)!.fields).toMatchObject({
+    "Product ID": "A-12676",
+    "Scheduled At": "2026-11-14T07:30:00.000Z",
+    "Schedule Type": "Scheduled",
+    "Responsible Name": "เจ",
+    Status: "Pending",
+  });
   const before = sent.length;
   await command("/mess-overview", staff, "C-other");
   expect(sent.length).toBe(before);

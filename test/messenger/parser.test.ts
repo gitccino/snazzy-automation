@@ -129,3 +129,43 @@ it.each([
 ])("does not allow selecting another overview day: %s", (text) =>
   expect(parseMessengerCommand(text, ts)).toMatchObject({ ok: false }),
 );
+
+it.each([
+  [
+    "/mess\nรหัส A-12676\n🛵 แมส 14.30 ค่าแมสปลายทาง\nชื่อผู้รับ\n080 2892464\nบ้านเลขที่ 165/27",
+    "2026-11-13T16:59:00Z",
+    "2026-11-13T07:30:00.000Z",
+  ],
+  [
+    "/mess\nรหัส A-12676\n🛵 แมส 14:30 ค่าแมสปลายทาง",
+    "2026-11-13T17:01:00Z",
+    "2026-11-14T07:30:00.000Z",
+  ],
+  ["/mess 14.30 A-12676", "2026-11-13T16:59:00Z", "2026-11-13T07:30:00.000Z"],
+  [
+    "/mess\nรหัส A-12676\n🛵 พรุ่งนี้ 14.30",
+    "2026-11-13T16:59:00Z",
+    "2026-11-14T07:30:00.000Z",
+  ],
+])("accepts staff courier time format: %s", (text, received, scheduledAt) => {
+  expect(parseMessengerCommand(text, Date.parse(received))).toEqual({
+    ok: true,
+    command: {
+      type: "mess-register",
+      productId: "A-12676",
+      scheduledAt,
+      scheduleType: "Scheduled",
+    },
+  });
+});
+it.each([
+  "/mess A-1\nแมส 24.00",
+  "/mess A-1\nแมส 14.60",
+  "/mess A-1\nแมส 14.30 15:00",
+  "/mess A-1\nแมส 14.30\nพรุ่งนี้ 15:00",
+  "/mess 14.30 พรุ่งนี้ 15:00 A-1",
+  "/mess A-1\nค่าแมส 14.30",
+  "/mess A-1\nโทร 080 2892464",
+])("rejects invalid or conflicting staff courier times: %s", (text) => {
+  expect(parseMessengerCommand(text, ts)).toMatchObject({ ok: false });
+});
