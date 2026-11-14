@@ -78,3 +78,5 @@ User requested compact right-side `อ้างอิง` and `เสร็จ�
 Public syntax is `/mess-overview` or `/mess-overview N` for today only; date and `tomorrow` arguments are rejected. Registration for tomorrow still works. Current-day resolution is enforced at the LINE boundary even for old persisted overview commands; completing an old card refreshes today’s first page. Spec/runbook/help/acceptance fixtures updated accordingly.
 
 Validation: 97 focused tests and root typecheck pass; full suite 1014 passed, 28 failed, exact same 28 baseline failure names and no new failures. Native LINE mobile rendering remains a manual check.
+
+Compact today-only update deployed to staging as Worker version `6a05ae61-5f0a-4c8c-bbdb-a498286844fa` from application commit `ed29723`. Post-deploy health: HTTP 200 with `ok:true`. No LINE group messages sent by validation; existing Flex messages remain snapshots.
