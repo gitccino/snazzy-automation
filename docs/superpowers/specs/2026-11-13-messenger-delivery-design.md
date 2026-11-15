@@ -76,22 +76,23 @@ Webhook redelivery must not create another delivery. Reconcile ambiguous Airtabl
 
 ## Compact overview
 
-Header: `แมสเซนเจอร์วันนี้`, plus total count and completion count (e.g. `3 รายการ · เสร็จสิ้น 1`).
+Header: `แมสเซนเจอร์วันนี้` in black on the first line, without a MESSENGER eyebrow. Date left and completed/total count (e.g. `1/3`) right on the next line. Notification alternative text retains the descriptive counts.
 
 Each row:
 
 ```text
-ทันที · 09:10                      ผู้รับผิดชอบ · เจ
+09:10 · เกินกำหนด                  ผู้รับผิดชอบ · เจ
 A-12977                         [อ้างอิง] [เสร็จสิ้น]
 
 13:00                             ผู้รับผิดชอบ · เมย์
-A-12981                         [อ้างอิง] ✓ เสร็จสิ้น
+A-12981                          อ้างอิง    เสร็จสิ้น
 ```
 
 - Time left; responsible name right. Long names truncate visually without changing stored identity.
-- Two lines per item, subtle separators, no image, large empty areas, or per-item cards. The right-aligned action group is 152px wide with 8px spacing; quote and completion controls are 64px/80px wide, 40px tall, with 12px labels and 8px corners.
+- Two lines per item, subtle separators, no image, large empty areas, or per-item cards. The right-aligned action group is 152px wide with 8px spacing; quote and completion controls are 64px/80px wide, 40px tall, with 12px labels. Reference is text-only; the completion button has a `#F0F0F1` background, black text and 20px pill corners.
 - Pending items offer `อ้างอิง` and `เสร็จสิ้น`. Completed items retain `อ้างอิง` and a non-actionable completion indicator.
-- Completion uses text/checkmark, not color alone. Do not reduce hit areas just to save space.
+- Completed rows use green `เสร็จสิ้น` text without a checkmark, centered in the same 80px action column and using the same 12px size as the pending button label. It remains non-actionable. Do not reduce hit areas just to save space.
+- Display recorded time without `ทันที` for every schedule type. Only Pending items whose Scheduled At instant is strictly earlier than message generation time show red `HH:mm · เกินกำหนด`. Future, exactly-due and Done times remain black. There is no grace period. Existing messages do not recolor themselves; a fresh overview or completion response recalculates the state.
 - Sort all statuses together by Scheduled At ascending, numeric Product ID, then stable Delivery ID. Do not move Done rows to the bottom.
 - Page size: five rows. Fetch all matching Airtable pages before calculating totals/selecting the requested page; never silently omit Done records or later Airtable pages.
 - No today/tomorrow footer buttons. Show previous/next page controls only when needed, using `/mess-overview N`. Every overview request and pagination action resolves the current Bangkok day; date and `tomorrow` arguments are rejected. Old messages remain snapshots; a fresh request always shows today.

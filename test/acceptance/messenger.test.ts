@@ -214,7 +214,8 @@ it("registers through sanitized Workflow handoff and retains completed items aft
   await run(postback(book, "again"), context, "again");
   expect(tasks[0]!.fields["Completed At"]).toBe(completedAt);
   await command("/mess-overview");
-  expect(JSON.stringify(sent.at(-1))).toContain("✓ เสร็จสิ้น");
+  expect(JSON.stringify(sent.at(-1))).not.toContain("✓");
+  expect(JSON.stringify(sent.at(-1))).toContain('"color":"#178647"');
   expect(JSON.stringify(sent.at(-1))).toContain("A-2");
   const secondData = findComplete(sent.at(-1).messages[0])!;
   expect(secondData).toBeTruthy();

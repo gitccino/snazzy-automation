@@ -1,4 +1,5 @@
 import type { Overview } from "./types";
+import { bangkokDay } from "./parser";
 const text = (value: string, muted = false) => ({
   type: "text",
   text: value,
@@ -21,10 +22,8 @@ const postback = (
   layout: "vertical",
   width: kind === "quote" ? "64px" : "80px",
   height: "40px",
-  cornerRadius: "8px",
-  borderWidth: "1px",
-  borderColor: kind === "quote" ? "#D9DDE3" : "#2C2C2C",
-  backgroundColor: kind === "quote" ? "#F3F4F6" : "#2C2C2C",
+  cornerRadius: "20px",
+  backgroundColor: kind === "quote" ? "#FFFFFF" : "#F0F0F1",
   justifyContent: "center",
   alignItems: "center",
   contents: [
@@ -34,7 +33,7 @@ const postback = (
       size: "12px",
       flex: 0,
       align: "center",
-      color: kind === "quote" ? "#535B66" : "#FFFFFF",
+      color: kind === "quote" ? "#535B66" : "#2C2C2C",
     },
   ],
   action: {
@@ -45,8 +44,9 @@ const postback = (
 });
 export function messengerOverviewCard(
   overview: Overview,
-  today: string,
+  now: Date,
 ): { text: string; contents: Record<string, unknown> } {
+  const today = bangkokDay(now.getTime());
   const title = "แมสเซนเจอร์วันนี้";
   const count = `${overview.total} รายการ · เสร็จสิ้น ${overview.done}`;
   const items = overview.items.slice(0, 5).map((d) => {
@@ -56,6 +56,8 @@ export function messengerOverviewCard(
       minute: "2-digit",
       hourCycle: "h23",
     }).format(new Date(d.scheduledAt));
+    const overdue =
+      d.status === "Pending" && Date.parse(d.scheduledAt) < now.getTime();
     const tokens = overview.actions[d.id]!;
     const name =
       Array.from(d.responsibleName).slice(0, 30).join("") +
@@ -73,9 +75,8 @@ export function messengerOverviewCard(
           alignItems: "center",
           contents: [
             {
-              ...text(
-                (d.scheduleType === "Immediate" ? "ทันที · " : "") + time,
-              ),
+              ...text(time + (overdue ? " · เกินกำหนด" : "")),
+              color: overdue ? "#CF3030" : "#2C2C2C",
               weight: "bold",
               flex: 0,
             },
@@ -113,10 +114,11 @@ export function messengerOverviewCard(
                 ...(d.status === "Done"
                   ? [
                       {
-                        ...text("✓ เสร็จสิ้น"),
+                        ...text("เสร็จสิ้น"),
+                        size: "12px",
                         color: "#178647",
                         gravity: "center",
-                        align: "end",
+                        align: "center",
                         flex: 1,
                       },
                     ]
@@ -146,14 +148,12 @@ export function messengerOverviewCard(
         paddingAll: "18px",
         backgroundColor: "#FFFFFF",
         contents: [
-          { ...text("MESSENGER", true), size: "xxs" },
           {
             type: "text",
             text: title,
             size: "lg",
             weight: "bold",
             color: "#2C2C2C",
-            margin: "xs",
             wrap: true,
           },
           {
@@ -163,7 +163,12 @@ export function messengerOverviewCard(
             spacing: "sm",
             contents: [
               { ...text(today.split("-").reverse().join("/"), true), flex: 0 },
-              { ...text(count, true), align: "end", flex: 1, wrap: true },
+              {
+                ...text(`${overview.done}/${overview.total}`, true),
+                align: "end",
+                flex: 1,
+                wrap: true,
+              },
             ],
           },
           ...(items.length

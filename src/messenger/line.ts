@@ -108,10 +108,7 @@ export async function prepareMessengerReply(
   if (result.kind === "overview")
     return {
       kind: "flex",
-      ...messengerOverviewCard(
-        result.overview,
-        bangkokDay(deps.clock.now().getTime()),
-      ),
+      ...messengerOverviewCard(result.overview, deps.clock.now()),
     };
   return result;
 }
