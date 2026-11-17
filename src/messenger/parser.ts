@@ -46,29 +46,15 @@ export function parseMessengerCommand(
   )
     return invalid;
   const schedules = Array.from(
-    body.matchAll(
-      /แมสเลย(?:ค่า)?|วันนี้|พรุ่งนี้|(?<![\p{L}\p{N}])แมส(?=\s+\d{1,2}[.:]\d{2}(?!\S))/gu,
-    ),
+    body.matchAll(/แมสเลย(?:ค่า)?|วันนี้|พรุ่งนี้/g),
   );
-  if (
-    schedules.length > 1 ||
-    (schedules.length > 0 && /^\s*\d{1,2}[.:]\d{2}(?!\S)/.test(body))
-  )
-    return invalid;
-  const schedule = schedules[0];
-  const scheduleText = schedule ? body.slice(schedule.index) : body.trimStart();
-  // Read one time from the schedule line, never from pasted contact/address lines.
-  if (
-    !schedule?.[0].startsWith("แมสเลย") &&
-    Array.from(
-      scheduleText
-        .replace(/^(?:วันนี้|พรุ่งนี้|แมส)\s+/, "")
-        .split(/\r?\n/, 1)[0]!
-        .matchAll(/(?<!\S)\d{1,2}[.:]\d{2}(?!\S)/g),
-    ).length !== 1
-  )
-    return invalid;
-  if (schedule?.[0].startsWith("แมสเลย"))
+  if (schedules.length > 1) return invalid;
+  // Match standalone times so full phone numbers and dotted fragments are not time candidates.
+  const times = Array.from(
+    body.matchAll(/(?<!\S)([0-9]{1,2})[.:]([0-9]{2})(?!\S)/g),
+  );
+  if (schedules[0]?.[0].startsWith("แมสเลย")) {
+    if (times.length) return invalid;
     return {
       ok: true,
       command: {
@@ -78,18 +64,18 @@ export function parseMessengerCommand(
         scheduleType: "Immediate",
       },
     };
-  const time = /^(?:(วันนี้|พรุ่งนี้|แมส)\s+)?(\d{1,2})[.:](\d{2})(?!\S)/.exec(
-    scheduleText,
-  );
-  if (!time || Number(time[2]) > 23 || Number(time[3]) > 59) return invalid;
-  const day = time[1] === "พรุ่งนี้" ? shiftDay(today, 1) : today;
+  }
+  if (times.length !== 1) return invalid;
+  const time = times[0]!;
+  if (Number(time[1]) > 23 || Number(time[2]) > 59) return invalid;
+  const day = schedules[0]?.[0] === "พรุ่งนี้" ? shiftDay(today, 1) : today;
   return {
     ok: true,
     command: {
       type: "mess-register",
       productId: ids[0]![0],
       scheduledAt: new Date(
-        `${day}T${time[2]!.padStart(2, "0")}:${time[3]}:00+07:00`,
+        `${day}T${time[1]!.padStart(2, "0")}:${time[2]}:00+07:00`,
       ).toISOString(),
       scheduleType: "Scheduled",
     },

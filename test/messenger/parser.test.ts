@@ -115,7 +115,6 @@ it.each([
   "/mess 14:60 A-1",
   "/mess 14:30 15:00 A-1",
   "/mess 14:30 พรุ่งนี้ 14:00 A-1",
-  "/mess A-1\nappointment 14:30",
 ])("rejects invalid or ambiguous bare times: %s", (text) => {
   expect(parseMessengerCommand(text, ts)).toMatchObject({ ok: false });
 });
@@ -164,7 +163,6 @@ it.each([
   "/mess A-1\nแมส 14.30 15:00",
   "/mess A-1\nแมส 14.30\nพรุ่งนี้ 15:00",
   "/mess 14.30 พรุ่งนี้ 15:00 A-1",
-  "/mess A-1\nค่าแมส 14.30",
   "/mess A-1\nโทร 080 2892464",
 ])("rejects invalid or conflicting staff courier times: %s", (text) => {
   expect(parseMessengerCommand(text, ts)).toMatchObject({ ok: false });
@@ -174,4 +172,30 @@ it("keeps explicit day and time on separate lines supported", () => {
     ok: true,
     command: { scheduledAt: "2026-11-14T07:30:00.000Z" },
   });
+});
+
+it.each([
+  "/mess\nแมสออก 14:30 ค่า\nA-12676\nส่ง ผู้รับ\nHotel\nสุขุมวิทซอย 24\nเบอร์ 0615044426",
+  "/mess A-12676\nนัดแมส 14.30",
+  "/mess A-12676\nappointment 14:30",
+  "/mess A-12676\n14:30 ส่งปลายทาง",
+])("defaults varied wording to today: %s", (text) => {
+  expect(parseMessengerCommand(text, ts)).toMatchObject({
+    ok: true,
+    command: {
+      productId: "A-12676",
+      scheduledAt: "2026-11-13T07:30:00.000Z",
+      scheduleType: "Scheduled",
+    },
+  });
+});
+it.each([
+  "/mess พรุ่งนี้ แมสเลย A-1",
+  "/mess แมสเลย พรุ่งนี้ A-1",
+  "/mess แมสเลย 14:30 A-1",
+  "/mess A-1\nแมสออก 14:30\nอีกเวลา 15.30",
+  "/mess A-1\nออก 24:00",
+  "/mess A-1\nเบอร์ 061.50.44.426\nบ้านเลขที่ 165/27",
+])("rejects conflicting or missing schedules in varied wording: %s", (text) => {
+  expect(parseMessengerCommand(text, ts)).toMatchObject({ ok: false });
 });

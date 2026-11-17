@@ -257,7 +257,7 @@ it("registers through sanitized Workflow handoff and retains completed items aft
   });
   expect(tasks[0]!.fields["Completed At"]).not.toBe(completedAt);
   await command(
-    "/mess\nรหัส A-12676\n🛵 แมส 14.30 ค่าแมสปลายทาง\n065 663 5369\nSTAY Hotel",
+    "/mess\nรหัส A-12676\n🛵 แมสออก 14.30 ค่าแมสปลายทาง\n065 663 5369\nSTAY Hotel",
   );
   expect(tasks.at(-1)!.fields).toMatchObject({
     "Product ID": "A-12676",
