@@ -1,3 +1,4 @@
+import { parseConfig } from "../../src/config";
 import { acquireOrResumeJob } from "../../src/db/publication-repository";
 import { NonRetryableError } from "cloudflare:workflows";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
@@ -35,7 +36,7 @@ import { OperationalError } from "../../src/shared/errors";
 import { createTestEnv, testEnv } from "../helpers/env";
 
 const params = { publicationRunId: "rec-run-1", trigger: "admin" as const };
-const deps = { config: { publicationRetryLimit: 5 } } as PublicationServiceDeps;
+const deps = { config: { ...parseConfig(JSON.parse(createTestEnv().APP_CONFIG_JSON)), publicationRetryLimit: 5 }, notify:vi.fn().mockResolvedValue(undefined) } as unknown as PublicationServiceDeps;
 const validated = {
   run: {
     airtableRunId: "rec-run-1",
@@ -91,12 +92,12 @@ describe("runPublicationWorkflow", () => {
       value: validated,
     });
     stages.recoverPublicationFinalization.mockResolvedValue(null);
-    stages.notifyPublicationValidationFailure.mockResolvedValue(undefined);
+    stages.notifyPublicationValidationFailure.mockImplementation(async d=>d.notify('validation failed',undefined,'validation_failed'));
     stages.preparePublicationOutputs.mockResolvedValue(prepared);
     stages.ensureTemporaryDocument.mockResolvedValue("temp-doc-1");
     stages.fillAndVerifyDocument.mockResolvedValue(undefined);
     stages.finalizePublication.mockResolvedValue(result);
-    stages.notifyPublicationSuccess.mockResolvedValue(undefined);
+    stages.notifyPublicationSuccess.mockImplementation(async d=>d.notify('success',undefined,'success'));
     stages.failPublicationAfterExhaustion.mockResolvedValue(undefined);
   });
 
@@ -114,10 +115,11 @@ describe("runPublicationWorkflow", () => {
       "ensure temporary document",
       "fill and verify document",
       "finalize publication",
+      "prepare notify publication success",
       "notify publication success",
     ]);
-    for (const [, options] of step.do.mock.calls) {
-      expect(options).toEqual({
+    for (const [name, options] of step.do.mock.calls) {
+      expect(options).toEqual(String(name).includes("notify") ? {retries:{limit:2,delay:"1 second"},timeout:"1 minute"} : {
         retries: { limit: 5, delay: "10 seconds", backoff: "exponential" },
         timeout: "5 minutes",
       });
@@ -143,7 +145,7 @@ describe("runPublicationWorkflow", () => {
       "temp-doc-1",
     );
     expect(stages.notifyPublicationSuccess).toHaveBeenCalledWith(
-      deps,
+      expect.objectContaining({config:deps.config,notify:expect.any(Function)}),
       prepared,
       result,
     );
@@ -192,7 +194,7 @@ describe("runPublicationWorkflow", () => {
       expect(stages[stage]).toHaveBeenCalledTimes(6);
       expect(
         stages.failPublicationAfterExhaustion,
-      ).toHaveBeenCalledExactlyOnceWith(deps, "rec-run-1", reason, displayDate);
+      ).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({config:deps.config,notify:expect.any(Function)}), "rec-run-1", reason, displayDate);
       expect(step.do.mock.calls.at(-1)?.slice(0, 2)).toEqual([
         "record exhausted publication failure",
         {
@@ -227,7 +229,7 @@ describe("runPublicationWorkflow", () => {
     expect(
       stages.failPublicationAfterExhaustion,
     ).toHaveBeenCalledExactlyOnceWith(
-      deps,
+      expect.objectContaining({config:deps.config,notify:expect.any(Function)}),
       "rec-run-1",
       "Unable to create the temporary Google document.",
       "2 กันยายน 2569",
@@ -313,18 +315,18 @@ describe("runPublicationWorkflow", () => {
         await expect(outcome).rejects.toBeInstanceOf(NonRetryableError);
       else if (failureKind)
         await expect(outcome).rejects.toThrow(
-          new Error("Unable to send the publication validation notification."),
+          new Error("Unable to prepare publication notification."),
         );
       else await expect(outcome).resolves.toBeNull();
 
       expect(stages.notifyPublicationValidationFailure).toHaveBeenCalledWith(
-        deps,
+        expect.objectContaining({config:deps.config,notify:expect.any(Function)}),
         "rec-run-1",
         "2 กันยายน 2569",
         validation,
       );
       expect(stages.notifyPublicationValidationFailure).toHaveBeenCalledTimes(
-        failureKind === "transient" ? 6 : 1,
+        failureKind === "transient" ? 3 : 1,
       );
       expect(stages.preparePublicationOutputs).not.toHaveBeenCalled();
       expect(stages.failPublicationAfterExhaustion).not.toHaveBeenCalled();
@@ -345,12 +347,12 @@ describe("runPublicationWorkflow", () => {
           deps,
         ),
       ).rejects.toMatchObject({
-        message: "Unable to send the publication success notification.",
+        message: "Unable to prepare publication notification.",
       });
 
       expect(stages.finalizePublication).toHaveBeenCalledTimes(1);
       expect(stages.notifyPublicationSuccess).toHaveBeenCalledTimes(
-        retryable ? 6 : 1,
+        retryable ? 3 : 1,
       );
       expect(stages.failPublicationAfterExhaustion).not.toHaveBeenCalled();
     },
@@ -373,10 +375,11 @@ describe("runPublicationWorkflow", () => {
           deps,
         ),
       ).rejects.toMatchObject({
-        message: "Unable to record the publication failure.",
+        message: "Unable to fill or verify the Google document.",
       });
 
       expect(stages.fillAndVerifyDocument).toHaveBeenCalledTimes(6);
+      expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining('ยังยืนยันสถานะ'),expect.objectContaining({type:'bubble'}),'unconfirmed');
       expect(stages.failPublicationAfterExhaustion).toHaveBeenCalledTimes(
         retryable ? 6 : 1,
       );
@@ -472,9 +475,27 @@ describe("runPublicationWorkflow", () => {
     expect(stages.validatePublication).not.toHaveBeenCalled();
     expect(stages.fillAndVerifyDocument).not.toHaveBeenCalled();
     expect(stages.notifyPublicationSuccess).toHaveBeenCalledWith(
-      deps,
+      expect.objectContaining({config:deps.config,notify:expect.any(Function)}),
       recovered,
       result,
     );
   });
+});
+
+it('retries only enqueue after a lost D1 response using the frozen terminal snapshot',async()=>{
+ vi.clearAllMocks();
+ const {createLineReplyRepository}=await import('../../src/db/line-reply-repository');
+ const id=crypto.randomUUID(); const repo=createLineReplyRepository(testEnv().DB,{now:()=>new Date()});
+ let attempts=0;
+ const notify=async(text:string)=>{
+   attempts++;
+   await repo.enqueueResult({resultKey:id,groupId:id,result:{schemaVersion:1,kind:'publication',runId:id,generation:1,notificationCycle:1,outcome:'success',messages:[{type:'text',text}]}});
+   if(attempts===1)throw new Error('response lost after commit');
+ };
+ stages.recoverPublicationFinalization.mockResolvedValue({result,thaiDate:'original date'});
+ stages.notifyPublicationSuccess.mockImplementation(async d=>d.notify('original result'));
+ await expect(runPublicationWorkflow(params,retryingStep() as unknown as WorkflowStep,{...deps,notify})).resolves.toEqual(result);
+ expect(attempts).toBe(2);expect((await repo.head(id))?.result.messages).toEqual([{type:'text',text:'original result'}]);
+ expect(stages.notifyPublicationSuccess).toHaveBeenCalledTimes(1);
+ expect(stages.finalizePublication).not.toHaveBeenCalled();
 });

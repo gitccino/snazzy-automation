@@ -1,3 +1,4 @@
+import { createLineReplyRepository } from '../db/line-reply-repository';
 import {
   WorkflowEntrypoint,
   type WorkflowEvent,
@@ -10,14 +11,13 @@ import { createImportRepository } from "../db/import-repository";
 import { createSequenceRepository } from "../db/sequence-repository";
 import type { Env } from "../env";
 import { createICloudClient } from "../icloud/client";
-import { createLineClient, type LineClient } from "../line/client";
 import { isRetryable, OperationalError } from "../shared/errors";
 import { newCorrelationId } from "../shared/ids";
 import { bangkokDateTimeThai } from "../shared/time";
 import { createAirtableProductsClient } from "./airtable-products";
 import { createAssetStore } from "./asset-store";
 import { createMarkerDetector } from "./marker";
-import { sendImportSummary } from "./notify";
+import { buildImportSummaryMessage, buildImportSummaryCard } from "./notify";
 import {
   downloadAndGroupSnapshot,
   finalizeImportRun,
@@ -34,13 +34,14 @@ interface WorkflowStepLike {
   do<T>(
     name: string,
     options: {
-      retries: { limit: number; delay: "10 seconds"; backoff: "exponential" };
+      retries: { limit: number; delay: "10 seconds" | "1 second"; backoff?: "exponential" };
     },
     callback: () => Promise<T>,
   ): Promise<T>;
 }
 
 interface ImportWorkflowOperations {
+  notifyFailure?(outcome:'failed'|'unconfirmed'):Promise<void>;
   retryLimit: number;
   downloadAndGroup(): Promise<DownloadAndGroupOutcome>;
   recordRunFailure(errorCode: string): Promise<void>;
@@ -106,15 +107,19 @@ export async function runImportWorkflow(
     });
   } catch (error) {
     const errorCode = durableErrorCode(error, "download_and_group_failed");
-    await step.do("record-download-and-group-failure", retries, () =>
-      operations.recordRunFailure(errorCode),
-    );
-    throw error;
+    let outcome:'failed'|'unconfirmed'='failed';
+    let recordingFailure:unknown;
+    try { await step.do('record-download-and-group-failure', retries, () => operations.recordRunFailure(errorCode)); }
+    catch(failure) { outcome='unconfirmed'; recordingFailure=failure; }
+    if(operations.notifyFailure)await step.do('persist-import-failure',{retries:{limit:2,delay:'1 second'}},()=>operations.notifyFailure!(outcome));
+    throw recordingFailure ?? error;
   }
   const { pendingGroups, orphanRange, checkpointPosition } = downloadOutcome;
   const succeededProductIds: string[] = [];
   const failedGroups: ImportRunResult["failedGroups"] = [];
 
+  let result: ImportRunResult;
+  try {
   for (const group of pendingGroups) {
     try {
       const outcome = await step.do(
@@ -164,7 +169,7 @@ export async function runImportWorkflow(
     }
   }
 
-  const result: ImportRunResult = {
+  result = {
     importRunId: payload.importRunId,
     succeededProductIds,
     failedGroups,
@@ -177,7 +182,11 @@ export async function runImportWorkflow(
       checkpointPosition,
     ),
   );
-  await step.do("send-import-summary", retries, () =>
+  } catch(error) {
+    if(operations.notifyFailure)await step.do('persist-import-failure',{retries:{limit:2,delay:'1 second'}},()=>operations.notifyFailure!('unconfirmed'));
+    throw error;
+  }
+  await step.do("send-import-summary", {retries:{limit:2,delay:"1 second"}}, () =>
     operations.notify(result, orphanRange),
   );
   return result;
@@ -232,11 +241,12 @@ export class ImportWorkflow extends WorkflowEntrypoint<
       productIdPrefix: config.productIdPrefix,
       assetUrlTtlSeconds: 300,
     };
-    const line: LineClient = createLineClient({
-      channelAccessToken: this.env.LINE_CHANNEL_ACCESS_TOKEN,
-      fetch: fetcher,
-    });
-
+    const outbox=createLineReplyRepository(this.env.DB,clock);
+    const notificationDate=await step.do('terminal-display-date',()=>Promise.resolve(bangkokDateTimeThai(clock)));
+    const enqueue=async(outcome:'success'|'partial'|'failed'|'unconfirmed',messages:import('../line/reply-types').LineReplyMessage[])=>{
+      if(!context.replyGroupId)return;
+      await outbox.enqueueResult({groupId:context.replyGroupId,resultKey:JSON.stringify(['import',event.payload.importRunId,1,1,'terminal']),result:{schemaVersion:1,kind:'import',runId:event.payload.importRunId,generation:1,notificationCycle:1,outcome,messages}});
+    };
     return runImportWorkflow(
       deps,
       event.payload,
@@ -263,22 +273,10 @@ export class ImportWorkflow extends WorkflowEntrypoint<
             checkpointPosition,
           ),
         notify: async (result, orphanRange) => {
-          if (!context.replyGroupId) return;
-          try {
-            await sendImportSummary(
-              line,
-              context.replyGroupId,
-              {
-                result,
-                orphanRange,
-                nowThaiText: bangkokDateTimeThai(clock),
-              },
-              config.publicBaseUrl,
-            );
-          } catch {
-            console.error("import_notification_failed");
-          }
+          const input={result,orphanRange,nowThaiText:notificationDate};
+          await enqueue(result.failedGroups.length?'partial':'success',[{type:'flex',altText:buildImportSummaryMessage(input).slice(0,1500).replace(/[\uD800-\uDBFF]$/,''),contents:buildImportSummaryCard(input,config.publicBaseUrl)}]);
         },
+        notifyFailure: async outcome=>enqueue(outcome,[{type:'text',text:`⚠️ ยังยืนยันผลการนำเข้าสินค้าไม่ได้ กรุณาตรวจสอบก่อนส่ง /upload ซ้ำ\n${event.payload.importRunId}`}]),
       },
     );
   }

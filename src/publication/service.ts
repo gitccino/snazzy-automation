@@ -92,7 +92,7 @@ export interface PublicationServiceDeps {
   imageExecutionStatus?(
     workflowId: string,
   ): Promise<"active" | "terminal" | "unknown">;
-  notify(text: string, contents?: Record<string, unknown>): Promise<void>;
+  notify(text: string, contents?: Record<string, unknown>, outcome?: import('../line/reply-types').TerminalResultV1['outcome']): Promise<void>;
 }
 
 export interface ValidatedPublication {
@@ -346,7 +346,7 @@ export async function notifyPublicationValidationFailure(
     },
     deps.config.publicBaseUrl,
   );
-  await deps.notify(card.text, card.contents);
+  await deps.notify(card.text, card.contents, 'validation_failed');
 }
 
 async function ensureCollage(
@@ -733,7 +733,7 @@ export async function notifyPublicationSuccess(
     },
     deps.config.publicBaseUrl,
   );
-  await deps.notify(card.text, card.contents);
+  await deps.notify(card.text, card.contents, 'success');
 }
 
 /** Called only by the owning Workflow after exhaustion, with a sanitized human-readable reason. */
@@ -821,5 +821,5 @@ export async function failPublicationAfterExhaustion(
     },
     deps.config.publicBaseUrl,
   );
-  await deps.notify(card.text, card.contents);
+  await deps.notify(card.text, card.contents, 'failed');
 }

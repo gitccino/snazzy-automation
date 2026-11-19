@@ -1,3 +1,4 @@
+import { validateReplyMessages } from '../line/client';
 import type { Clock } from '../shared/time';
 import type { LineReplyMessage, RejectionDisposition, TerminalResultV1 } from '../line/reply-types';
 
@@ -22,6 +23,8 @@ export function createLineReplyRepository(db: D1Database, clock: Clock) {
   }
   return {
     async enqueueResult({ resultKey, groupId, result }: { resultKey: string; groupId: string; result: TerminalResultV1 }) {
+      validateReplyMessages(result.messages);
+      if(result.schemaVersion!==1 || !groupId.trim() || !resultKey.trim() || !result.runId.trim() || !Number.isSafeInteger(result.generation) || result.generation<1 || !Number.isSafeInteger(result.notificationCycle) || result.notificationCycle<1)throw new Error('outbox_invalid_result');
       const json = JSON.stringify(result);
       await db.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at) VALUES(?,?,?,?) ON CONFLICT(result_key) DO NOTHING`)
         .bind(resultKey, groupId, json, now()).run();

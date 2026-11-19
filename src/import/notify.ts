@@ -1,7 +1,7 @@
 import type { LineClient } from "../line/client";
 import type { ImportRunResult, OrphanRange } from "./types";
 
-interface ImportSummaryInput {
+export interface ImportSummaryInput {
   result: ImportRunResult;
   orphanRange: OrphanRange | null;
   nowThaiText: string;

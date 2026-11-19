@@ -13,7 +13,10 @@ import { resolvePublicationContext } from "../settings/runtime";
 import type { OperationContext } from "../settings/schema";
 import type { Env } from "../env";
 import { createAssetStore } from "../import/asset-store";
-import { createLineClient } from "../line/client";
+import { createLineReplyRepository } from '../db/line-reply-repository';
+import { readPublicationJob } from '../db/publication-repository';
+import { docsWorkflowFailureCard } from '../line/docs-summary-card';
+import type { TerminalResultV1 } from '../line/reply-types';
 import { OperationalError } from "../shared/errors";
 import type { Clock } from "../shared/time";
 import {
@@ -35,13 +38,10 @@ function depsFor(
   env: Env,
   clock: Clock,
   context: OperationContext,
+  identity:{runId:string;generation:number;notificationCycle:number},
 ): PublicationServiceDeps {
   const config = context.settings.config;
   const fetcher = fetch.bind(globalThis);
-  const line = createLineClient({
-    channelAccessToken: env.LINE_CHANNEL_ACCESS_TOKEN,
-    fetch: fetcher,
-  });
   let anthropic: Anthropic | undefined;
   return {
     db: env.DB,
@@ -92,13 +92,10 @@ function depsFor(
       clientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
       refreshToken: env.GOOGLE_REFRESH_TOKEN,
     },
-    notify: async (text, contents) => {
-      if (!context.replyGroupId) return;
-      try {
-        await line.pushMessage(context.replyGroupId, text, contents);
-      } catch {
-        console.error("publication_notification_failed");
-      }
+    notify: async (text, contents, outcome='success') => {
+      if(!context.replyGroupId)return;
+      const result:TerminalResultV1={schemaVersion:1,kind:'publication',...identity,outcome,messages:[contents?{type:'flex',altText:text.slice(0,1500).replace(/[\uD800-\uDBFF]$/,''),contents}:{type:'text',text}]};
+      await createLineReplyRepository(env.DB,clock).enqueueResult({groupId:context.replyGroupId,resultKey:JSON.stringify(['publication',identity.runId,identity.generation,identity.notificationCycle,'terminal']),result});
     },
   };
 }
@@ -150,6 +147,36 @@ export async function runPublicationWorkflow(
   const runId = params.publicationRunId;
   const generation = params.generation ?? 1;
   const generationArgs: [number?] = generation === 1 ? [] : [generation];
+  const persistenceOptions={retries:{limit:2,delay:'1 second' as const},timeout:'1 minute' as const};
+  async function persistPreparedNotice(name:string,render:(renderDeps:PublicationServiceDeps)=>Promise<void>) {
+    const json=await step.do(`prepare ${name}`,persistenceOptions,()=>workflowCall('Unable to prepare publication notification.',async()=>{
+      let notice:{text:string;contents?:Record<string,unknown>;outcome?:TerminalResultV1['outcome']}|null=null;
+      await render({...deps,notify:async(text,contents,outcome)=>{notice={text,...(contents?{contents}:{}),...(outcome?{outcome}:{})};}});
+      return JSON.stringify(notice);
+    }));
+    const notice=JSON.parse(json) as {text:string;contents?:Record<string,unknown>;outcome?:TerminalResultV1['outcome']}|null;
+    if(notice)await step.do(name,persistenceOptions,()=>deps.notify(notice.text,notice.contents,notice.outcome));
+  }
+  async function recordFailure(reason:string,displayDate:string|null) {
+    type Notice={text:string;contents?:Record<string,unknown>;outcome:TerminalResultV1['outcome']};
+    let noticeJson:string;
+    try {
+      noticeJson=await step.do('record exhausted publication failure',retries,()=>workflowCall('Unable to record the publication failure.',async()=>{
+        let intent:Notice|null=null;
+        await failPublicationAfterExhaustion({...deps,notify:async(text,contents)=>{intent={text,...(contents?{contents}:{}),outcome:'failed'};}},runId,reason,displayDate,...generationArgs);
+        return JSON.stringify(intent);
+      }));
+    } catch(recordingError) {
+      if(isContenderRejection(recordingError))throw recordingError;
+      console.error('publication_failure_recording_unconfirmed',{runId,generation,code:recordingError instanceof OperationalError?recordingError.code:'failure_recording_failed'});
+      noticeJson=await step.do('prepare unconfirmed publication notice',persistenceOptions,async()=>{
+        const card=docsWorkflowFailureCard({thaiDate:displayDate??'ไม่สามารถอ่านวันที่รายการได้',reason:'ยังยืนยันสถานะงานเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ',airtableRunUrl:`https://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`},deps.config.publicBaseUrl);
+        return JSON.stringify({text:card.text,contents:card.contents,outcome:'unconfirmed'} satisfies Notice);
+      });
+    }
+    const notice=JSON.parse(noticeJson) as Notice|null;
+    if(notice)await step.do('persist publication failure',persistenceOptions,()=>deps.notify(notice.text,notice.contents,notice.outcome));
+  }
   let recovered: Awaited<ReturnType<typeof recoverPublicationFinalization>>;
   try {
     recovered = await step.do("recover finalization", retries, () =>
@@ -159,25 +186,11 @@ export async function runPublicationWorkflow(
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
-    await step.do("record exhausted publication failure", retries, () =>
-      workflowCall("Unable to record publication failure.", () =>
-        failPublicationAfterExhaustion(
-          deps,
-          runId,
-          "Unable to finalize the publication.",
-          null,
-          ...generationArgs,
-        ),
-      ),
-    );
+    await recordFailure("Unable to finalize the publication.",null);
     throw error;
   }
   if (recovered) {
-    await step.do("notify publication success", retries, () =>
-      workflowCall("Unable to send publication success notification.", () =>
-        notifyPublicationSuccess(deps, recovered, recovered.result),
-      ),
-    );
+    await persistPreparedNotice('notify publication success',renderDeps=>notifyPublicationSuccess(renderDeps,recovered,recovered.result));
     return recovered.result;
   }
   let validation: Awaited<ReturnType<typeof validatePublication>>;
@@ -194,33 +207,12 @@ export async function runPublicationWorkflow(
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
-    await step.do("record exhausted publication failure", retries, () =>
-      workflowCall("Unable to record the publication failure.", () =>
-        failPublicationAfterExhaustion(
-          deps,
-          runId,
-          "Unable to read or validate publication data.",
-          null,
-          ...generationArgs,
-        ),
-      ),
-    );
+    await recordFailure("Unable to read or validate publication data.",null);
     throw error;
   }
   if (validation.kind === "already_succeeded") return validation.result;
   if (validation.kind === "validation_failed") {
-    await step.do("notify validation failure", retries, () =>
-      workflowCall(
-        "Unable to send the publication validation notification.",
-        () =>
-          notifyPublicationValidationFailure(
-            deps,
-            runId,
-            validation.thaiDate,
-            validation.validation,
-          ),
-      ),
-    );
+    await persistPreparedNotice('notify validation failure',renderDeps=>notifyPublicationValidationFailure(renderDeps,runId,validation.thaiDate,validation.validation));
     return null;
   }
 
@@ -271,25 +263,11 @@ export async function runPublicationWorkflow(
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
-    await step.do("record exhausted publication failure", retries, () =>
-      workflowCall("Unable to record the publication failure.", () =>
-        failPublicationAfterExhaustion(
-          deps,
-          runId,
-          failureReason,
-          validation.value.thaiDate,
-          ...generationArgs,
-        ),
-      ),
-    );
+    await recordFailure(failureReason,validation.value.thaiDate);
     throw error;
   }
   // Notification failure must not delete or downgrade a completed document.
-  await step.do("notify publication success", retries, () =>
-    workflowCall("Unable to send the publication success notification.", () =>
-      notifyPublicationSuccess(deps, prepared, result),
-    ),
-  );
+  await persistPreparedNotice('notify publication success',renderDeps=>notifyPublicationSuccess(renderDeps,prepared,result));
   return result;
 }
 
@@ -319,10 +297,15 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
       { retries: { limit: 0, delay: "1 second" } },
       () => resolvePublicationContext(this.env, event.payload),
     );
+    const identity=await step.do('notification-identity',{retries:{limit:0,delay:'1 second'}},async()=>{
+      const job=await readPublicationJob(this.env.DB,event.payload.publicationRunId);
+      if(!job || job.generation!==generation)throw new NonRetryableError('Publication identity unavailable','publication_generation_stale');
+      return {runId:event.payload.publicationRunId,generation,notificationCycle:job.notificationCycle};
+    });
     return runPublicationWorkflow(
       event.payload,
       step,
-      depsFor(this.env, { now: () => new Date() }, context),
+      depsFor(this.env, { now: () => new Date() }, context,identity),
       event.instanceId,
     );
   }

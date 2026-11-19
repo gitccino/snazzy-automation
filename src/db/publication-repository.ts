@@ -27,6 +27,7 @@ export interface PublicationJobRow {
   updatedAt: string;
   generation: number;
   successfulGeneration: number;
+  notificationCycle: number;
   finalizationJson: string | null;
 }
 
@@ -51,6 +52,7 @@ interface JobRowRaw {
   updated_at: string;
   generation: number;
   successful_generation: number;
+  notification_cycle: number;
   finalization_json: string | null;
 }
 
@@ -69,6 +71,7 @@ function toRow(raw: JobRowRaw): PublicationJobRow {
     updatedAt: raw.updated_at,
     generation: raw.generation,
     successfulGeneration: raw.successful_generation,
+    notificationCycle: raw.notification_cycle,
     finalizationJson: raw.finalization_json,
   };
 }
@@ -114,7 +117,7 @@ export async function reopenSuccessfulJobForRegeneration(
   const raw = await db
     .prepare(
       `UPDATE publication_jobs
-    SET generation = generation + 1, state = 'locked', correlation_id = ?, temp_doc_id = NULL,
+    SET generation = generation + 1, notification_cycle = 1, state = 'locked', correlation_id = ?, temp_doc_id = NULL,
         validation_result_json = NULL, finalization_json = NULL, settings_context_json = NULL, attempt_count = 0, updated_at = ?
     WHERE publication_run_id = ? AND state = 'succeeded' AND generation = ? AND successful_generation = generation
     RETURNING *`,
@@ -266,11 +269,12 @@ export async function reopenFailedJobForRestart(
   correlationId: string,
   generation = 1,
   context?: OperationContext,
+  notificationCycle = 1,
 ): Promise<boolean> {
   const result = await db
     .prepare(
-      `UPDATE publication_jobs SET settings_context_json = CASE WHEN temp_doc_id IS NULL AND finalization_json IS NULL THEN COALESCE(?, settings_context_json) ELSE settings_context_json END, state = 'locked', correlation_id = ?, updated_at = ?
-       WHERE publication_run_id = ? AND (state = 'failed' OR (state = 'validation_failed' AND ? = 1)) AND generation = ?`,
+      `UPDATE publication_jobs SET settings_context_json = CASE WHEN temp_doc_id IS NULL AND finalization_json IS NULL THEN COALESCE(?, settings_context_json) ELSE settings_context_json END, notification_cycle = notification_cycle + 1, state = 'locked', correlation_id = ?, updated_at = ?
+       WHERE publication_run_id = ? AND (state = 'failed' OR (state = 'validation_failed' AND ? = 1)) AND generation = ? AND notification_cycle = ?`,
     )
     .bind(
       context ? serializeContext(context) : null,
@@ -279,6 +283,7 @@ export async function reopenFailedJobForRestart(
       publicationRunId,
       context ? 1 : 0,
       generation,
+      notificationCycle,
     )
     .run();
   return result.meta.changes === 1;

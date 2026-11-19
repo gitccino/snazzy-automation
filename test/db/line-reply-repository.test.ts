@@ -66,3 +66,8 @@ describe('reply outbox', () => {
     expect(await prepare('g', sequence)).toBe('head_changed');
   });
 });
+it('refuses an oversized terminal bundle before inserting a poison FIFO head',async()=>{
+ const {repo,groupId}=fixture();
+ await expect(repo.enqueueResult({resultKey:groupId,groupId,result:{...result,messages:Array.from({length:6},()=>({type:'text',text:'x'}))}})).rejects.toThrow();
+ expect(await repo.head(groupId)).toBeNull();
+});

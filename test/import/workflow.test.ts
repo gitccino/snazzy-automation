@@ -107,7 +107,8 @@ describe("runImportWorkflow", () => {
     else await expect(execution).rejects.toBe(error);
     expect(process).toHaveBeenCalledTimes(1);
     expect(record).toHaveBeenCalledTimes(1);
-    expect(step.calls.every(call => call.attempts === 1)).toBe(true);
+    expect(step.calls.filter(call=>call.name!=="send-import-summary").every(call => call.attempts === 1)).toBe(true);
+    if(failure === "notify")expect(notify).toHaveBeenCalledTimes(3);
   });
 
   it("records a terminal download failure durably before stopping the workflow", async () => {
@@ -393,7 +394,7 @@ describe("runImportWorkflow", () => {
         attempts: 1,
       },
       { name: "finalize-checkpoint", options: { retries: { limit: 5, delay: "10 seconds", backoff: "exponential" } }, attempts: 1 },
-      { name: "send-import-summary", options: { retries: { limit: 5, delay: "10 seconds", backoff: "exponential" } }, attempts: 1 },
+      { name: "send-import-summary", options: { retries: { limit: 2, delay: "1 second" } }, attempts: 1 },
     ]);
     expect(events).toEqual([
       "process-g1",
@@ -482,4 +483,12 @@ describe("ignore sections workflow outcomes", () => {
     if (mixed) expect(step.calls.find(c => c.name === "process-group-row-incomplete")?.attempts).toBe(1);
     else expect(process).not.toHaveBeenCalled();
   });
+});
+
+it('records an early failure then persists its terminal notice independently', async()=>{
+ const notifyFailure=vi.fn().mockResolvedValue(undefined);
+ await expect(runImportWorkflow(processDeps(),{importRunId:'fatal',sourceAlbumId:'album',trigger:'line'},retryingStep(),{
+   retryLimit:0,downloadAndGroup:async()=>{throw new OperationalError('bad_album','bad album',false);},recordRunFailure:async()=>{},processGroupAttempt:vi.fn(),recordExhaustedFailure:vi.fn(),finalize:vi.fn(),notify:vi.fn(),notifyFailure,
+ })).rejects.toThrow();
+ expect(notifyFailure).toHaveBeenCalledWith('failed');
 });

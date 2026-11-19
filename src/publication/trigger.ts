@@ -154,6 +154,7 @@ export async function handleDocsTrigger(
       id,
       acquired.job.generation,
       context,
+      current.job.notificationCycle,
     );
     if (!reopened) {
       const raced = await acquireOrResumeJob(
