@@ -125,6 +125,10 @@ Staff may edit Status, Scheduled At, Schedule Type and Responsible Name in Airta
 
 Delivery ID, Product/Product ID, Registered At and source/reference fields remain app-managed. Product reassignment and moving delivery history between bases are outside this change. Avoid changing Status while a completion request is in flight: Airtable offers no conditional transaction against manual editors.
 
+## Messenger reply delivery
+
+`/mess`, `/mess-overview`, and their postback actions use LINE Reply API with the event's single-use reply token. They never fall back to push messages or send retry notices. Preparation and delivery are attempted once so an expired token or uncertain response cannot cause a duplicate send. The event is claimed before the outbound reply; an interruption after that claim may leave no visible reply even if no message reached LINE. Ask for a fresh `/mess-overview` to check the current Airtable state. Before repeating `/mess`, check for an existing delivery; registration deduplication remains in effect. All immediate commands now share the fenced Reply API sender. Import/publication final results use the separate [reply outbox](line-reply-outbox.md); messenger postbacks do not drain it.
+
 ## Interrupted or uncertain writes
 
 Airtable owns task status. D1 `messenger_write_intents` records immutable write payloads and phases (`prepared`, `dispatched`, `observed`), not an independently editable copy of Pending/Done. `messenger_action_tokens` binds buttons to task/group/day/page/connection.

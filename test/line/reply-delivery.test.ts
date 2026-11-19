@@ -45,3 +45,21 @@ it('full five-message command leaves indivisible result pending',async()=>{
  const h=await fixture();await deliverEventReply({...h.input,commandReply:{kind:'buttons',text:'x'.repeat(15001),approveData:'yes',rejectData:'no'}},h.deps);
  expect(h.requests[0].body.messages).toHaveLength(5);expect(await h.repo.head(h.groupId)).toMatchObject({state:'pending'});
 });
+it('receipt-write exhaustion never repeats LINE or releases dispatched evidence',async()=>{
+ const h=await fixture();let attempts=0;
+ const deps={...h.deps,repo:{...h.repo,accept:async()=>{attempts++;throw new Error('D1 unavailable');}}};
+ await expect(deliverEventReply(h.input,deps)).rejects.toThrow('D1 unavailable');
+ expect(attempts).toBe(3);expect(h.requests).toHaveLength(1);expect(await h.repo.head(h.groupId)).toMatchObject({state:'dispatched'});
+ await deliverEventReply({...h.input,eventId:crypto.randomUUID()},h.deps);
+ expect(h.requests).toHaveLength(1);
+});
+it('allowlist removal after reservation cancels only the unsent prepared reservation',async()=>{
+ const h=await fixture();let checks=0;
+ await deliverEventReply(h.input,{...h.deps,isGroupAllowed:async()=>++checks===1});
+ expect(h.requests).toEqual([]);expect(await h.repo.head(h.groupId)).toMatchObject({state:'pending'});
+});
+it('delayed results retain original data when a later day supplies the reply token',async()=>{
+ const h=await fixture();const tomorrow=fixedClock('2026-11-20T08:00:00Z');
+ await deliverEventReply({...h.input,receivedAt:tomorrow.now().toISOString()},{...h.deps,clock:tomorrow});
+ expect(h.requests[0].body.messages).toEqual([{type:'text',text:'result'}]);
+});
