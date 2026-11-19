@@ -1,3 +1,4 @@
+import { sha256Hex } from "../shared/ids";
 import type { OperationContext } from "../settings/schema";
 import { serializeContext } from "./execution-context-repository";
 import type { Clock } from "../shared/time";
@@ -554,4 +555,22 @@ export async function admitPublicationGoogleCopy(db: D1Database, runId: string, 
   if (result.meta.changes) return true;
   const legacy = await db.prepare(`SELECT 1 FROM publication_jobs WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND correlation_id=? AND state NOT IN ('succeeded','failed','validation_failed') AND NOT EXISTS (SELECT 1 FROM publication_google_write_evidence WHERE publication_run_id=? AND generation=? AND notification_cycle=?)`).bind(runId, generation, notificationCycle, workflowId, runId, generation, notificationCycle).first();
   return !!legacy;
+}
+
+export async function claimPublicationVerification(
+  db: D1Database,
+  attempt: { runId: string; generation: number; notificationCycle: number; groupId: string },
+): Promise<{ status: "held" } | { status: "claimed"; verifierId: string; originWorkflowId: string; contextJson: string }> {
+  const key = JSON.stringify([attempt.runId, attempt.generation, attempt.notificationCycle]);
+  const verifierId = `publication-verify-${await sha256Hex(new TextEncoder().encode(key))}`;
+  const row = await db.prepare(`INSERT INTO publication_verification_claims
+    (publication_run_id, generation, notification_cycle, group_id, origin_workflow_id, context_json, verifier_id)
+    SELECT publication_run_id, generation, notification_cycle, ?, correlation_id, settings_context_json, ?
+    FROM publication_jobs WHERE publication_run_id = ? AND generation = ? AND notification_cycle = ?
+      AND json_extract(settings_context_json, '$.replyGroupId') = ?
+    ON CONFLICT(publication_run_id, generation, notification_cycle) DO NOTHING
+    RETURNING origin_workflow_id, context_json`)
+    .bind(attempt.groupId, verifierId, attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId)
+    .first<{ origin_workflow_id: string; context_json: string }>();
+  return row ? { status: "claimed", verifierId, originWorkflowId: row.origin_workflow_id, contextJson: row.context_json } : { status: "held" };
 }
