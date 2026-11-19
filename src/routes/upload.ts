@@ -9,6 +9,16 @@ import { deriveSourceAlbumId } from "../icloud/client";
 import type { ImportWorkflowParams } from "../import/types";
 import { newCorrelationId } from "../shared/ids";
 
+async function importWorkflowExists(env: Env, id: string): Promise<boolean> {
+  try {
+    const state = await (await env.IMPORT_WORKFLOW.get(id)).status();
+    if (state.status !== "unknown") return true;
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("instance.not_found")) return false;
+  }
+  throw new OperationalError("workflow_start_failed", "Import Workflow status unavailable", true);
+}
+
 export async function handleUploadTrigger(
   env: Env,
   trigger: "cron" | "line" | "admin",
@@ -56,6 +66,10 @@ async function startImport(
   ) {
     return Response.json({ status: "started", importRunId }, { status: 202 });
   }
+  const workflowInstanceId = `import-${importRunId}`;
+  if (existing?.status === "running" && await importWorkflowExists(env, workflowInstanceId)) {
+    return Response.json({ status: "started", importRunId, workflowInstanceId }, { status: 202 });
+  }
   // The partial unique index arbitrates concurrent triggers; a preflight read cannot.
   try {
     if (existing?.status === "start_failed") {
@@ -73,6 +87,7 @@ async function startImport(
     }
     throw error;
   }
+  let uncertainStart = false;
   try {
     const acceptedContext = await saveImportContextIfAbsent(
       env.DB,
@@ -85,22 +100,31 @@ async function startImport(
       trigger,
       context: acceptedContext,
     };
-    let workflowInstanceId = `import-${importRunId}`;
+    let acceptedInstanceId = workflowInstanceId;
     if (requestId === undefined) {
       const instance = await env.IMPORT_WORKFLOW.create({
         id: workflowInstanceId,
         params,
       });
-      workflowInstanceId = instance.id;
-    } else
-      await env.IMPORT_WORKFLOW.createBatch([
-        { id: workflowInstanceId, params },
-      ]);
+      acceptedInstanceId = instance.id;
+    } else {
+      try {
+        await env.IMPORT_WORKFLOW.createBatch([{ id: workflowInstanceId, params }]);
+      } catch {
+        uncertainStart = true;
+        if (await importWorkflowExists(env, workflowInstanceId)) {
+          return Response.json({ status: "started", importRunId, workflowInstanceId }, { status: 202 });
+        }
+        uncertainStart = false;
+        throw new Error("workflow_start_failed");
+      }
+    }
     return Response.json(
-      { status: "started", importRunId, workflowInstanceId },
+      { status: "started", importRunId, workflowInstanceId: acceptedInstanceId },
       { status: 202 },
     );
-  } catch {
+  } catch (error) {
+    if (uncertainStart) throw error;
     await repo.markImportRunStartFailed(importRunId);
     if (requestId !== undefined)
       throw new OperationalError(
