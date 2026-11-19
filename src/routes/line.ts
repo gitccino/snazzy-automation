@@ -278,12 +278,13 @@ export async function createWebhookDeps(
     repo,
     audit: createAuditLog(env.DB, ids, clock),
     inventory,
-    async triggerUpload() {
+    async triggerUpload(trustedEventId) {
       const response = await handleUploadTrigger(
         env,
         "line",
         requestId,
         operationContext,
+        trustedEventId,
       );
       return parseUploadTriggerResponse(await response.json());
     },

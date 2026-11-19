@@ -1,3 +1,4 @@
+import { createWorkflowFeedbackRepository } from '../db/workflow-feedback';
 import { createLineReplyRepository } from '../db/line-reply-repository';
 import {
   WorkflowEntrypoint,
@@ -200,11 +201,30 @@ export class ImportWorkflow extends WorkflowEntrypoint<
     event: WorkflowEvent<ImportWorkflowParams>,
     step: WorkflowStep,
   ): Promise<ImportRunResult> {
-    const context = await step.do(
-      "settings-context",
-      { retries: { limit: 0, delay: "1 second" } },
-      () => resolveImportContext(this.env, event.payload),
-    );
+    let context;
+    try {
+      context = await step.do(
+        "settings-context",
+        { retries: { limit: 0, delay: "1 second" } },
+        () => resolveImportContext(this.env, event.payload),
+      );
+    } catch (error) {
+      const { trigger, trustedEventId, replyGroupId, importRunId } = event.payload;
+      if (trigger === 'line' && trustedEventId && replyGroupId) {
+        try {
+          await step.do('setup-failure-notice', async () => {
+            const attempt = { kind: 'import' as const, runId: importRunId, generation: 1, notificationCycle: 1, groupId: replyGroupId };
+            if (!await createWorkflowFeedbackRepository(this.env.DB).lookupTrustedEarlyFailure(attempt, trustedEventId)) return;
+            await createLineReplyRepository(this.env.DB, { now: () => new Date() }).enqueueResult({
+              groupId: replyGroupId,
+              resultKey: JSON.stringify(['import', importRunId, 1, 1, 'terminal']),
+              result: { schemaVersion: 1, kind: 'import', runId: importRunId, generation: 1, notificationCycle: 1, outcome: 'unconfirmed', messages: [{ type: 'text', text: `⚠️ ยังยืนยันผลการนำเข้าสินค้าไม่ได้ กรุณาตรวจสอบก่อนส่ง /upload ซ้ำ\n${importRunId}` }] },
+            });
+          });
+        } catch { /* Preserve the setup failure. */ }
+      }
+      throw error;
+    }
     const config = context.settings.config;
     const clock = { now: () => new Date() };
     const ids = { next: () => newCorrelationId() };

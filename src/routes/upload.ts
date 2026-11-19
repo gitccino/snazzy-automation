@@ -24,10 +24,11 @@ export async function handleUploadTrigger(
   trigger: "cron" | "line" | "admin",
   requestId?: string,
   context?: OperationContext,
+  trustedEventId?: string,
 ): Promise<Response> {
   try {
     context ??= await captureOperationContext(env, null);
-    return await startImport(env, trigger, requestId, context);
+    return await startImport(env, trigger, requestId, context, trustedEventId);
   } catch (error) {
     if (requestId !== undefined) throw error;
     return Response.json({ status: "import_trigger_failed" }, { status: 500 });
@@ -39,6 +40,7 @@ async function startImport(
   trigger: "cron" | "line" | "admin",
   requestId?: string,
   context?: OperationContext,
+  trustedEventId?: string,
 ): Promise<Response> {
   if (!(await createSequenceRepository(env.DB).isBootstrapped("product_id"))) {
     return Response.json(
@@ -99,6 +101,7 @@ async function startImport(
       sourceAlbumId,
       trigger,
       context: acceptedContext,
+      ...(trigger === "line" && trustedEventId && acceptedContext.replyGroupId ? { trustedEventId, replyGroupId: acceptedContext.replyGroupId } : {}),
     };
     let acceptedInstanceId = workflowInstanceId;
     if (requestId === undefined) {

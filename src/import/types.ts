@@ -6,6 +6,8 @@ export interface ImportWorkflowParams {
   sourceAlbumId: string;
   trigger: "cron" | "line" | "admin";
   context?: OperationContext;
+  trustedEventId?: string;
+  replyGroupId?: string;
 }
 
 export type ProductGroupState =

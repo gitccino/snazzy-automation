@@ -35,7 +35,7 @@ export interface ReadOnlyDeps {
   retryTransientErrors?: boolean;
   inventory: Pick<InventoryClient, "findByProductId" | "listSalesForDay">;
   clock: Clock;
-  triggerUpload(): Promise<UploadTriggerResult>;
+  triggerUpload(trustedEventId?: string): Promise<UploadTriggerResult>;
   triggerDocs(publicationDate?: string, trustedEventId?: string): Promise<DocsTriggerResult>;
 }
 
@@ -270,7 +270,7 @@ export async function handleReadOnlyCommand(
     return product ? searchCard(product, deps.publicBaseUrl) : notFoundText(command.productId);
   }
   if (command.type === "upload") {
-    const result = await deps.triggerUpload();
+    const result = await deps.triggerUpload(trustedEventId);
     if (deps.retryTransientErrors && (result.status === "workflow_start_failed" || result.status === "import_trigger_failed")) {
       throw new OperationalError(result.status, "Import trigger failed", true);
     }
