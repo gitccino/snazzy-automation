@@ -15,6 +15,7 @@ import type { Env } from "../env";
 import { createAssetStore } from "../import/asset-store";
 import { createLineReplyRepository } from '../db/line-reply-repository';
 import { readPublicationJob } from '../db/publication-repository';
+import { createWorkflowFeedbackRepository } from '../db/workflow-feedback';
 import { docsUnconfirmedCard } from '../line/docs-summary-card';
 import type { TerminalResultV1 } from '../line/reply-types';
 import { OperationalError } from "../shared/errors";
@@ -299,11 +300,41 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
         "publication_generation_stale",
       );
     }
-    const context = await step.do(
-      "settings-context",
-      { retries: { limit: 0, delay: "1 second" } },
-      () => resolvePublicationContext(this.env, event.payload),
-    );
+    let context;
+    try {
+      context = await step.do(
+        "settings-context",
+        { retries: { limit: 0, delay: "1 second" } },
+        () => resolvePublicationContext(this.env, event.payload),
+      );
+    } catch (error) {
+      if (event.payload.trigger === 'line') {
+        try {
+          await step.do('setup-failure-notice', async () => {
+            const runId = event.payload.publicationRunId;
+            const job = await readPublicationJob(this.env.DB, runId);
+            if (!job || job.generation !== generation || job.correlationId !== event.instanceId || event.instanceId !== publicationWorkflowId(runId, generation)) return;
+            const bindings = await this.env.DB.prepare('SELECT event_id, group_id FROM publication_regeneration_events WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND workflow_id=?')
+              .bind(runId, generation, job.notificationCycle, event.instanceId).all<{event_id:string;group_id:string | null}>();
+            if (bindings.results.length !== 1 || !bindings.results[0]?.group_id) return;
+            const binding = bindings.results[0];
+            const attempt = {kind:'publication' as const, runId, generation, notificationCycle:job.notificationCycle, groupId:binding.group_id!};
+            if (!await createWorkflowFeedbackRepository(this.env.DB).lookupTrustedEarlyFailure(attempt, binding.event_id)) return;
+            const result = {schemaVersion:1,kind:'publication',runId,generation,notificationCycle:job.notificationCycle,outcome:'unconfirmed',messages:[{type:'text',text:`⚠️ ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${runId}`}]};
+            await this.env.DB.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at)
+              SELECT ?,?,?,? WHERE EXISTS (SELECT 1 FROM publication_jobs j JOIN publication_regeneration_events e ON e.publication_run_id=j.publication_run_id JOIN line_command_ingress i ON i.event_id=e.event_id
+                WHERE j.publication_run_id=? AND j.generation=? AND j.notification_cycle=? AND j.correlation_id=?
+                AND e.event_id=? AND e.generation=j.generation AND e.notification_cycle=j.notification_cycle AND e.workflow_id=j.correlation_id
+                AND e.group_id=? AND i.group_id=e.group_id AND e.ingress_operation=i.operation AND json_extract(i.operation,'$.type')='docs'
+                AND json_extract(j.settings_context_json,'$.replyGroupId')=i.group_id
+                AND (SELECT count(*) FROM publication_regeneration_events WHERE publication_run_id=j.publication_run_id AND generation=j.generation AND notification_cycle=j.notification_cycle AND workflow_id=j.correlation_id)=1)
+              ON CONFLICT(result_key) DO NOTHING`)
+              .bind(JSON.stringify(['publication',runId,generation,job.notificationCycle,'terminal']),attempt.groupId,JSON.stringify(result),new Date().toISOString(),runId,generation,job.notificationCycle,event.instanceId,binding.event_id,attempt.groupId).run();
+          });
+        } catch { /* Preserve the setup failure. */ }
+      }
+      throw error;
+    }
     const identity=await step.do('notification-identity',{retries:{limit:0,delay:'1 second'}},async()=>{
       const job=await readPublicationJob(this.env.DB,event.payload.publicationRunId);
       if(!job || job.generation!==generation)throw new NonRetryableError('Publication identity unavailable','publication_generation_stale');
