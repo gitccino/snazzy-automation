@@ -140,7 +140,7 @@ function webhookSetup() {
   return { ...h, d, message, line };
 }
 
-it("attempts later events despite reply failure and retries the stored successful mutation outcome", async () => {
+it("attempts later events despite reply failure without replaying an uncertain mutation reply", async () => {
   const h = webhookSetup();
   const events = [h.message("sale", `/soldout ${h.productId} THB 100`), h.message("help", "/help")];
   h.line.sendReplyMessages.mockRejectedValueOnce(new Error("reply response lost"));
@@ -149,9 +149,9 @@ it("attempts later events despite reply failure and retries the stored successfu
   expect(h.line.replyText).not.toHaveBeenCalled();
   const saleReply = h.line.sendReplyMessages.mock.calls[0];
   await processLineEvents(events, h.d);
-  expect(h.line.sendReplyMessages.mock.calls.map(call => call[0])).toEqual(["reply-sale", "reply-help", "reply-sale"]);
+  expect(h.line.sendReplyMessages.mock.calls.map(call => call[0])).toEqual(["reply-sale", "reply-help"]);
   expect(h.line.replyText).not.toHaveBeenCalled();
-  expect(h.line.sendReplyMessages.mock.calls[2]).toEqual(saleReply);
+  expect(saleReply?.[1]).toEqual(expect.any(Array));
   expect(h.writes).toHaveLength(1);
   expect(h.line.getGroupMemberProfile).toHaveBeenCalledTimes(2);
 });
@@ -161,8 +161,8 @@ it("does not starve a later event on repeated invalid reply-token redeliveries",
   h.line.sendReplyMessages.mockImplementation(async token => { if (token === "reply-one") throw new Error("invalid reply token"); });
   const events = [h.message("one", "/help"), h.message("two", "/help")];
   await expect(processLineEvents(events, h.d)).rejects.toThrow("invalid reply token");
-  await expect(processLineEvents(events, h.d)).rejects.toThrow("invalid reply token");
-  expect(h.line.sendReplyMessages.mock.calls.map(call => call[0])).toEqual(["reply-one", "reply-two", "reply-one"]);
+  await expect(processLineEvents(events, h.d)).resolves.toBeUndefined();
+  expect(h.line.sendReplyMessages.mock.calls.map(call => call[0])).toEqual(["reply-one", "reply-two"]);
 });
 
 it.each(["soldout", "revert"] as const)("recovers completed %s when saving the delivery outcome failed", async kind => {

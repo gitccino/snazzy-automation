@@ -21,8 +21,8 @@ import { createLineClient } from "../line/client";
 import type { DocsTriggerResult, UploadTriggerResult } from "../line/search";
 import { verifyLineSignature } from "../line/signature";
 import {
-  parseSupportedLineEvents,
-  type SupportedLineEvent,
+  parseLineIngressEvents,
+  type LineIngressEvent,
 } from "../line/types";
 import type { WebhookDeps } from "../line/webhook";
 import { OperationalError } from "../shared/errors";
@@ -53,7 +53,7 @@ export function toLineDocsTriggerResult(
 }
 
 export interface LineRouteOverride {
-  process(events: SupportedLineEvent[]): Promise<void>;
+  process(events: LineIngressEvent[]): Promise<void>;
 }
 
 export async function handleLineRoute(
@@ -75,16 +75,17 @@ export async function handleLineRoute(
       headers: { "Retry-After": "60" },
     });
 
-  let events: SupportedLineEvent[];
+  let events: LineIngressEvent[];
   try {
-    events = parseSupportedLineEvents(
+    events = parseLineIngressEvents(
       JSON.parse(new TextDecoder().decode(rawBody)) as unknown,
     );
   } catch {
     return new Response("invalid payload", { status: 400 });
   }
 
-  events = events.map(sanitizeMessengerEvent);
+  events = events.map(event => event.type === "queue-trigger" ? event : sanitizeMessengerEvent(event));
+  const receivedAt = new Date().toISOString();
 
   if (override !== undefined) {
     ctx.waitUntil(override.process(events));
@@ -106,6 +107,7 @@ export async function handleLineRoute(
             id,
             params: {
               event,
+              receivedAt,
               context: { ...context, replyGroupId: event.source.groupId },
             },
           };

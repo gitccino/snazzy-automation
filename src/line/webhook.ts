@@ -138,6 +138,7 @@ export async function processLineEvents(
   const failures: unknown[] = [];
   for (const event of events) {
     let claimed = false;
+    let dispatchStarted = false;
     try {
       claimed = await deps.repo.claimEvent(
         event.webhookEventId,
@@ -162,6 +163,7 @@ export async function processLineEvents(
 
       const savedReply = isMessengerEvent(event) ? null : await deps.repo.findEventReply(event.webhookEventId);
       if (savedReply !== null) {
+        dispatchStarted = true;
         await sendCommandReply(
           event.replyToken,
           savedReply,
@@ -172,10 +174,12 @@ export async function processLineEvents(
       }
       const deliver = async (reply: CommandReply) => {
         if (isMessengerEvent(event) && deps.messenger && !(await messengerAccessAllowed(event, deps.messenger))) {
+          dispatchStarted = true;
           await deps.line.replyText(event.replyToken, "⚠️ สิทธิ์หรือการตั้งค่าเปลี่ยนแล้ว กรุณาขอรายการใหม่");
           return;
         }
         await deps.repo.saveEventReply(event.webhookEventId, reply);
+        dispatchStarted = true;
         await sendCommandReply(
           event.replyToken,
           reply,
@@ -187,7 +191,7 @@ export async function processLineEvents(
       if (reply !== null) await deliver(reply);
     } catch (error) {
       failures.push(error);
-      if (claimed) {
+      if (claimed && !dispatchStarted) {
         try {
           await deps.repo.releaseEvent(event.webhookEventId);
         } catch (releaseError) {

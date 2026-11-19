@@ -159,7 +159,7 @@ it("registers through sanitized Workflow handoff and retains completed items aft
   async function run(event: SupportedLineEvent, context: any, id: string) {
     return LineCommandWorkflow.prototype.run.call(
       { env } as unknown as LineCommandWorkflow,
-      { payload: { event, context }, instanceId: id } as any,
+      { payload: { event, context, receivedAt:new Date().toISOString() }, instanceId: id } as any,
       step as any,
     );
   }
@@ -211,6 +211,12 @@ it("registers through sanitized Workflow handoff and retains completed items aft
   await run(postback(book, "complete"), context, "complete");
   expect(tasks[0]!.fields.Status).toBe("Done");
   const completedAt = tasks[0]!.fields["Completed At"];
+  const replyAttempts = () =>
+    fetcher.mock.calls.filter(([url]) => String(url).endsWith("/message/reply"))
+      .length;
+  const attemptsAfterFailure = replyAttempts();
+  await run(postback(book, "complete"), context, "complete");
+  expect(replyAttempts()).toBe(attemptsAfterFailure);
   await run(postback(book, "again"), context, "again");
   expect(tasks[0]!.fields["Completed At"]).toBe(completedAt);
   await command("/mess-overview");
@@ -275,5 +281,14 @@ it("registers through sanitized Workflow handoff and retains completed items aft
     ),
   ).toBe(true);
   expect(JSON.stringify(tasks)).not.toMatch(/065 663 5369|STAY Hotel/);
-  expect(fetcher).toHaveBeenCalled();
+  const sends = fetcher.mock.calls.filter(([url]) =>
+    String(url).startsWith("https://api.line.me/v2/bot/message/"),
+  );
+  expect(sends.length).toBeGreaterThan(0);
+  expect(sends.every(([url]) => String(url).endsWith("/reply"))).toBe(true);
+  expect(
+    sends.every(
+      ([, init]) => !new Headers(init?.headers).has("X-Line-Retry-Key"),
+    ),
+  ).toBe(true);
 });
