@@ -108,6 +108,32 @@ export async function assertPublicationGeneration(
   return job;
 }
 
+export async function bindInitialPublicationCreate(
+  db: D1Database, eventId: string, groupId: string, publicationDate: string | undefined,
+  runId: string, generation: number, notificationCycle: number,
+): Promise<(PublicationJobRow & { bindingCreated: boolean }) | null> {
+  const result = await db.prepare(`INSERT INTO publication_regeneration_events
+    (event_id, publication_run_id, generation, notification_cycle, workflow_id, action, job_json, group_id, ingress_operation)
+    SELECT ?, j.publication_run_id, j.generation, j.notification_cycle, j.correlation_id, 'create', json_object(
+      'publication_run_id', j.publication_run_id, 'publication_date', j.publication_date, 'state', j.state, 'correlation_id', j.correlation_id,
+      'google_doc_id', j.google_doc_id, 'google_doc_url', j.google_doc_url, 'temp_doc_id', j.temp_doc_id, 'validation_result_json', j.validation_result_json,
+      'attempt_count', j.attempt_count, 'created_at', j.created_at, 'updated_at', j.updated_at, 'generation', j.generation,
+      'successful_generation', j.successful_generation, 'notification_cycle', j.notification_cycle, 'finalization_json', j.finalization_json), ?, i.operation
+    FROM publication_jobs j JOIN line_command_ingress i ON i.event_id = ?
+    WHERE i.group_id = ? AND json_extract(i.operation, '$.type') = 'docs'
+      AND json_extract(i.operation, '$.publicationDate') IS ?
+      AND j.publication_run_id = ? AND j.generation = ? AND j.notification_cycle = ?
+    ON CONFLICT(event_id) DO NOTHING`)
+    .bind(eventId, groupId, eventId, groupId, publicationDate ?? null, runId, generation, notificationCycle).run();
+  const binding = await db.prepare(`SELECT e.job_json FROM publication_regeneration_events e
+    JOIN line_command_ingress i ON i.event_id = e.event_id
+    WHERE e.event_id = ? AND e.action = 'create' AND e.group_id = ? AND i.group_id = e.group_id AND i.operation = e.ingress_operation
+      AND json_extract(i.operation, '$.type') = 'docs' AND json_extract(i.operation, '$.publicationDate') IS ?
+      AND e.publication_run_id = ? AND e.generation = ? AND e.notification_cycle = ?`)
+    .bind(eventId, groupId, publicationDate ?? null, runId, generation, notificationCycle).first<{ job_json: string }>();
+  return binding ? { ...toRow(JSON.parse(binding.job_json) as JobRowRaw), bindingCreated: result.meta.changes === 1 } : null;
+}
+
 export async function reopenSuccessfulJobForRegeneration(
   db: D1Database,
   clock: Clock,

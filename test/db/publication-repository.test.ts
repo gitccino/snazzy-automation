@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { testEnv } from "../helpers/env";
 import {
+  bindInitialPublicationCreate,
   acquireOrResumeJob,
   persistFinalizationIntent,
   completePublicationGeneration,
@@ -23,6 +24,25 @@ describe("publication-repository", () => {
     await env.DB.exec("DELETE FROM publication_regeneration_events");
     await env.DB.exec("DELETE FROM publication_product_cache");
     await env.DB.exec("DELETE FROM publication_jobs");
+  });
+
+  it("binds a trusted create once and rejects changed ingress or target", async () => {
+    await env.DB.prepare("INSERT INTO line_command_ingress VALUES (?, ?, ?, ?, ?)").bind("create-event", "group-a", JSON.stringify({type: "docs", publicationDate: "2026-09-01"}), "ingress", "now").run();
+    await acquireOrResumeJob(env.DB, clock, "original", "workflow-original");
+    const bind = (group: string, run: string, generation = 1, cycle = 1) => bindInitialPublicationCreate(env.DB, "create-event", group, "2026-09-01", run, generation, cycle);
+    expect(await bind("group-b", "original")).toBeNull();
+    expect(await bind("group-a", "missing")).toBeNull();
+    const first = await bind("group-a", "original");
+    expect(first).toMatchObject({ publicationRunId: "original", generation: 1, notificationCycle: 1, bindingCreated: true });
+    expect(await bind("group-a", "original")).toEqual({ ...first, bindingCreated: false });
+    expect(await bind("group-b", "original")).toBeNull();
+    expect(await bind("group-a", "other")).toBeNull();
+    expect(await bind("group-a", "original", 1, 2)).toBeNull();
+    await env.DB.prepare("UPDATE line_command_ingress SET group_id = ? WHERE event_id = ?").bind("group-b", "create-event").run();
+    expect(await bind("group-b", "original")).toBeNull();
+    await env.DB.prepare("UPDATE line_command_ingress SET group_id = ?, operation = ? WHERE event_id = ?").bind("group-a", JSON.stringify({type: "docs", publicationDate: "2026-09-02"}), "create-event").run();
+    expect(await bindInitialPublicationCreate(env.DB, "create-event", "group-a", "2026-09-02", "original", 1, 1)).toBeNull();
+    await env.DB.prepare("DELETE FROM line_command_ingress WHERE event_id = ?").bind("create-event").run();
   });
 
   it("acquires a new job on first call", async () => {
