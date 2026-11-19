@@ -1,0 +1,120 @@
+# Messenger implementation validation — 2026-11-14
+
+Implementation on `messenger-demo`; staging rollout explicitly authorized and completed on 2026-11-14. Production was not changed.
+
+- Root typecheck: PASS.
+- Feature/integration/configuration gate: 158 tests PASS across 18 files.
+- Settings typecheck, 19 tests and production build: PASS.
+- Full root suite: 1,001 passed, 28 failed (1,029 total). All 28 failure names match the pre-implementation baseline (936 passed, 28 failed, 964 total); no new failures. This is not a green full suite.
+- Acceptance uses real local D1 and mocked Airtable/LINE. Covers sanitized durable handoff, registration/redelivery, today/tomorrow, provider pagination, completion permissions, reply failure, repeated buttons, persistent Done rows, all-Done overview and group isolation.
+- Manual live LINE Flex validation/mobile layout, live Airtable provisioning and Book identity setup remain rollout checks. See [runbook](../runbooks/messenger-delivery.md).
+- Independent review found three P2 issues; all were fixed in one pass with failing-then-passing regression tests: registration reauthorization, successful-save bookkeeping, and uncertainty-preserving recovery. Concurrent recovery and duplicate-notice regressions also pass. No deferred minor findings.
+- No second reviewer was dispatched; fixes were verified through tests and the full-suite baseline comparison.
+
+## Rulings made during implementation
+
+- Validate an enabled delivery table through the Settings connection validator, not global `/setup`; rollout must run that connection check.
+- Carry the pinned Airtable connection explicitly through service dependencies; a settings change requires a fresh request instead of using a stale adapter.
+- Keep LINE conversion/dispatch in one focused messenger module; this adds one module without changing the existing commands' behavior.
+- Leave the exact 28 pre-existing root failures outside this slice; the full suite remains non-green.
+- D1 does not fence arbitrary Airtable editors; concurrent manual edits can require operator reconciliation.
+- Never automatically release ambiguous write claims; uncertain provider outcomes can require manual inspection.
+- Live LINE rendering, quoting and provider permissions remain rollout checks; live integration is unverified until authorized staging validation.
+
+
+
+## Unchanged baseline failures
+
+- `test/acceptance/import-acceptance.test.ts :: import acceptance 10. processes 500 photos and sends the exact success and failure summary`
+- `test/acceptance/import-acceptance.test.ts :: import acceptance 2. preserves 9, 12, and 15-photo attachment counts`
+- `test/acceptance/import-acceptance.test.ts :: import acceptance 3. applies first-run cutoff then saves explicit snapshot checkpoint`
+- `test/acceptance/import-acceptance.test.ts :: import acceptance 4. unchanged repeated /upload downloads nothing and creates no duplicate`
+- `test/acceptance/import-acceptance.test.ts :: import acceptance 5. resumes the same durable run after interruption following download`
+- `test/acceptance/import-acceptance.test.ts :: import acceptance 6. exhausted failure leaves successful sibling intact`
+- `test/acceptance/import-acceptance.test.ts :: import acceptance 7. reports every exhausted group with burned Product ID and code`
+- `test/acceptance/import-acceptance.test.ts :: import acceptance 8. later /upload resets a failed group with a fresh ID and imports its new sibling`
+- `test/acceptance/import-acceptance.test.ts :: import acceptance 9. keeps Product IDs unique across three cumulative batches`
+- `test/acceptance/line-acceptance.test.ts :: LINE acceptance: exactly 30 cases parser: /search A1234`
+- `test/acceptance/line-acceptance.test.ts :: LINE acceptance: exactly 30 cases parser: /soldout A1234 ราคา 1290`
+- `test/acceptance/publication.test.ts :: publication acceptance allows only one of two different runs to publish the same date, including concurrent Workflows`
+- `test/acceptance/publication.test.ts :: publication acceptance clears previous validation errors when staff corrects data and publication succeeds`
+- `test/acceptance/publication.test.ts :: publication acceptance deduplicates authorized /docs calls under one Workflow ID and one Bangkok date`
+- `test/acceptance/publication.test.ts :: publication acceptance exhausts six Google 429 attempts before cleanup, then restarts a unknown Workflow using cached products`
+- `test/acceptance/publication.test.ts :: publication acceptance exhausts six Google 503 attempts before cleanup, then restarts a errored Workflow using cached products`
+- `test/acceptance/publication.test.ts :: publication acceptance places the first four Airtable-ordered images in the white 1080-square collage and reuses its private cache`
+- `test/acceptance/publication.test.ts :: publication acceptance preserves old Docs through replacement and saved-finalization retry (lost response: false)`
+- `test/acceptance/publication.test.ts :: publication acceptance preserves old Docs through replacement and saved-finalization retry (lost response: true)`
+- `test/acceptance/publication.test.ts :: publication acceptance recovers uncertain copy and fill responses into one final dated document with the template suffix per product`
+- `test/acceptance/publication.test.ts :: publication acceptance regenerates edited Airtable inputs after Failed restart while preserving matching product outputs`
+- `test/line/airtable-inventory.test.ts :: reads every daily-sales page with Bangkok boundaries and requested fields`
+- `test/line/soldout.test.ts :: does not persist or mutate for invalid sold price %p`
+
+## Authorized staging rollout
+
+- Reviewed application commit: `2bba9f2`.
+- Automation Worker: `snazzy-automation-staging`, version `76ece33d-dbfa-4a04-86e6-4eba1d4f9bed` (previous `90133b41-5d5d-484a-8509-99ec1cb6ec8f`).
+- Settings Worker: `snazzy-settings-staging`, version `6d03b856-bbfe-45a9-813d-c02eaa236d1b`; its gateway now accepts the new shared settings schema. No new Settings UI controls were added.
+- D1 migration `0012_messenger_delivery_coordination.sql` applied; no migrations remain pending.
+- Settings updated through deployed SettingsService RPC with provider validation and revision checks, revision 6 → 7 → 8. No direct settings SQL writes.
+- Delivery table: `tblNbKrmjg72z9nm1`. Completion allowlist: exactly one user, the user's explicitly provided LINE ID. Full personal ID is retained only in live configuration/private rollout artifacts, not this report.
+- Before/after comparison confirms all unrelated settings preserved, including current AI-caption and retry settings. No credentials changed.
+- Database export, previous settings, previous deployments and readback kept privately under ignored `.wrangler/messenger-rollout/` in this worktree. Keep this directory for rollback; it includes private data and must not be committed/shared.
+- Post-deploy checks: backend `/health` HTTP 200 with `ok:true`, no import running; Settings anonymous access redirects HTTP 302 to the existing Cloudflare Access domain; invalid webhook signatures return HTTP 401; Airtable schema validation passed during the configuration save. Direct D1 readback confirms revision 8, configured table and one completion user.
+- An additional read-only connection-test RPC did not return within 60 seconds and its local proxy was stopped; the successful validated save and direct D1 readback above are the configuration evidence.
+- No LINE group messages sent and no delivery/product records created by rollout validation. A real mobile `/mess` → `/mess-overview` → completion/quote round trip remains a user-run acceptance check.
+
+## Bare-time clarification
+
+User clarified `/mess แมสเลย A-…` = now, `/mess 14:30 A-…` = today at 14:30, `/mess พรุ่งนี้ 14:00 A-…` = tomorrow at 14:00. Parser/help/spec/runbook updated; `วันนี้` remains an alias. Bare time must start the command body, so pasted contact lines cannot supply a schedule. Original event's Bangkok day is used on recovery.
+
+Validation: 91 focused tests and typecheck pass. Full suite 1008 passed / 28 failed, exact same 28 baseline failure names, no new failures. No settings or migration changes required.
+
+Bare-time fix deployed to staging as Worker version `48a3ef30-c56f-41b0-94a2-bf6d2d745bdb` from application commit `1e5cfee`, within the authorized staging rollout. Post-deploy health: HTTP 200, `ok:true`, no import running. No LINE messages sent by verification.
+
+## Compact today-only overview amendment
+
+User requested compact right-side `อ้างอิง` and `เสร็จสิ้น` controls and removal of day-switching footer navigation. Controls use 12px labels, 40px hit height, 64px/80px widths and an 8px gap in a 152px right-aligned action group. Header date and counts align left/right. Completed rows remain visible. No footer is rendered for a single page; multi-page lists retain only previous/next controls.
+
+Public syntax is `/mess-overview` or `/mess-overview N` for today only; date and `tomorrow` arguments are rejected. Registration for tomorrow still works. Current-day resolution is enforced at the LINE boundary even for old persisted overview commands; completing an old card refreshes today’s first page. Spec/runbook/help/acceptance fixtures updated accordingly.
+
+Validation: 97 focused tests and root typecheck pass; full suite 1014 passed, 28 failed, exact same 28 baseline failure names and no new failures. Native LINE mobile rendering remains a manual check.
+
+Compact today-only update deployed to staging as Worker version `6a05ae61-5f0a-4c8c-bbdb-a498286844fa` from application commit `ed29723`. Post-deploy health: HTTP 200 with `ok:true`. No LINE group messages sent by validation; existing Flex messages remain snapshots.
+
+## Manual Airtable status edits
+
+User approved manual Airtable edits after resetting a confirmed Done delivery to Pending during testing. Completion is now coordinated per confirmed Pending → Done cycle instead of permanently per record. Fresh overview buttons bind the current confirmed receipt; stale buttons cannot close a reopened confirmed cycle. D1 atomically archives the expected observed receipt and claims its successor, preserving historical payloads and allowing one provider dispatch per cycle. Existing receipt/action JSON remains readable; no schema migration or new Airtable field is required.
+
+Manual Done is valid without bot completion metadata. Only matching completion timestamp and actor metadata confirm a particular D1 receipt; a manually set Done status cannot release an unrelated ambiguous dispatch. Uncertain dispatched writes remain blocked. Current schedule/staff edits appear on a fresh overview and are not overwritten by completion. Purely manual Done/Pending changes without any confirmed bot receipt have no recorded cycle boundary; stale-button cycle protection applies to confirmed bot completions. Airtable still cannot atomically fence manual editors against an in-flight bot PATCH.
+
+Regression evidence: watched the original implementation fail the reopening, manual-Done parsing and ambiguous-receipt tests before applying the fix. Final root typecheck and staging deployment dry-run pass. Focused coverage: 102 passed. Full root suite: 1019 passed / 28 failed, exact same baseline failure names listed above, no new failures. Workflow acceptance covers manual schedule/staff edits, reopening with cleared metadata, stale-card rejection, and fresh-card completion. A separate read-only code review found no material issues. No live delivery statuses changed during validation; mobile LINE round-trip remains a user-run check.
+
+Manual-edit fix deployed to authorized staging from commit `38b013b` as Worker version `47a100c7-34e1-467a-9845-4a148cd8953d`. Post-deploy health returned HTTP 200 with `ok:true`, `importRunning:false`; invalid webhook signatures returned HTTP 401. No migration, settings changes, LINE group messages or live delivery mutations were performed.
+
+## Staff courier time format
+
+User clarified that today is the default scheduled day without requiring `วันนี้`. The parser now accepts `แมส 14.30` or `แมส 14:30` on a later line after the product ID, including an emoji and trailing delivery-fee text. Bare times at the start of the body also accept dot separators; explicit today/tomorrow accept both separators. `แมสเลย` retains immediate semantics, and `พรุ่งนี้` selects tomorrow. A scheduled time is still required otherwise. Only recognized schedule lines are interpreted; contact/address lines are ignored. Invalid and conflicting times are rejected, including two times on the schedule line and mixed today/tomorrow schedules. Help/spec/runbook reflect the accepted format.
+
+Regression tests first failed on the original parser for the supplied structure and conflicting dot-time cases. Final validation: root typecheck and staging packaging dry-run pass; 113 focused tests pass; full suite 1030 passed / 28 failed, exact same baseline failure names, no new failures. Workflow acceptance verifies the pasted multi-line format is sanitized before durable handoff and stored with the original event's Bangkok day at 14:30. No live LINE messages or delivery writes performed by tests.
+
+Final compatibility check preserves the previously accepted explicit day/time split over separate lines. Regression reproduced before the one-line fix. Final root suite: 1031 passed / the same 28 baseline failures; 114 focused tests, typecheck and packaging dry-run pass. The initial courier-time build (`4ee5941`, Worker `73b8173b-3ec6-4b3b-87df-57dd1dbdea00`) was deployed before this final compatibility correction; the final deployed version is recorded below.
+
+Final courier-time build deployed to authorized staging from commit `4c173c6` as Worker `ab399fd5-dda7-4164-86cd-a96fe303cbca`. Post-deploy `/health` returned HTTP 200 with `ok:true`, `importRunning:false`. No configuration, migration or live delivery changes; no LINE group messages sent by verification.
+
+## Approved minimal Flex card refinement
+
+User approved the iterated preview on 2026-11-15 and requested implementation and deployment. The visible card now starts with the black Thai title, with MESSENGER removed. Date and completed/total count (e.g. `1/2`) share the next line; notification alternative text retains full counts. Time labels omit `ทันที`. Only Pending tasks strictly earlier than the current injected clock show red `HH:mm · เกินกำหนด`; exactly-due, future and Done tasks remain black. Immediate tasks follow the same rule without a grace period. The card receives the actual clock instant rather than only a date; existing sent messages remain snapshots.
+
+Reference is a text-only action; pending completion has a `#F0F0F1` background and 20px pill corners. The completed state is green `เสร็จสิ้น` without a checkmark, centered in the same action column with the same 12px size. Existing 64px/80px widths, 40px action height, postback tokens, permission checks, pagination and row order are preserved. No settings or database migration is required.
+
+Validation: layout and overdue regressions failed before implementation. Final focused gate: 119 passed; root typecheck and staging packaging dry-run pass. Full suite: 1036 passed / 28 failed; all 28 failures match the recorded baseline names above, with no unrecorded failures. Self-review covered every card caller, deadline equality, future/Pending/Done/Immediate states, button labels/geometry and Workflow acceptance. Native LINE mobile rendering remains a user-run acceptance check. No live LINE messages or delivery mutations were performed by validation.
+
+Approved Flex refinement deployed to staging from application commit `94753d3` as Worker version `b4b98433-fca9-4363-b85f-607c64ade9d8` (100% active, verified through deployments list). Initial upload succeeded, but trigger configuration reported fetch failures for cron schedules and all four Workflows. A subsequent `wrangler triggers deploy --env staging` completed successfully in 6.43 seconds and confirmed all four Workflow bindings; no second code upload was required. Final `/health`: HTTP 200, `ok:true`, `importRunning:false`; invalid webhook signature: HTTP 401. No settings, migration, live delivery mutation or LINE group message was performed by deployment verification. Request a fresh `/mess-overview` to see the new card; existing messages do not update.
+
+## Varied messenger wording
+
+User approved rejecting conflicting immediate/tomorrow instructions and requested implementation. The parser now finds exactly one standalone `H:mm`/`HH:mm`/`H.mm`/`HH.mm` token anywhere in a multiline message without requiring a courier prefix. Examples include `แมสออก 14:30 ค่า` and `นัดแมส 14.30`. With no explicit day, the original event's Bangkok day is used. `พรุ่งนี้` selects tomorrow; `แมสเลย` uses the original event instant and rejects an accompanying time or day instruction. Missing, invalid or multiple times and multiple day/immediate instructions remain rejected. Product ID validation and sanitation before durable handoff remain intact. No schema/configuration change is required.
+
+Regression cases failed on the previous parser before implementation. Final focused coverage: 127 passed; root typecheck and staging packaging dry-run pass. Full suite: 1044 passed / the same 28 recorded baseline failures, no unrecorded failure names. Workflow acceptance now uses `แมสออก 14.30` in the pasted message and verifies the scheduled instant. Standalone decimal values that look exactly like a time remain semantically ambiguous; documentation advises avoiding unrelated such values in the command. Full phone numbers/dotted phone fragments and ordinary address numbers do not match. No live delivery records or LINE messages were created by validation.
+
+Varied-wording parser deployed to authorized staging from commit `c79db9b` as Worker version `4373b242-62cb-4224-a219-91aa77f50b12`. Deployment confirmed all four Workflow bindings. Final health returned HTTP 200, `ok:true`, `importRunning:false`. No live LINE messages, delivery mutations, migration or settings changes were performed by rollout verification.

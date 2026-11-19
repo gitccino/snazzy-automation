@@ -9,7 +9,8 @@ export interface Env {
   IMAGES_BUCKET: R2Bucket;
   IMAGES: ImagesBinding;
   LINE_COMMAND_WORKFLOW: Workflow<{
-    event: import("./line/types").SupportedLineEvent;
+    event: import("./line/types").LineIngressEvent;
+    receivedAt?: string;
     context?: import("./settings/schema").OperationContext;
   }>;
   LINE_MUTATION_FOLLOWUP_WORKFLOW: Workflow<

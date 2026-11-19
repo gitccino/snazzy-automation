@@ -693,3 +693,21 @@ describe("handleDocsTrigger", () => {
     expect(fixture.restart).not.toHaveBeenCalled();
   });
 });
+it('allocates a new notification cycle when retrying an errored generating job with an unconfirmed notice',async()=>{
+ vi.restoreAllMocks();mockRun('Ready');const h=makeTriggerEnv('errored');
+ const {readPublicationJob}=await import('../../src/db/publication-repository');
+ const {createLineReplyRepository}=await import('../../src/db/line-reply-repository');
+ await h.env.DB.exec('DELETE FROM publication_product_cache');await h.env.DB.exec('DELETE FROM publication_jobs');
+ await acquireOrResumeJob(h.env.DB,clock,'rec-run-1','publication-rec-run-1');
+ const {savePublicationAttemptContext}=await import('../../src/db/execution-context-repository');
+ const {captureOperationContext}=await import('../../src/settings/runtime');
+ await savePublicationAttemptContext(h.env.DB,'rec-run-1',1,await captureOperationContext(h.env,null));
+ await setJobState(h.env.DB,clock,'rec-run-1','generating',{tempDocId:'preserve-this-doc'});
+ const group=crypto.randomUUID();const repo=createLineReplyRepository(h.env.DB,clock);
+ await repo.enqueueResult({groupId:group,resultKey:JSON.stringify(['publication','rec-run-1',1,1,'terminal']),result:{schemaVersion:1,kind:'publication',runId:'rec-run-1',generation:1,notificationCycle:1,outcome:'unconfirmed',messages:[{type:'text',text:'inspect first'}]}});
+ await handleDocsTrigger(h.env,'line',clock);
+ expect((await readPublicationJob(h.env.DB,'rec-run-1'))).toMatchObject({notificationCycle:2,tempDocId:'preserve-this-doc',state:'generating'});
+ expect(h.restart).toHaveBeenCalledTimes(1);
+ await repo.enqueueResult({groupId:group,resultKey:JSON.stringify(['publication','rec-run-1',1,2,'terminal']),result:{schemaVersion:1,kind:'publication',runId:'rec-run-1',generation:1,notificationCycle:2,outcome:'success',messages:[{type:'text',text:'finished'}]}});
+ expect((await repo.head(group))?.result.outcome).toBe('unconfirmed');
+});

@@ -107,3 +107,7 @@ describe("redactText", () => {
     spy.mockRestore();
   });
 });
+
+it('redacts quote tokens embedded in textual diagnostic values',()=>{
+ expect(redactText('quoteToken=private-quote')).not.toContain('private-quote');
+});

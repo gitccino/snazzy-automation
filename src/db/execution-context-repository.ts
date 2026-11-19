@@ -8,6 +8,8 @@ const contextSchema = z.strictObject({
     schemaVersion: z.literal(1),
     revision: z.number().int().nonnegative(),
     config: z.strictObject({
+      airtableMessengerDeliveriesTableId: z.string().regex(/^tbl[A-Za-z0-9]+$/).nullable().default(null),
+      messengerCompletionUserIds: z.array(z.string().regex(/^U[0-9a-f]{32}$/)).default([]),
       timeZone: z.literal("Asia/Bangkok"),
       productIdPrefix: z.literal("A"),
       claudeModel: claudeModelSchema,

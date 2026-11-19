@@ -1,3 +1,4 @@
+import { advanceUnconfirmedPublicationRestart } from '../db/publication-repository';
 import { captureOperationContext } from "../settings/runtime";
 import {
   readPublicationContext,
@@ -154,6 +155,7 @@ export async function handleDocsTrigger(
       id,
       acquired.job.generation,
       context,
+      current.job.notificationCycle,
     );
     if (!reopened) {
       const raced = await acquireOrResumeJob(
@@ -169,6 +171,11 @@ export async function handleDocsTrigger(
         publicationRunId,
       };
     }
+  }
+
+  if(current.job.state!=='failed' && current.job.state!=='validation_failed') {
+    const advanced=await advanceUnconfirmedPublicationRestart(env.DB,clock,publicationRunId,acquired.job.generation,current.job.notificationCycle);
+    if(advanced==='contended')return {status:'already_running',publicationRunId};
   }
 
   const savedContext = await readPublicationContext(env.DB, publicationRunId);

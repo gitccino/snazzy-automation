@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { sanitizeMessengerEvent } from "../messenger/parser";
+import { createMessengerAirtable } from "../messenger/airtable";
+import { createMessengerRepository } from "../messenger/repository";
+import { loadSettingsSnapshot } from "../settings/runtime";
 import { createLineMutationRepository } from "../db/line-mutation-repository";
 import {
   createMutationCoordinator,
@@ -17,8 +21,8 @@ import { createLineClient } from "../line/client";
 import type { DocsTriggerResult, UploadTriggerResult } from "../line/search";
 import { verifyLineSignature } from "../line/signature";
 import {
-  parseSupportedLineEvents,
-  type SupportedLineEvent,
+  parseLineIngressEvents,
+  type LineIngressEvent,
 } from "../line/types";
 import type { WebhookDeps } from "../line/webhook";
 import { OperationalError } from "../shared/errors";
@@ -49,7 +53,7 @@ export function toLineDocsTriggerResult(
 }
 
 export interface LineRouteOverride {
-  process(events: SupportedLineEvent[]): Promise<void>;
+  process(events: LineIngressEvent[]): Promise<void>;
 }
 
 export async function handleLineRoute(
@@ -71,14 +75,17 @@ export async function handleLineRoute(
       headers: { "Retry-After": "60" },
     });
 
-  let events: SupportedLineEvent[];
+  let events: LineIngressEvent[];
   try {
-    events = parseSupportedLineEvents(
+    events = parseLineIngressEvents(
       JSON.parse(new TextDecoder().decode(rawBody)) as unknown,
     );
   } catch {
     return new Response("invalid payload", { status: 400 });
   }
+
+  events = events.map(event => event.type === "queue-trigger" ? event : sanitizeMessengerEvent(event));
+  const receivedAt = new Date().toISOString();
 
   if (override !== undefined) {
     ctx.waitUntil(override.process(events));
@@ -100,6 +107,7 @@ export async function handleLineRoute(
             id,
             params: {
               event,
+              receivedAt,
               context: { ...context, replyGroupId: event.source.groupId },
             },
           };
@@ -237,7 +245,12 @@ export async function createWebhookDeps(
       },
     },
   );
+  const connection = config.airtableMessengerDeliveriesTableId ? {baseId:config.airtableBaseId,productsTableId:config.airtableProductsTableId,deliveriesTableId:config.airtableMessengerDeliveriesTableId} : null;
   return {
+    ...(connection ? {messenger:{connection,airtable:createMessengerAirtable({connection,token:env.AIRTABLE_TOKEN,fetch:fetcher}),repo:createMessengerRepository(env.DB),clock,ids,
+      profile:(groupId:string,userId:string)=>line.getGroupMemberProfile(groupId,userId),
+      async currentPolicy(){const current=(await loadSettingsSnapshot(env)).config;return {allowedGroupIds:current.lineAllowedGroupIds,completionUserIds:current.messengerCompletionUserIds,connection:current.airtableMessengerDeliveriesTableId?{baseId:current.airtableBaseId,productsTableId:current.airtableProductsTableId,deliveriesTableId:current.airtableMessengerDeliveriesTableId}:null};}
+    }} : {}),
     mutation,
     context: operationContext,
     publicBaseUrl: config.publicBaseUrl,

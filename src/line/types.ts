@@ -1,3 +1,5 @@
+import { parseLineCommand } from "./parser";
+import type { MessengerInput } from "../messenger/types";
 import { z } from "zod";
 import type { OperationContext } from "../settings/schema";
 
@@ -88,11 +90,13 @@ export interface ReversibleLineAction {
 }
 
 export interface LineTextEvent {
+  timestamp?: number;
+  messenger?: MessengerInput;
   type: "message";
   webhookEventId: string;
   replyToken: string;
   source: { type: "group"; groupId: string; userId: string };
-  message: { type: "text"; id: string; text: string };
+  message: { type: "text"; id: string; text: string; quoteToken?: string };
 }
 
 export interface LinePostbackEvent {
@@ -117,7 +121,8 @@ const SupportedLineEventSchema = z.discriminatedUnion("type", [
     webhookEventId: z.string().min(1),
     replyToken: z.string().min(1),
     source: GroupSourceSchema,
-    message: z.object({ type: z.literal("text"), id: z.string().min(1), text: z.string() }),
+    timestamp: z.number().int().nonnegative().optional(),
+    message: z.object({ type: z.literal("text"), id: z.string().min(1), text: z.string(), quoteToken: z.string().min(1).optional() }),
   }),
   z.object({
     type: z.literal("postback"),
@@ -144,4 +149,27 @@ export interface DailySaleProduct {
   modelName: string | null;
   soldPrice: number;
   soldAt: string;
+}
+
+export type LineQueueTriggerEvent = {
+  type:'queue-trigger'; webhookEventId:string; replyToken:string;
+  source:{type:'group';groupId:string}; timestamp?:number;
+};
+export type LineIngressEvent = SupportedLineEvent | LineQueueTriggerEvent;
+export function parseLineIngressEvents(value:unknown):LineIngressEvent[] {
+  const body=z.object({events:z.array(z.unknown())}).parse(value);
+  const messageSchema=z.object({type:z.literal('message'),webhookEventId:z.string().trim().min(1),replyToken:z.string().trim().min(1),timestamp:z.number().int().nonnegative().optional(),source:z.object({type:z.literal('group'),groupId:z.string().trim().min(1)}),message:z.object({type:z.enum(['text','image','video','audio','file','location','sticker'])})});
+  return body.events.flatMap((raw):LineIngressEvent[]=>{
+    const supported=SupportedLineEventSchema.safeParse(raw);
+    if(supported.success && supported.data.replyToken.trim()) {
+      const e=supported.data;
+      if(e.type==='postback')return [e];
+      const parsed=parseLineCommand(e.message.text);
+      if(parsed.ok || parsed.code!=='unknown_command' || /^\/mess(?:-overview)?(?:\s|$)/.test(e.message.text.trim()))return [e];
+    }
+    const parsed=messageSchema.safeParse(raw);
+    if(!parsed.success)return [];
+    const e=parsed.data;
+    return [{type:'queue-trigger',webhookEventId:e.webhookEventId,replyToken:e.replyToken,source:e.source,...(e.timestamp===undefined?{}:{timestamp:e.timestamp})}];
+  });
 }

@@ -4,7 +4,7 @@ import { validateSettingsConnections } from '../../src/settings/validation';
 import type { StoredSettings } from '../../src/settings/schema';
 import { requiredFields } from '../../src/routes/setup';
 
-const settings: StoredSettings = { AIRTABLE_BASE_ID: 'app1', AIRTABLE_PRODUCTS_TABLE_ID: 'tbl1', AIRTABLE_PUBLICATION_RUNS_TABLE_ID: 'tbl2', GOOGLE_DRIVE_FOLDER_ID: 'folder', GOOGLE_TEMPLATE_DOC_ID: 'template', LINE_ALLOWED_GROUP_IDS: ['C1'], SOLDOUT_CONFIRMATION_ENABLED: true, FIRST_IMPORT_CUTOFF_DATE: null, IMPORT_RETRY_LIMIT: 0, PUBLICATION_RETRY_LIMIT: 0, AI_CAPTIONS_ENABLED: false, CLAUDE_MODEL: "claude-opus-5", PRODUCT_ID_INITIAL_NUMBER: 1, CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 100, MONTHLY_BUDGET_THB: 1000, USD_TO_THB_RATE: 36, CLAUDE_INPUT_PRICE_USD_PER_MTOK: 5, CLAUDE_OUTPUT_PRICE_USD_PER_MTOK: 25, R2_PRICE_USD_PER_GB_MONTH: 0.015 };
+const settings: StoredSettings = { AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID:null, MESSENGER_COMPLETION_USER_IDS:[], AIRTABLE_BASE_ID: 'app1', AIRTABLE_PRODUCTS_TABLE_ID: 'tbl1', AIRTABLE_PUBLICATION_RUNS_TABLE_ID: 'tbl2', GOOGLE_DRIVE_FOLDER_ID: 'folder', GOOGLE_TEMPLATE_DOC_ID: 'template', LINE_ALLOWED_GROUP_IDS: ['C1'], SOLDOUT_CONFIRMATION_ENABLED: true, FIRST_IMPORT_CUTOFF_DATE: null, IMPORT_RETRY_LIMIT: 0, PUBLICATION_RETRY_LIMIT: 0, AI_CAPTIONS_ENABLED: false, CLAUDE_MODEL: "claude-opus-5", PRODUCT_ID_INITIAL_NUMBER: 1, CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 100, MONTHLY_BUDGET_THB: 1000, USD_TO_THB_RATE: 36, CLAUDE_INPUT_PRICE_USD_PER_MTOK: 5, CLAUDE_OUTPUT_PRICE_USD_PER_MTOK: 25, R2_PRICE_USD_PER_GB_MONTH: 0.015 };
 const env = { ...testEnv(), ...createTestEnv() };
 
 describe('settings provider validation', () => {
@@ -62,4 +62,13 @@ it('rejects unavailable models when captions are enabled and skips the probe whe
   fetcher.mockClear();
   expect(await validateSettingsConnections(env, settings, { ...candidate, AI_CAPTIONS_ENABLED: false }, ['CLAUDE_MODEL'], fetcher)).toEqual({ ok: true, value: undefined });
   expect(fetcher).not.toHaveBeenCalled();
+});
+
+it('requires messenger table field types, choices and correct product link', async () => {
+ const candidate={...settings,AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID:'tblMess',MESSENGER_COMPLETION_USER_IDS:[]};
+ const fields: {name:string;type:string;options?:{linkedTableId?:string;choices?:{name:string}[]}}[]=[...['Delivery ID','Product ID','Responsible User ID','Responsible Name','Source Group ID','Source Message ID','Source Event ID','Source Quote Token','Completed By User ID','Completed By Name'].map(name=>({name,type:'singleLineText'})),...['Scheduled At','Registered At','Completed At'].map(name=>({name,type:'dateTime'})),{name:'Product',type:'multipleRecordLinks',options:{linkedTableId:'tbl1'}},{name:'Schedule Type',type:'singleSelect',options:{choices:[{name:'Immediate'},{name:'Scheduled'}]}},{name:'Status',type:'singleSelect',options:{choices:[{name:'Pending'},{name:'Done'}]}}];
+ const fetcher=async()=>Response.json({tables:[{id:'tbl1',fields:requiredFields.Products.map(name=>({name}))},{id:'tbl2',fields:requiredFields['Publication Runs'].map(name=>({name}))},{id:'tblMess',fields}]});
+ expect(await validateSettingsConnections(testEnv(),settings,candidate,['AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID'],fetcher)).toMatchObject({ok:true});
+ fields.find(f=>f.name==='Product')!.options={linkedTableId:'wrong'};
+ expect(await validateSettingsConnections(testEnv(),settings,candidate,['AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID'],fetcher)).toMatchObject({ok:false});
 });

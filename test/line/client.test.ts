@@ -255,3 +255,34 @@ it("delivers delayed replies by push with a retry key and accepts an already-acc
   expect(new Headers(requestInit?.headers).get("X-Line-Retry-Key")).toBe("11111111-1111-4111-8111-111111111111");
   expect(JSON.parse(String(requestInit?.body))).toEqual({ to: "C1", messages: [{ type: "text", text: "success" }] });
 });
+
+it.each([false,true])('preserves quote token and retry key in reply/push mode %s',async push=>{
+ let captured:any;
+ const client=createLineClient({channelAccessToken:'secret',fetch:async(url,init)=>{captured={url,headers:init?.headers,body:JSON.parse(String(init?.body))};return Response.json({});},...(push?{pushReplies:{groupId:'C1',retryKey:'retry-key'}}:{})});
+ await client.replyQuotedText('reply','รายการจัดส่ง A-2','quote');
+ expect(captured.body.messages).toEqual([{type:'text',text:'รายการจัดส่ง A-2',quoteToken:'quote'}]);
+ expect(String(captured.url)).toContain(push?'/push':'/reply');if(push)expect(captured.headers['X-Line-Retry-Key']).toBe('retry-key');
+});
+
+it.each([
+  [400, 'Invalid reply token', 'definite_rejection', 'retry_on_new_event'],
+  [400, 'Invalid messages', 'definite_rejection', 'blocked_payload'],
+  [401, 'Unauthorized', 'definite_rejection', 'blocked_configuration'],
+  [429, 'Quota exceeded', 'definite_rejection', 'retry_on_new_event'],
+  [503, 'Unavailable', 'unknown_outcome', undefined],
+])('classifies raw reply status %s without retries', async (status, message, classification, disposition) => {
+  let calls = 0;
+  const client = createLineClient({ channelAccessToken: 'private', fetch: async (_url, init) => {
+    calls++; expect(new Headers(init?.headers).has('X-Line-Retry-Key')).toBe(false);
+    return Response.json({ message }, { status: Number(status) });
+  } });
+  await expect(client.sendReplyMessages('fresh', [{ type: 'text', text: 'hello' }])).rejects.toMatchObject({ classification, ...(disposition ? { disposition } : {}) });
+  expect(calls).toBe(1);
+});
+it('raw replies refuse invalid capacity and accept malformed 200 metadata', async () => {
+  let calls = 0;
+  const client = createLineClient({ channelAccessToken: 'private', fetch: async () => { calls++; return new Response('not json', { headers: { 'x-line-request-id': 'receipt' } }); } });
+  await expect(client.sendReplyMessages('fresh', Array.from({ length: 6 }, () => ({ type: 'text', text: 'x' })))).rejects.toThrow();
+  expect(calls).toBe(0);
+  await expect(client.sendReplyMessages('fresh', [{ type: 'text', text: 'hello' }])).resolves.toEqual({ requestId: 'receipt' });
+});

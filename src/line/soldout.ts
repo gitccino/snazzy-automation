@@ -20,6 +20,7 @@ import type {
 import type { SearchCardReply } from "./search-card";
 
 export type CommandReply = (
+  | { kind: "quoted-text"; text: string; quoteToken: string }
   | SearchCardReply
   | {
       kind: "text";

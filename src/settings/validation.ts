@@ -14,7 +14,7 @@ const metaSchema = z.object({
   tables: z.array(
     z.object({
       id: z.string(),
-      fields: z.array(z.object({ name: z.string() })),
+      fields: z.array(z.object({ name: z.string(), type: z.string().optional(), options: z.object({ linkedTableId: z.string().optional(), choices: z.array(z.object({name:z.string()})).optional() }).optional() })),
     }),
   ),
 });
@@ -57,6 +57,22 @@ export async function validateSettingsConnections(
           )
         )
           throw new Error();
+      }
+    }
+    if (changed("AIRTABLE_") && candidate.AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID) {
+      const response = await fetcher(`https://api.airtable.com/v0/meta/bases/${opaqueId.parse(candidate.AIRTABLE_BASE_ID)}/tables`, {headers:{authorization:`Bearer ${env.AIRTABLE_TOKEN}`}});
+      if (!response.ok) throw new Error();
+      const table = metaSchema.parse(await response.json()).tables.find(t => t.id === candidate.AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID);
+      if (!table) throw new Error();
+      const expected:Record<string,string> = Object.fromEntries([
+        ...['Delivery ID','Product ID','Responsible User ID','Responsible Name','Source Group ID','Source Message ID','Source Event ID','Source Quote Token','Completed By User ID','Completed By Name'].map(n => [n,'singleLineText']),
+        ...['Scheduled At','Registered At','Completed At'].map(n => [n,'dateTime']), ['Product','multipleRecordLinks'], ['Schedule Type','singleSelect'], ['Status','singleSelect'],
+      ]);
+      for (const [name,type] of Object.entries(expected)) if (!table.fields.some(f => f.name===name && f.type===type)) throw new Error();
+      if (table.fields.find(f=>f.name==='Product')?.options?.linkedTableId !== candidate.AIRTABLE_PRODUCTS_TABLE_ID) throw new Error();
+      for (const [name,choices] of [['Status',['Pending','Done']],['Schedule Type',['Immediate','Scheduled']]] as const) {
+        const actual = table.fields.find(f=>f.name===name)?.options?.choices?.map(c=>c.name) ?? [];
+        if (choices.some(choice=>!actual.includes(choice))) throw new Error();
       }
     }
     if (changed("GOOGLE_")) {

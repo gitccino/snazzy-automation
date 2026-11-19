@@ -1,0 +1,854 @@
+[
+  {
+    "name": "plain text",
+    "reply": {
+      "kind": "text",
+      "text": "plain"
+    },
+    "expected": [
+      {
+        "type": "text",
+        "text": "plain"
+      }
+    ]
+  },
+  {
+    "name": "text warning",
+    "reply": {
+      "kind": "text",
+      "text": "plain",
+      "recoveryWarning": "warning"
+    },
+    "expected": [
+      {
+        "type": "text",
+        "text": "warning\nplain"
+      }
+    ]
+  },
+  {
+    "name": "quoted source",
+    "reply": {
+      "kind": "quoted-text",
+      "text": "source",
+      "quoteToken": "source-quote"
+    },
+    "expected": [
+      {
+        "type": "text",
+        "text": "source",
+        "quoteToken": "source-quote"
+      }
+    ]
+  },
+  {
+    "name": "plain Flex warning",
+    "reply": {
+      "kind": "flex",
+      "text": "card",
+      "contents": {
+        "type": "bubble",
+        "body": {
+          "type": "box",
+          "layout": "vertical",
+          "contents": []
+        }
+      },
+      "recoveryWarning": "warning"
+    },
+    "expected": [
+      {
+        "type": "flex",
+        "altText": "card",
+        "contents": {
+          "type": "bubble",
+          "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+              {
+                "type": "text",
+                "text": "warning",
+                "size": "xs",
+                "color": "#FF3344",
+                "wrap": true,
+                "margin": "md"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "already Out",
+    "reply": {
+      "kind": "text",
+      "text": "existing",
+      "alreadyOut": {
+        "recordId": "rec1",
+        "productId": "A-1",
+        "uploadDate": null,
+        "airtableUrl": "https://airtable.com/base/table/rec1",
+        "inventoryStatus": "Out",
+        "soldPrice": 1000,
+        "soldAt": "2026-11-19T08:00:00Z",
+        "soldBy": "Staff"
+      },
+      "recoveryWarning": "warning"
+    },
+    "expected": [
+      {
+        "type": "flex",
+        "altText": "สินค้า A-1 เป็น Out อยู่แล้ว\nราคาขาย 1,000 บาท\nขายเมื่อวันที่ 19/11/26 เวลา 15:00\nบันทึกโดย Staff\nhttps://airtable.com/base/table/rec1",
+        "contents": {
+          "type": "bubble",
+          "size": "mega",
+          "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "24px",
+            "backgroundColor": "#FFFFFF",
+            "contents": [
+              {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "md",
+                "alignItems": "center",
+                "contents": [
+                  {
+                    "type": "image",
+                    "url": "https://original-worker.test/line/icons/alert-v1.png",
+                    "size": "40px",
+                    "aspectRatio": "1:1",
+                    "flex": 0
+                  },
+                  {
+                    "type": "box",
+                    "layout": "vertical",
+                    "flex": 1,
+                    "spacing": "none",
+                    "contents": [
+                      {
+                        "type": "text",
+                        "text": "/soldout",
+                        "color": "#949494",
+                        "size": "sm"
+                      },
+                      {
+                        "type": "text",
+                        "text": "ขายแล้ว",
+                        "color": "#2C2C2C",
+                        "size": "xl",
+                        "weight": "bold",
+                        "wrap": true
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "box",
+                "layout": "vertical",
+                "margin": "xl",
+                "spacing": "md",
+                "contents": [
+                  {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "spacing": "md",
+                    "contents": [
+                      {
+                        "type": "text",
+                        "text": "ราคาขาย",
+                        "color": "#949494",
+                        "size": "sm",
+                        "flex": 1,
+                        "wrap": true
+                      },
+                      {
+                        "type": "text",
+                        "text": "1,000 บาท",
+                        "color": "#2C2C2C",
+                        "size": "sm",
+                        "flex": 1,
+                        "align": "end",
+                        "wrap": true
+                      }
+                    ]
+                  },
+                  {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "spacing": "md",
+                    "contents": [
+                      {
+                        "type": "text",
+                        "text": "ขายเมื่อวันที่",
+                        "color": "#949494",
+                        "size": "sm",
+                        "flex": 1,
+                        "wrap": true
+                      },
+                      {
+                        "type": "text",
+                        "text": "19/11/26 เวลา 15:00",
+                        "color": "#2C2C2C",
+                        "size": "sm",
+                        "flex": 1,
+                        "align": "end",
+                        "wrap": true
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": "warning",
+                "size": "xs",
+                "color": "#FF3344",
+                "wrap": true,
+                "margin": "md"
+              }
+            ]
+          },
+          "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "16px",
+            "paddingTop": "0px",
+            "backgroundColor": "#FFFFFF",
+            "contents": [
+              {
+                "type": "button",
+                "style": "primary",
+                "color": "#2C2C2C",
+                "height": "sm",
+                "action": {
+                  "type": "uri",
+                  "label": "เปิดใน Airtable",
+                  "uri": "https://airtable.com/base/table/rec1"
+                }
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "sale success",
+    "reply": {
+      "kind": "text",
+      "text": "sale",
+      "saleSuccess": {
+        "productId": "A-1",
+        "soldPrice": 1000,
+        "product": {
+          "recordId": "rec1",
+          "productId": "A-1",
+          "uploadDate": null,
+          "airtableUrl": "https://airtable.com/base/table/rec1",
+          "inventoryStatus": "Out",
+          "soldPrice": 1000,
+          "soldAt": "2026-11-19T08:00:00Z",
+          "soldBy": "Staff"
+        }
+      },
+      "recoveryWarning": "warning"
+    },
+    "expected": [
+      {
+        "type": "flex",
+        "altText": "บันทึก A-1 เป็น Out ราคา 1,000 บาท",
+        "contents": {
+          "type": "bubble",
+          "size": "mega",
+          "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "24px",
+            "backgroundColor": "#FFFFFF",
+            "contents": [
+              {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "md",
+                "alignItems": "center",
+                "contents": [
+                  {
+                    "type": "image",
+                    "url": "https://original-worker.test/line/icons/bag-v2.png",
+                    "size": "40px",
+                    "aspectRatio": "1:1",
+                    "flex": 0
+                  },
+                  {
+                    "type": "box",
+                    "layout": "vertical",
+                    "flex": 1,
+                    "spacing": "none",
+                    "contents": [
+                      {
+                        "type": "text",
+                        "text": "รหัสสินค้า",
+                        "color": "#949494",
+                        "size": "sm"
+                      },
+                      {
+                        "type": "text",
+                        "text": "A-1",
+                        "color": "#2C2C2C",
+                        "size": "xl",
+                        "weight": "bold",
+                        "wrap": true
+                      }
+                    ]
+                  },
+                  {
+                    "type": "box",
+                    "layout": "vertical",
+                    "flex": 0,
+                    "width": "48px",
+                    "spacing": "xs",
+                    "contents": [
+                      {
+                        "type": "image",
+                        "url": "https://original-worker.test/line/icons/out-v3.png",
+                        "size": "40px",
+                        "align": "center",
+                        "aspectRatio": "1:1"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "box",
+                "layout": "vertical",
+                "margin": "xl",
+                "spacing": "md",
+                "contents": [
+                  {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "spacing": "md",
+                    "contents": [
+                      {
+                        "type": "text",
+                        "text": "ราคา",
+                        "color": "#949494",
+                        "size": "sm",
+                        "flex": 1,
+                        "wrap": true
+                      },
+                      {
+                        "type": "text",
+                        "text": "1,000 บาท",
+                        "color": "#2C2C2C",
+                        "size": "sm",
+                        "flex": 1,
+                        "align": "end",
+                        "wrap": true
+                      }
+                    ]
+                  },
+                  {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "spacing": "md",
+                    "contents": [
+                      {
+                        "type": "text",
+                        "text": "วันที่อัปโหลด",
+                        "color": "#949494",
+                        "size": "sm",
+                        "flex": 1,
+                        "wrap": true
+                      },
+                      {
+                        "type": "text",
+                        "text": "ไม่พบข้อมูล",
+                        "color": "#2C2C2C",
+                        "size": "sm",
+                        "flex": 1,
+                        "align": "end",
+                        "wrap": true
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": "warning",
+                "size": "xs",
+                "color": "#FF3344",
+                "wrap": true,
+                "margin": "md"
+              }
+            ]
+          },
+          "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "16px",
+            "paddingTop": "0px",
+            "backgroundColor": "#FFFFFF",
+            "contents": [
+              {
+                "type": "button",
+                "style": "primary",
+                "color": "#2C2C2C",
+                "height": "sm",
+                "action": {
+                  "type": "uri",
+                  "label": "เปิดใน Airtable",
+                  "uri": "https://airtable.com/base/table/rec1"
+                }
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "revert success",
+    "reply": {
+      "kind": "text",
+      "text": "reverted",
+      "revertSuccess": true,
+      "recoveryWarning": "warning"
+    },
+    "expected": [
+      {
+        "type": "flex",
+        "altText": "reverted",
+        "contents": {
+          "type": "bubble",
+          "size": "mega",
+          "body": {
+            "type": "box",
+            "layout": "horizontal",
+            "paddingAll": "24px",
+            "spacing": "md",
+            "alignItems": "center",
+            "backgroundColor": "#FFFFFF",
+            "contents": [
+              {
+                "type": "image",
+                "url": "https://original-worker.test/line/icons/check-green-v2.png",
+                "size": "40px",
+                "aspectRatio": "1:1",
+                "flex": 0
+              },
+              {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "none",
+                "flex": 1,
+                "contents": [
+                  {
+                    "type": "text",
+                    "text": "/revert",
+                    "color": "#949494",
+                    "size": "xs"
+                  },
+                  {
+                    "type": "text",
+                    "text": "ย้อนกลับสำเร็จ",
+                    "color": "#2C2C2C",
+                    "size": "lg",
+                    "weight": "bold",
+                    "wrap": true
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": "warning",
+                "size": "xs",
+                "color": "#FF3344",
+                "wrap": true,
+                "margin": "md"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "confirmation",
+    "reply": {
+      "kind": "buttons",
+      "text": "confirm",
+      "approveData": "yes",
+      "rejectData": "no",
+      "recoveryWarning": "warning"
+    },
+    "expected": [
+      {
+        "type": "flex",
+        "altText": "confirm",
+        "contents": {
+          "type": "bubble",
+          "size": "mega",
+          "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "24px",
+            "backgroundColor": "#FFFFFF",
+            "contents": [
+              {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "md",
+                "alignItems": "center",
+                "contents": [
+                  {
+                    "type": "image",
+                    "url": "https://original-worker.test/line/icons/check-v1.png",
+                    "size": "40px",
+                    "aspectRatio": "1:1",
+                    "flex": 0
+                  },
+                  {
+                    "type": "text",
+                    "text": "confirm",
+                    "color": "#2C2C2C",
+                    "size": "md",
+                    "wrap": true,
+                    "flex": 1
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": "warning",
+                "size": "xs",
+                "color": "#FF3344",
+                "wrap": true,
+                "margin": "md"
+              }
+            ]
+          },
+          "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "16px",
+            "paddingTop": "0px",
+            "backgroundColor": "#FFFFFF",
+            "contents": [
+              {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "md",
+                "contents": [
+                  {
+                    "type": "box",
+                    "layout": "vertical",
+                    "flex": 1,
+                    "borderWidth": "1px",
+                    "borderColor": "#828282",
+                    "cornerRadius": "8px",
+                    "backgroundColor": "#FFFFFF",
+                    "action": {
+                      "type": "postback",
+                      "label": "ยกเลิก",
+                      "data": "no",
+                      "displayText": "ยกเลิก"
+                    },
+                    "contents": [
+                      {
+                        "type": "button",
+                        "style": "link",
+                        "color": "#2C2C2C",
+                        "height": "sm",
+                        "action": {
+                          "type": "postback",
+                          "label": "ยกเลิก",
+                          "data": "no",
+                          "displayText": "ยกเลิก"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "type": "button",
+                    "style": "primary",
+                    "color": "#2C2C2C",
+                    "height": "sm",
+                    "flex": 1,
+                    "action": {
+                      "type": "postback",
+                      "label": "ยืนยัน",
+                      "data": "yes",
+                      "displayText": "ยืนยัน"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "unchanged upload start",
+    "reply": {
+      "kind": "flex",
+      "text": "เริ่มการนำเข้าสินค้า\noriginal-import",
+      "contents": {
+        "type": "bubble",
+        "size": "mega",
+        "body": {
+          "type": "box",
+          "layout": "vertical",
+          "paddingAll": "24px",
+          "backgroundColor": "#FFFFFF",
+          "contents": [
+            {
+              "type": "box",
+              "layout": "horizontal",
+              "spacing": "md",
+              "alignItems": "center",
+              "contents": [
+                {
+                  "type": "image",
+                  "url": "https://original-worker.test/line/icons/image-v1.png",
+                  "size": "40px",
+                  "aspectRatio": "1:1",
+                  "flex": 0
+                },
+                {
+                  "type": "box",
+                  "layout": "vertical",
+                  "spacing": "none",
+                  "flex": 1,
+                  "contents": [
+                    {
+                      "type": "text",
+                      "text": "/upload",
+                      "color": "#949494",
+                      "size": "xs"
+                    },
+                    {
+                      "type": "text",
+                      "text": "เริ่มการนำเข้าสินค้า",
+                      "color": "#2C2C2C",
+                      "size": "sm",
+                      "weight": "bold",
+                      "wrap": true
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": "original-import",
+              "color": "#949494",
+              "size": "xxs",
+              "margin": "xl",
+              "wrap": true
+            }
+          ]
+        }
+      }
+    },
+    "expected": [
+      {
+        "type": "flex",
+        "altText": "เริ่มการนำเข้าสินค้า\noriginal-import",
+        "contents": {
+          "type": "bubble",
+          "size": "mega",
+          "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "24px",
+            "backgroundColor": "#FFFFFF",
+            "contents": [
+              {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "md",
+                "alignItems": "center",
+                "contents": [
+                  {
+                    "type": "image",
+                    "url": "https://original-worker.test/line/icons/image-v1.png",
+                    "size": "40px",
+                    "aspectRatio": "1:1",
+                    "flex": 0
+                  },
+                  {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "none",
+                    "flex": 1,
+                    "contents": [
+                      {
+                        "type": "text",
+                        "text": "/upload",
+                        "color": "#949494",
+                        "size": "xs"
+                      },
+                      {
+                        "type": "text",
+                        "text": "เริ่มการนำเข้าสินค้า",
+                        "color": "#2C2C2C",
+                        "size": "sm",
+                        "weight": "bold",
+                        "wrap": true
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": "original-import",
+                "color": "#949494",
+                "size": "xxs",
+                "margin": "xl",
+                "wrap": true
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "unchanged docs start",
+    "reply": {
+      "kind": "flex",
+      "text": "เริ่มสร้างเอกสารแล้ว\noriginal-publication",
+      "contents": {
+        "type": "bubble",
+        "size": "mega",
+        "body": {
+          "type": "box",
+          "layout": "vertical",
+          "paddingAll": "24px",
+          "backgroundColor": "#FFFFFF",
+          "contents": [
+            {
+              "type": "box",
+              "layout": "horizontal",
+              "spacing": "md",
+              "alignItems": "center",
+              "contents": [
+                {
+                  "type": "image",
+                  "url": "https://original-worker.test/line/icons/doc-v1.png",
+                  "size": "40px",
+                  "aspectRatio": "1:1",
+                  "flex": 0
+                },
+                {
+                  "type": "box",
+                  "layout": "vertical",
+                  "spacing": "none",
+                  "flex": 1,
+                  "contents": [
+                    {
+                      "type": "text",
+                      "text": "/docs",
+                      "color": "#949494",
+                      "size": "xs"
+                    },
+                    {
+                      "type": "text",
+                      "text": "เริ่มสร้างเอกสารแล้ว",
+                      "color": "#2C2C2C",
+                      "size": "sm",
+                      "weight": "bold",
+                      "wrap": true
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": "original-publication",
+              "color": "#949494",
+              "size": "xxs",
+              "margin": "xl",
+              "wrap": true
+            }
+          ]
+        }
+      }
+    },
+    "expected": [
+      {
+        "type": "flex",
+        "altText": "เริ่มสร้างเอกสารแล้ว\noriginal-publication",
+        "contents": {
+          "type": "bubble",
+          "size": "mega",
+          "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "24px",
+            "backgroundColor": "#FFFFFF",
+            "contents": [
+              {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "md",
+                "alignItems": "center",
+                "contents": [
+                  {
+                    "type": "image",
+                    "url": "https://original-worker.test/line/icons/doc-v1.png",
+                    "size": "40px",
+                    "aspectRatio": "1:1",
+                    "flex": 0
+                  },
+                  {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "none",
+                    "flex": 1,
+                    "contents": [
+                      {
+                        "type": "text",
+                        "text": "/docs",
+                        "color": "#949494",
+                        "size": "xs"
+                      },
+                      {
+                        "type": "text",
+                        "text": "เริ่มสร้างเอกสารแล้ว",
+                        "color": "#2C2C2C",
+                        "size": "sm",
+                        "weight": "bold",
+                        "wrap": true
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": "original-publication",
+                "color": "#949494",
+                "size": "xxs",
+                "margin": "xl",
+                "wrap": true
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+]

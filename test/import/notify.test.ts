@@ -111,8 +111,9 @@ describe("sendImportSummary", () => {
 
     await sendImportSummary({
       pushMessage,
+      sendReplyMessages: async () => ({requestId:null}),
       replyFlex: async () => undefined,
-      replyText: async () => undefined,
+      replyQuotedText: async () => undefined, replyText: async () => undefined,
       replyButtons: async () => undefined,
       getGroupMemberProfile: async () => ({ userId: "unused", displayName: "unused" }),
     }, "group-1", input, "https://worker.example");
@@ -137,8 +138,9 @@ describe("sendImportSummary", () => {
       sendImportSummary(
         {
           pushMessage,
-          replyFlex: async () => undefined,
-          replyText: async () => undefined,
+          sendReplyMessages: async () => ({requestId:null}),
+      replyFlex: async () => undefined,
+          replyQuotedText: async () => undefined, replyText: async () => undefined,
           replyButtons: async () => undefined,
           getGroupMemberProfile: async () => ({ userId: "unused", displayName: "unused" }),
         },

@@ -62,3 +62,11 @@ export function docsWorkflowFailureCard(input: Parameters<typeof buildPublicatio
     "เปิดใน Airtable", input.airtableRunUrl, publicBaseUrl,
   ) };
 }
+
+export function docsUnconfirmedCard(input:{thaiDate:string;airtableRunUrl:string},publicBaseUrl:string):SearchCardReply {
+  const guidance='กรุณาตรวจสอบสถานะงานและเอกสารก่อนส่ง /docs ซ้ำ';
+  return {kind:'flex',text:[`วันที่: ${input.thaiDate}`,'ยังยืนยันสถานะงานเอกสารไม่ได้',guidance,`ลิงก์ Airtable: ${input.airtableRunUrl}`].join('\n'),contents:summaryCard(
+    'ยังยืนยันสถานะงานเอกสารไม่ได้','alert-v1',input.thaiDate,
+    [{...text(guidance,true),size:'xs'}],'เปิดใน Airtable',input.airtableRunUrl,publicBaseUrl,
+  )};
+}

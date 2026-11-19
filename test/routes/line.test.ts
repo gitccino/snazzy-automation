@@ -185,6 +185,26 @@ it("persists before acknowledging, deduplicates IDs, and returns 503 if persiste
   finish();
   expect((await first).status).toBe(200);
   expect((await handleLineRoute(request(), env, immediateContext)).status).toBe(200);
-  expect(createBatch.mock.calls[0]![0]).toEqual(createBatch.mock.calls[1]![0]);
+  expect(createBatch.mock.calls[0]![0].map((item:any)=>item.id)).toEqual(createBatch.mock.calls[1]![0].map((item:any)=>item.id));
+  expect(createBatch.mock.calls[0]![0][0].params.receivedAt).toEqual(expect.any(String));
   expect((await handleLineRoute(request(), env, immediateContext)).status).toBe(503);
+});
+
+it.each(['แมสเลย A-2','invalid'])('sanitizes messenger text before durable Workflow creation: %s',async instruction=>{
+ const {createTestEnv}=await import('../helpers/env');
+ const body=new TextEncoder().encode(JSON.stringify({events:[{type:'message',timestamp:Date.parse('2026-11-14T01:00:00Z'),webhookEventId:'mess-safe',replyToken:'r',source:{type:'group',groupId:'CtestGroup',userId:'Ustaff'},message:{type:'text',id:'m',quoteToken:'private-quote',text:'/mess\n'+instruction+'\n065 663 5369\nSTAY Hotel'}}]}));
+ const createBatch=vi.fn(async()=>[]);
+ const e={...testEnv(),...createTestEnv(),CONFIGURATION_MODE:'legacy' as const,LINE_CHANNEL_SECRET:'secret',LINE_COMMAND_WORKFLOW:{createBatch} as any};
+ const response=await handleLineRoute(new Request('https://worker/line/webhook',{method:'POST',headers:{'x-line-signature':await sign(body,'secret')},body}),e,immediateContext);
+ expect(response.status).toBe(200);expect(createBatch).toHaveBeenCalledTimes(1);
+ const params=createBatch.mock.calls[0] as unknown as [unknown];expect(JSON.stringify(params)).not.toMatch(/065|STAY Hotel/);expect(JSON.stringify(params)).toContain('private-quote');
+});
+
+it('persists only metadata for conversation, stickers and actorless command-looking messages',async()=>{
+ const {parseLineIngressEvents}=await import('../../src/line/types');
+ const raw=(message:any,userId?:string)=>({type:'message',webhookEventId:crypto.randomUUID(),replyToken:'fresh',source:{type:'group',groupId:'C1',...(userId?{userId}:{})},message});
+ const events=parseLineIngressEvents({events:[raw({type:'text',id:'m',text:'private conversation'},'U1'),raw({type:'sticker',id:'secret-media-id',packageId:'private'},'U2'),raw({type:'text',id:'m3',text:'/soldout A-1 THB 100'})]});
+ expect(events).toHaveLength(3);for(const event of events)expect(event).toEqual({type:'queue-trigger',webhookEventId:expect.any(String),replyToken:'fresh',source:{type:'group',groupId:'C1'}});
+ expect(parseLineIngressEvents({events:[raw({type:'text',id:'m',text:'/help'},'U1')]})).toMatchObject([{type:'message',source:{userId:'U1'},message:{text:'/help'}}]);
+ expect(parseLineIngressEvents({events:[{type:'queue-trigger',webhookEventId:'forged',replyToken:'fresh',source:{type:'group',groupId:'C1'}}]})).toEqual([]);
 });

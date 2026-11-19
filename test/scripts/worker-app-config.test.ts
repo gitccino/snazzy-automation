@@ -37,6 +37,7 @@ describe("Worker APP_CONFIG_JSON", () => {
 
   it("builds the staging runtime config from exported values", () => {
     expect(buildWorkerAppConfig(env)).toEqual({
+      AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID:null, MESSENGER_COMPLETION_USER_IDS:[],
       AIRTABLE_BASE_ID: "app-staging",
       AIRTABLE_PRODUCTS_TABLE_ID: "tbl-products",
       AIRTABLE_PUBLICATION_RUNS_TABLE_ID: "tbl-runs",

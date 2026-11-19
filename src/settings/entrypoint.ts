@@ -66,6 +66,7 @@ const requestSchema = z.strictObject({
 });
 const allowed = {
   airtable: [
+    "AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID",
     "AIRTABLE_BASE_ID",
     "AIRTABLE_PRODUCTS_TABLE_ID",
     "AIRTABLE_PUBLICATION_RUNS_TABLE_ID",

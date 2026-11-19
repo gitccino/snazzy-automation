@@ -1,11 +1,12 @@
+import { renderCommandReply } from "./reply-renderer";
+import { isMessengerEvent, prepareMessengerReply, messengerAccessAllowed } from "../messenger/line";
+import type { MessengerDeps } from "../messenger/types";
 import type { AuditLog } from "../db/audit";
 import type { LineRepository } from "../db/line-repository";
 import type { IdGenerator } from "../shared/ids";
 import type { Clock } from "../shared/time";
 import type { InventoryClient } from "./airtable-inventory";
 import type { LineClient } from "./client";
-import { alreadyOutCard, saleSuccessCard } from "./search-card";
-import { confirmationCard, revertSuccessCard } from "./confirmation-card";
 import { parseErrorText } from "./messages";
 import { parseLineCommand } from "./parser";
 import { prepareRevert, resolveRevert } from "./revert";
@@ -19,6 +20,7 @@ import {
 import type { LineActor, SupportedLineEvent } from "./types";
 
 export interface WebhookDeps extends ReadOnlyDeps, SoldoutDeps {
+  messenger?: MessengerDeps;
   allowedGroupId?: string;
   allowedGroupIds?: string[];
   confirmationEnabled: boolean;
@@ -75,114 +77,9 @@ async function actorFor(
   };
 }
 
-function addRecoveryWarning(
-  contents: Record<string, unknown>,
-  warning?: string,
-): Record<string, unknown> {
-  if (!warning) return contents;
-  const body = contents.body as Record<string, unknown> | undefined;
-  if (!body || !Array.isArray(body.contents)) return contents;
-  return {
-    ...contents,
-    body: {
-      ...body,
-      contents: [
-        ...body.contents,
-        {
-          type: "text",
-          text: warning,
-          size: "xs",
-          color: "#FF3344",
-          wrap: true,
-          margin: "md",
-        },
-      ],
-    },
-  };
-}
-
-export async function sendCommandReply(
-  replyToken: string,
-  reply: CommandReply,
-  line: LineClient,
-  publicBaseUrl: string,
-): Promise<void> {
-  if (reply.kind === "flex") {
-    await line.replyFlex(
-      replyToken,
-      reply.text,
-      addRecoveryWarning(reply.contents, reply.recoveryWarning),
-    );
-    return;
-  }
-  if (reply.kind === "text") {
-    if (reply.alreadyOut) {
-      const card = alreadyOutCard(reply.alreadyOut, publicBaseUrl);
-      await line.replyFlex(
-        replyToken,
-        card.text,
-        addRecoveryWarning(card.contents, reply.recoveryWarning),
-      );
-      return;
-    }
-    if (reply.revertSuccess) {
-      await line.replyFlex(
-        replyToken,
-        reply.text,
-        addRecoveryWarning(
-          revertSuccessCard(publicBaseUrl),
-          reply.recoveryWarning,
-        ),
-      );
-      return;
-    }
-    if (reply.saleSuccess) {
-      const { productId, soldPrice, product } = reply.saleSuccess;
-      const card = saleSuccessCard(
-        productId,
-        soldPrice,
-        publicBaseUrl,
-        product,
-      );
-      await line.replyFlex(
-        replyToken,
-        card.text,
-        addRecoveryWarning(card.contents, reply.recoveryWarning),
-      );
-      return;
-    }
-    await line.replyText(
-      replyToken,
-      reply.recoveryWarning
-        ? `${reply.recoveryWarning}\n${reply.text}`
-        : reply.text,
-    );
-    return;
-  }
-  // Flex text components allow 2,000 characters. Keep the existing lossless
-  // multi-message path for unusually large legacy confirmation details.
-  if (reply.text.length <= 2000) {
-    await line.replyFlex(
-      replyToken,
-      reply.text,
-      addRecoveryWarning(
-        confirmationCard(reply, publicBaseUrl),
-        reply.recoveryWarning,
-      ),
-    );
-    return;
-  }
-  await line.replyButtons(
-    replyToken,
-    reply.text,
-    reply.recoveryWarning
-      ? `${reply.recoveryWarning}\n${reply.text}`
-      : reply.text,
-    [
-      { label: "ยืนยัน", data: reply.approveData, style: "primary" },
-      { label: "ยกเลิก", data: reply.rejectData, style: "secondary" },
-    ],
-  );
+export async function sendCommandReply(replyToken: string, reply: CommandReply, line: LineClient, publicBaseUrl: string): Promise<void> {
+  const messages = renderCommandReply(reply, publicBaseUrl);
+  await line.sendReplyMessages(replyToken, messages);
 }
 
 export async function prepareLineReply(
@@ -190,6 +87,7 @@ export async function prepareLineReply(
   deps: WebhookDeps,
   correlationId = event.webhookEventId,
 ): Promise<CommandReply | null> {
+  if (isMessengerEvent(event)) return prepareMessengerReply(event, deps.messenger);
   if (event.type === "message") {
     const parsed = parseLineCommand(event.message.text);
     if (!parsed.ok)
@@ -240,6 +138,7 @@ export async function processLineEvents(
   const failures: unknown[] = [];
   for (const event of events) {
     let claimed = false;
+    let dispatchStarted = false;
     try {
       claimed = await deps.repo.claimEvent(
         event.webhookEventId,
@@ -262,8 +161,9 @@ export async function processLineEvents(
         continue;
       }
 
-      const savedReply = await deps.repo.findEventReply(event.webhookEventId);
+      const savedReply = isMessengerEvent(event) ? null : await deps.repo.findEventReply(event.webhookEventId);
       if (savedReply !== null) {
+        dispatchStarted = true;
         await sendCommandReply(
           event.replyToken,
           savedReply,
@@ -273,7 +173,13 @@ export async function processLineEvents(
         continue;
       }
       const deliver = async (reply: CommandReply) => {
+        if (isMessengerEvent(event) && deps.messenger && !(await messengerAccessAllowed(event, deps.messenger))) {
+          dispatchStarted = true;
+          await deps.line.replyText(event.replyToken, "⚠️ สิทธิ์หรือการตั้งค่าเปลี่ยนแล้ว กรุณาขอรายการใหม่");
+          return;
+        }
         await deps.repo.saveEventReply(event.webhookEventId, reply);
+        dispatchStarted = true;
         await sendCommandReply(
           event.replyToken,
           reply,
@@ -285,7 +191,7 @@ export async function processLineEvents(
       if (reply !== null) await deliver(reply);
     } catch (error) {
       failures.push(error);
-      if (claimed) {
+      if (claimed && !dispatchStarted) {
         try {
           await deps.repo.releaseEvent(event.webhookEventId);
         } catch (releaseError) {

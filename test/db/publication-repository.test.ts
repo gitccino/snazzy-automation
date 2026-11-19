@@ -255,3 +255,13 @@ describe("publication-repository", () => {
     });
   });
 });
+
+it('allocates one new notification cycle for an intentional failed restart',async()=>{
+ const {reopenFailedJobForRestart,readPublicationJob}=await import('../../src/db/publication-repository');
+ const id=crypto.randomUUID(); const db=testEnv().DB; const clock={now:()=>new Date('2026-11-19T08:00:00Z')};
+ await acquireOrResumeJob(db,clock,id,'owner');
+ await setJobState(db,clock,id,'failed');
+ expect(await reopenFailedJobForRestart(db,clock,id,'owner',1,undefined,1)).toBe(true);
+ expect((await readPublicationJob(db,id))?.notificationCycle).toBe(2);
+ expect(await reopenFailedJobForRestart(db,clock,id,'owner',1,undefined,1)).toBe(false);
+});

@@ -1,3 +1,7 @@
+import { createLineReplyRepository } from '../db/line-reply-repository';
+import { deliverEventReply } from './reply-delivery';
+import { loadSettingsSnapshot } from '../settings/runtime';
+import { isMessengerEvent, messengerAccessAllowed } from "../messenger/line";
 import { captureOperationContext } from "../settings/runtime";
 import { readPendingContext } from "../db/execution-context-repository";
 import type { OperationContext } from "../settings/schema";
@@ -11,8 +15,8 @@ import { createWebhookDeps, fetchForLineCommand } from "../routes/line";
 import { isRetryable } from "../shared/errors";
 import { createLineClient } from "./client";
 import type { CommandReply } from "./soldout";
-import type { SupportedLineEvent } from "./types";
-import { prepareLineReply, sendCommandReply } from "./webhook";
+import type { LineIngressEvent } from "./types";
+import { prepareLineReply } from "./webhook";
 
 const attemptOptions = {
   retries: { limit: 0, delay: "1 second" },
@@ -105,85 +109,41 @@ export async function runLineCommandRecovery(
   return { status: "failed" as const };
 }
 
-export class LineCommandWorkflow extends WorkflowEntrypoint<
-  Env,
-  { event: SupportedLineEvent; context?: OperationContext }
-> {
-  async run(
-    input: WorkflowEvent<{
-      event: SupportedLineEvent;
-      context?: OperationContext;
-    }>,
-    step: WorkflowStep,
-  ) {
-    const event = input.payload.event;
-    const context = await step.do(
-      "settings-context",
-      attemptOptions,
-      async () => {
-        if (event.type === "postback") {
-          const token = new URLSearchParams(event.postback.data).get("token");
-          if (token) {
-            const saved = await readPendingContext(this.env.DB, token);
-            if (saved) {
-              if (saved.replyGroupId !== event.source.groupId)
-                throw new Error("confirmation_group_mismatch");
-              return saved;
-            }
-            if (this.env.CONFIGURATION_MODE === "d1")
-              throw new Error("legacy_context_requires_operator_resolution");
-          }
+export class LineCommandWorkflow extends WorkflowEntrypoint<Env,{event:LineIngressEvent;context?:OperationContext;receivedAt?:string}> {
+  async run(input:WorkflowEvent<{event:LineIngressEvent;context?:OperationContext;receivedAt?:string}>,step:WorkflowStep) {
+    const {event,receivedAt}=input.payload;
+    // Legacy persisted events may already have pushed; never adopt them into reply delivery.
+    if(!receivedAt)return {status:'ignored' as const};
+    const context=await step.do('settings-context',attemptOptions,async()=>{
+      if(event.type==='postback' && !isMessengerEvent(event)) {
+        const token=new URLSearchParams(event.postback.data).get('token');
+        if(token) {
+          const saved=await readPendingContext(this.env.DB,token);
+          if(saved) { if(saved.replyGroupId!==event.source.groupId)throw new Error('confirmation_group_mismatch'); return saved; }
+          if(this.env.CONFIGURATION_MODE==='d1')throw new Error('legacy_context_requires_operator_resolution');
         }
-        if (!input.payload.context && this.env.CONFIGURATION_MODE === "d1")
-          throw new Error("legacy_context_requires_operator_resolution");
-        return (
-          input.payload.context ??
-          (await captureOperationContext(this.env, event.source.groupId))
-        );
-      },
-    );
-    const deps = await createWebhookDeps(this.env, input.instanceId, context);
-    deps.retryTransientErrors = true;
-    if (
-      !(deps.allowedGroupIds ?? [deps.allowedGroupId]).includes(
-        event.source.groupId,
-      )
-    )
-      return { status: "ignored" };
-    const completed = await step.do("already-processed", () =>
-      this.env.DB.prepare("SELECT event_id FROM line_events WHERE event_id = ?")
-        .bind(event.webhookEventId)
-        .first<{ event_id: string }>(),
-    );
-    if (completed) return { status: "duplicate" };
-    const client = (retryKey: string) =>
-      createLineClient({
-        channelAccessToken: this.env.LINE_CHANNEL_ACCESS_TOKEN,
-        fetch: fetchForLineCommand,
-        pushReplies: { groupId: event.source.groupId, retryKey },
-      });
-    const outcome = await runLineCommandRecovery(step, {
-      async prepare() {
-        return (
-          (await deps.repo.findEventReply(event.webhookEventId)) ??
-          (await prepareLineReply(event, deps))
-        );
-      },
-      async deliver(reply, retryKey) {
-        await deps.repo.saveEventReply(event.webhookEventId, reply);
-        await sendCommandReply(
-          event.replyToken,
-          reply,
-          client(retryKey),
-          deps.publicBaseUrl,
-        );
-      },
-      notify: (text, retryKey) =>
-        client(retryKey).pushMessage(event.source.groupId, text),
+      }
+      if(!input.payload.context && this.env.CONFIGURATION_MODE==='d1')throw new Error('legacy_context_requires_operator_resolution');
+      return input.payload.context ?? await captureOperationContext(this.env,event.source.groupId);
     });
-    await step.do("record-completion", () =>
-      deps.repo.claimEvent(event.webhookEventId, event.source.groupId),
-    );
-    return outcome;
+    const allowed=async(groupId:string)=>(await loadSettingsSnapshot(this.env)).config.lineAllowedGroupIds.includes(groupId);
+    if(!await allowed(event.source.groupId))return {status:'ignored' as const};
+    const completed=await step.do('already-processed',()=>this.env.DB.prepare('SELECT event_id FROM line_events WHERE event_id=? UNION ALL SELECT event_id FROM line_event_replies WHERE event_id=? LIMIT 1').bind(event.webhookEventId,event.webhookEventId).first<{event_id:string}>());
+    if(completed)return {status:'duplicate' as const};
+    const deps=await createWebhookDeps(this.env,input.instanceId,context);
+    deps.retryTransientErrors=true;
+    let reply=await step.do('prepare-reply',attemptOptions,async():Promise<CommandReply|null>=>{
+      if(event.type==='queue-trigger')return null;
+      try { return await prepareLineReply(event,deps); }
+      catch { return {kind:'text',text:'⚠️ ประมวลผลคำสั่งไม่สำเร็จ กรุณาตรวจสอบข้อมูลก่อนส่งคำสั่งซ้ำ'}; }
+    });
+    if(event.type!=='queue-trigger' && isMessengerEvent(event) && deps.messenger && !await messengerAccessAllowed(event,deps.messenger))
+      reply={kind:'text',text:'⚠️ สิทธิ์หรือการตั้งค่าเปลี่ยนแล้ว กรุณาขอรายการใหม่'};
+    await step.do('record-command-completion',attemptOptions,async()=>{
+      if(reply)await deps.repo.saveEventReply(event.webhookEventId,reply);
+      await deps.repo.claimEvent(event.webhookEventId,event.source.groupId);
+    });
+    const status=await step.do('reply-once',attemptOptions,()=>deliverEventReply({eventId:event.webhookEventId,groupId:event.source.groupId,workflowId:input.instanceId,receivedAt,replyToken:event.replyToken,commandReply:reply,drainQueue:event.type!=='postback',publicBaseUrl:deps.publicBaseUrl},{repo:createLineReplyRepository(this.env.DB,deps.clock),line:deps.line,clock:deps.clock,isGroupAllowed:allowed}));
+    return {status};
   }
 }
