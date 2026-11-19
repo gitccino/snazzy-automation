@@ -92,12 +92,12 @@ export async function handleLineRoute(
     return new Response("ok");
   }
 
-  const context = await captureOperationContext(env, null);
-  const config = context.settings.config;
-  const accepted = events.filter((event) =>
-    config.lineAllowedGroupIds.includes(event.source.groupId),
-  );
   try {
+    const context = await captureOperationContext(env, null);
+    const config = context.settings.config;
+    const accepted = events.filter((event) =>
+      config.lineAllowedGroupIds.includes(event.source.groupId),
+    );
     // createBatch is idempotent while an instance is retained. Persist before acknowledging LINE.
     for (let offset = 0; offset < accepted.length; offset += 100) {
       const batch = await Promise.all(

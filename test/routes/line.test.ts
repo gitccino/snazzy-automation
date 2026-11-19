@@ -208,3 +208,19 @@ it('persists only metadata for conversation, stickers and actorless command-look
  expect(parseLineIngressEvents({events:[raw({type:'text',id:'m',text:'/help'},'U1')]})).toMatchObject([{type:'message',source:{userId:'U1'},message:{text:'/help'}}]);
  expect(parseLineIngressEvents({events:[{type:'queue-trigger',webhookEventId:'forged',replyToken:'fresh',source:{type:'group',groupId:'C1'}}]})).toEqual([]);
 });
+
+it("returns 503 without starting a command when settings storage is unavailable", async () => {
+  const body = new TextEncoder().encode(JSON.stringify({ events: [{
+    type: "message", webhookEventId: "evt-settings-outage", replyToken: "reply",
+    source: { type: "group", groupId: "CtestGroup", userId: "U1" },
+    message: { type: "text", id: "msg", text: "/upload" },
+  }] }));
+  const createBatch = vi.fn();
+  const env = { ...testEnv(), CONFIGURATION_MODE: "d1", LINE_CHANNEL_SECRET: "secret",
+    DB: { prepare() { throw new Error("unavailable"); } }, LINE_COMMAND_WORKFLOW: { createBatch } } as unknown as import("../../src/env").Env;
+  const response = await handleLineRoute(new Request("https://worker/line/webhook", {
+    method: "POST", headers: { "x-line-signature": await sign(body, "secret") }, body,
+  }), env, immediateContext);
+  expect(response.status).toBe(503);
+  expect(createBatch).not.toHaveBeenCalled();
+});
