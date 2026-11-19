@@ -50,6 +50,7 @@ export async function handleDocsTrigger(
   publicationDate?: string,
   fetcher: typeof fetch = fetch.bind(globalThis),
   context?: OperationContext,
+  trustedEventId?: string,
 ): Promise<DocsTriggerResult> {
   context ??= await captureOperationContext(env, null);
   const requestedDate = publicationDate ?? todayBangkokDate(clock);
@@ -119,8 +120,10 @@ export async function handleDocsTrigger(
       clock,
       publicationRunId,
       acquired.job.generation,
+      trustedEventId,
     );
-    if (!replacement) return { status: "already_running", publicationRunId };
+    if (!replacement || replacement.publicationRunId !== publicationRunId)
+      return { status: "already_running", publicationRunId };
     acquired = { job: replacement, alreadySucceeded: false, ownsLock: true };
     id = publicationWorkflowId(publicationRunId, replacement.generation);
     workflow = await lookupWorkflow(env, id);

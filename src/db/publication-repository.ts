@@ -113,7 +113,28 @@ export async function reopenSuccessfulJobForRegeneration(
   clock: Clock,
   runId: string,
   expectedGeneration: number,
+  trustedEventId?: string,
 ): Promise<PublicationJobRow | null> {
+  if (trustedEventId) {
+    const workflowId = publicationWorkflowId(runId, expectedGeneration + 1);
+    await db.batch([
+      db.prepare(`UPDATE publication_jobs SET generation = generation + 1, notification_cycle = 1, state = 'locked', correlation_id = ?, temp_doc_id = NULL, validation_result_json = NULL, finalization_json = NULL, settings_context_json = NULL, attempt_count = 0, updated_at = ?
+        WHERE publication_run_id = ? AND state = 'succeeded' AND generation = ? AND successful_generation = generation
+        AND NOT EXISTS (SELECT 1 FROM publication_regeneration_events WHERE event_id = ?)`)
+        .bind(workflowId, clock.now().toISOString(), runId, expectedGeneration, trustedEventId),
+      db.prepare(`INSERT INTO publication_regeneration_events (event_id, publication_run_id, generation, notification_cycle, workflow_id, action, job_json)
+        SELECT ?, publication_run_id, generation, notification_cycle, correlation_id, 'regenerate', json_object(
+          'publication_run_id', publication_run_id, 'publication_date', publication_date, 'state', state, 'correlation_id', correlation_id,
+          'google_doc_id', google_doc_id, 'google_doc_url', google_doc_url, 'temp_doc_id', temp_doc_id, 'validation_result_json', validation_result_json,
+          'attempt_count', attempt_count, 'created_at', created_at, 'updated_at', updated_at, 'generation', generation,
+          'successful_generation', successful_generation, 'notification_cycle', notification_cycle, 'finalization_json', finalization_json)
+        FROM publication_jobs WHERE publication_run_id = ? AND changes() = 1`)
+        .bind(trustedEventId, runId),
+    ]);
+    const binding = await db.prepare("SELECT job_json FROM publication_regeneration_events WHERE event_id = ?")
+      .bind(trustedEventId).first<{ job_json: string }>();
+    return binding ? toRow(JSON.parse(binding.job_json) as JobRowRaw) : null;
+  }
   const raw = await db
     .prepare(
       `UPDATE publication_jobs

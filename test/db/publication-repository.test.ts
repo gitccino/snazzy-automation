@@ -20,6 +20,7 @@ const env = testEnv();
 
 describe("publication-repository", () => {
   beforeEach(async () => {
+    await env.DB.exec("DELETE FROM publication_regeneration_events");
     await env.DB.exec("DELETE FROM publication_product_cache");
     await env.DB.exec("DELETE FROM publication_jobs");
   });
@@ -48,6 +49,31 @@ describe("publication-repository", () => {
       tempDocId: null, publicationDate: "2026-09-02", correlationId: "publication-run-revision-v2",
     });
     expect(await reopenSuccessfulJobForRegeneration(env.DB, clock, "run-revision", 2)).toBeNull();
+  });
+
+  it("binds a regeneration event once across runs and generations", async () => {
+    for (const id of ["bound", "other"]) {
+      await acquireOrResumeJob(env.DB, clock, id, id);
+      await setJobState(env.DB, clock, id, "succeeded");
+    }
+    const first = await reopenSuccessfulJobForRegeneration(env.DB, clock, "bound", 1, "event-1");
+    await setJobState(env.DB, clock, "bound", "succeeded", undefined, 2);
+    expect(await reopenSuccessfulJobForRegeneration(env.DB, clock, "bound", 2, "event-1")).toEqual(first);
+    expect(await reopenSuccessfulJobForRegeneration(env.DB, clock, "other", 1, "event-1")).toEqual(first);
+    expect((await acquireOrResumeJob(env.DB, clock, "bound", "x")).job.generation).toBe(2);
+    expect((await acquireOrResumeJob(env.DB, clock, "other", "x")).job.generation).toBe(1);
+  });
+
+  it("rolls back the generation when binding insertion fails", async () => {
+    await acquireOrResumeJob(env.DB, clock, "rollback", "original");
+    await setJobState(env.DB, clock, "rollback", "succeeded");
+    await env.DB.exec("CREATE TRIGGER fail_regeneration_binding BEFORE INSERT ON publication_regeneration_events BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
+    try {
+      await expect(reopenSuccessfulJobForRegeneration(env.DB, clock, "rollback", 1, "event-fail")).rejects.toThrow();
+      expect((await acquireOrResumeJob(env.DB, clock, "rollback", "x")).job).toMatchObject({ generation: 1, state: "succeeded" });
+    } finally {
+      await env.DB.exec("DROP TRIGGER fail_regeneration_binding");
+    }
   });
 
   it("fences old-generation state and cache writes", async () => {

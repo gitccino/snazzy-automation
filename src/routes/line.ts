@@ -287,7 +287,7 @@ export async function createWebhookDeps(
       );
       return parseUploadTriggerResponse(await response.json());
     },
-    triggerDocs(publicationDate) {
+    triggerDocs(publicationDate, trustedEventId) {
       return handleDocsTrigger(
         env,
         "line",
@@ -295,6 +295,7 @@ export async function createWebhookDeps(
         publicationDate,
         fetcher,
         operationContext,
+        trustedEventId,
       );
     },
   };

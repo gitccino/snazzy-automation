@@ -36,7 +36,7 @@ export interface ReadOnlyDeps {
   inventory: Pick<InventoryClient, "findByProductId" | "listSalesForDay">;
   clock: Clock;
   triggerUpload(): Promise<UploadTriggerResult>;
-  triggerDocs(publicationDate?: string): Promise<DocsTriggerResult>;
+  triggerDocs(publicationDate?: string, trustedEventId?: string): Promise<DocsTriggerResult>;
 }
 
 function uploadResultReply(result: UploadTriggerResult, publicBaseUrl: string): string | SearchCardReply {
@@ -241,6 +241,7 @@ function testReportReply(caseNumber: number | null, page: number, publicBaseUrl:
 export async function handleReadOnlyCommand(
   command: Extract<ParsedCommand, { type: "report" | "help" | "search" | "upload" | "testupload" | "testsearch" | "testsoldout" | "testdocs" | "testreport" | "docs" }>,
   deps: ReadOnlyDeps,
+  trustedEventId?: string,
 ): Promise<string | SearchCardReply> {
   if (command.type === "testreport") return testReportReply(command.caseNumber, command.page, deps.publicBaseUrl);
   if (command.type === "testupload") return testUploadReply(command.caseNumber, deps.publicBaseUrl);
@@ -277,8 +278,8 @@ export async function handleReadOnlyCommand(
   }
   try {
     const result = command.publicationDate
-      ? await deps.triggerDocs(command.publicationDate)
-      : await deps.triggerDocs();
+      ? await deps.triggerDocs(command.publicationDate, trustedEventId)
+      : await deps.triggerDocs(undefined, trustedEventId);
     return docsResultReply(result, deps.publicBaseUrl, command.publicationDate);
   } catch (error) {
     if (!(error instanceof OperationalError) || error.code !== "airtable_duplicate_publication_date") throw error;
