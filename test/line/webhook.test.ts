@@ -30,7 +30,7 @@ function deps(): WebhookDeps {
     finalizeAction: vi.fn(),
     latestReversible: vi.fn(),
   } satisfies LineRepository;
-  const line = {
+  const line = { sendReplyMessages: vi.fn().mockResolvedValue({requestId:null}),
     pushMessage: vi.fn(),
     replyFlex: vi.fn().mockResolvedValue(undefined),
     replyQuotedText: async () => undefined, replyText: vi.fn().mockResolvedValue(undefined),
@@ -66,7 +66,7 @@ it("claims, ignores, and audits a disallowed group once", async () => {
   await processLineEvents([disallowed], d);
 
   expect(d.repo.claimEvent).toHaveBeenCalledWith("evt-1", "OTHER");
-  expect(d.line.replyFlex).not.toHaveBeenCalled();
+  expect(d.line.sendReplyMessages).not.toHaveBeenCalled();
   expect(d.audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: "line_disallowed_group" }));
 });
 
@@ -77,7 +77,7 @@ it("deduplicates before profile lookup and command execution", async () => {
   await processLineEvents([event, event], d);
 
   expect(d.line.getGroupMemberProfile).toHaveBeenCalledTimes(1);
-  expect(d.line.replyFlex).toHaveBeenCalledTimes(1);
+  expect(d.line.sendReplyMessages).toHaveBeenCalledTimes(1);
 });
 
 it("releases the event claim when command processing throws", async () => {
@@ -157,16 +157,13 @@ it.each([
 
   expect(d.repo.claimPending).not.toHaveBeenCalled();
   expect(d.repo.resolvePending).not.toHaveBeenCalled();
-  expect(d.line.replyText).toHaveBeenCalledWith(
-    "reply-postback",
-    "คำยืนยันไม่ถูกต้อง",
-  );
+  expect(d.line.sendReplyMessages).toHaveBeenCalledWith("reply-postback", [{type:"text",text:"คำยืนยันไม่ถูกต้อง"}]);
 });
 
 it("delivers report Flex replies without inventory mutation or pipeline execution", async () => {
   const d = deps();
   await processLineEvents([{ ...event, message: { ...event.message, text: "/report" } }], d);
-  expect(d.line.replyFlex).toHaveBeenCalledWith("reply-1", expect.stringContaining("สรุปยอดขาย"), expect.objectContaining({ type: "bubble" }));
+  expect(d.line.sendReplyMessages).toHaveBeenCalledWith("reply-1", [expect.objectContaining({type:"flex",altText:expect.stringContaining("สรุปยอดขาย"),contents:expect.objectContaining({type:"bubble"})})]);
   expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
   expect(d.triggerUpload).not.toHaveBeenCalled(); expect(d.triggerDocs).not.toHaveBeenCalled();
 });
@@ -177,7 +174,7 @@ it('retains a recovery conflict warning in the long confirmation reply', async()
   const text='x'.repeat(2001);
   const warning='⚠️ ตรวจสอบข้อมูลสินค้า';
   await sendCommandReply('reply',{kind:'buttons',text,approveData:'approve',rejectData:'reject',recoveryWarning:warning},d.line,'https://example.com');
-  expect(d.line.replyButtons).toHaveBeenCalledWith('reply',text,warning+'\n'+text,expect.any(Array));
+  expect(d.line.sendReplyMessages).toHaveBeenCalledWith('reply', [expect.objectContaining({type:'text',text:warning+'\n'+text}), expect.objectContaining({type:'template'})]);
 });
 
 it.each(["สวัสดีครับ", "hello", "/unknown", "/soldout-extra A-1 thb 100", "   "])(
@@ -189,7 +186,7 @@ it.each(["สวัสดีครับ", "hello", "/unknown", "/soldout-extra 
 
     expect(d.repo.saveEventReply).not.toHaveBeenCalled();
     expect(d.line.replyText).not.toHaveBeenCalled();
-    expect(d.line.replyFlex).not.toHaveBeenCalled();
+    expect(d.line.sendReplyMessages).not.toHaveBeenCalled();
     expect(d.line.replyButtons).not.toHaveBeenCalled();
     expect(d.inventory.findByProductId).not.toHaveBeenCalled();
   },
@@ -200,7 +197,7 @@ it("still replies with validation errors for recognized commands", async () => {
 
   await processLineEvents([{ ...event, message: { ...event.message, text: "/search" } }], d);
 
-  expect(d.line.replyText).toHaveBeenCalledWith("reply-1", expect.stringContaining("ไม่พบรหัสสินค้า"));
+  expect(d.line.sendReplyMessages).toHaveBeenCalledWith("reply-1", [expect.objectContaining({type:"text",text:expect.stringContaining("ไม่พบรหัสสินค้า")})]);
   expect(d.repo.saveEventReply).toHaveBeenCalledTimes(1);
 });
 
@@ -210,10 +207,11 @@ it('routes disabled messenger commands to explicit guidance instead of ignoring 
  const input=sanitizeMessengerEvent({...event,timestamp:Date.parse('2026-11-14T01:00:00Z'),message:{type:'text',id:'m',text:'/mess แมสเลย A-2'}} as SupportedLineEvent);
  expect(await prepareLineReply(input,deps())).toMatchObject({kind:'text',text:expect.stringContaining('ตั้งค่า')});
 });
-it('falls back to a product-specific notice when quoting is unavailable',async()=>{
- const {sendCommandReply}=await import('../../src/line/webhook');const d=deps();d.line.replyQuotedText=async()=>{throw new Error('unavailable');};
- await sendCommandReply('reply',{kind:'quoted-text',text:'รายการจัดส่ง A-2',quoteToken:'private'},d.line,d.publicBaseUrl);
- expect(d.line.replyText).toHaveBeenCalledWith('reply',expect.stringContaining('A-2'));
+it('never falls back to a second send after a quote send fails',async()=>{
+ const {sendCommandReply}=await import('../../src/line/webhook'); const d=deps();
+ vi.mocked(d.line.sendReplyMessages).mockRejectedValueOnce(new Error('unknown acceptance'));
+ await expect(sendCommandReply('reply',{kind:'quoted-text',text:'รายการจัดส่ง A-2',quoteToken:'private'},d.line,d.publicBaseUrl)).rejects.toThrow('unknown acceptance');
+ expect(d.line.sendReplyMessages).toHaveBeenCalledTimes(1); expect(d.line.replyText).not.toHaveBeenCalled();
 });
 it('does not replay a saved messenger reply without current preparation',async()=>{
  const d=deps();vi.mocked(d.repo.findEventReply).mockResolvedValue({kind:'text',text:'stale success'});
