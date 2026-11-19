@@ -224,3 +224,41 @@ it("returns 503 without starting a command when settings storage is unavailable"
   expect(response.status).toBe(503);
   expect(createBatch).not.toHaveBeenCalled();
 });
+
+it('records eligible ingress before handoff and recovers a partially failed mixed batch', async () => {
+  const { createTestEnv } = await import('../helpers/env');
+  const db = testEnv().DB;
+  const ids = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
+  const body = new TextEncoder().encode(JSON.stringify({events: ids.map((id, i) => ({type:'message', webhookEventId:id, replyToken:'secret-reply', source:{type:'group',groupId:'CtestGroup',userId:'U1'},message:{type:'text',id:'m',text: ['/docs', '/upload', '/help'][i]}}))}));
+  const signature = await sign(body, 'secret');
+  const request = () => new Request('https://worker/line/webhook',{method:'POST',headers:{'x-line-signature':signature},body});
+  const created = new Set<string>();
+  let fail = true;
+  const createBatch = vi.fn(async (batch: any[]) => {
+    for (const item of batch) {
+      if (item.params.event.webhookEventId !== ids[2]) expect(await db.prepare('SELECT event_id FROM line_command_ingress WHERE event_id=?').bind(item.params.event.webhookEventId).first()).toBeTruthy();
+      if (created.has(item.id)) throw new Error('duplicate');
+      if (item.params.event.webhookEventId === ids[1] && fail) { fail = false; throw new Error('unavailable'); }
+      created.add(item.id);
+    }
+    return [];
+  });
+  const get = vi.fn(async (id:string) => { if (!created.has(id)) throw new Error('missing'); return {status:async()=>({status:'running'})}; });
+  const env = {...testEnv(),...createTestEnv(),DB:db,LINE_CHANNEL_SECRET:'secret',LINE_COMMAND_WORKFLOW:{createBatch,get}} as unknown as import('../../src/env').Env;
+  expect((await handleLineRoute(request(),env,immediateContext)).status).toBe(503);
+  expect((await handleLineRoute(request(),env,immediateContext)).status).toBe(200);
+  expect(created.size).toBe(3);
+  const rows = await db.prepare('SELECT * FROM line_command_ingress WHERE event_id IN (?,?)').bind(ids[0], ids[1]).all();
+  expect(rows.results).toHaveLength(2);
+  expect(JSON.stringify(rows.results)).not.toContain('secret-reply');
+});
+
+it('returns 503 without starting eligible work when ingress storage fails', async () => {
+  const { createTestEnv } = await import('../helpers/env');
+  const body = new TextEncoder().encode(JSON.stringify({events:[{type:'message',webhookEventId:crypto.randomUUID(),replyToken:'r',source:{type:'group',groupId:'CtestGroup',userId:'U1'},message:{type:'text',id:'m',text:'/upload'}}]}));
+  const createBatch = vi.fn();
+  const env = {...testEnv(),...createTestEnv(),LINE_CHANNEL_SECRET:'secret',DB:{prepare(){throw new Error('unavailable');}},LINE_COMMAND_WORKFLOW:{createBatch}} as unknown as import('../../src/env').Env;
+  const response = await handleLineRoute(new Request('https://worker/line/webhook',{method:'POST',headers:{'x-line-signature':await sign(body,'secret')},body}),env,immediateContext);
+  expect(response.status).toBe(503);
+  expect(createBatch).not.toHaveBeenCalled();
+});
