@@ -174,7 +174,7 @@ export async function runPublicationWorkflow(
           throw new NonRetryableError("Publication identity unavailable","publication_generation_stale");
         if (job.state === "succeeded") return;
         const attempt={kind:"publication" as const,runId,generation,...feedbackIdentity};
-        const committed=await createWorkflowFeedbackRepository(deps.db).commitOutcome(attempt,{stage,failureCode:publicationErrorCode(originalError,"publication_stage_failed"),action:"verify",outcome:"unconfirmed",resultKey:JSON.stringify(["publication",runId,generation,feedbackIdentity.notificationCycle,"terminal"])});
+        const committed=await createWorkflowFeedbackRepository(deps.db).commitOutcome(attempt,{stage,failureCode:publicationErrorCode(originalError,"publication_stage_failed"),action:"verify",outcome:"unconfirmed",references:{thaiDate:displayDate??"ไม่สามารถอ่านวันที่รายการได้",airtableRunUrl:`https://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`,publicBaseUrl:deps.config.publicBaseUrl},resultKey:JSON.stringify(["publication",runId,generation,feedbackIdentity.notificationCycle,"terminal"])});
         if (!committed) throw new NonRetryableError("Publication identity unavailable","publication_generation_stale");
       });
     }

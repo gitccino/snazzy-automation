@@ -1,3 +1,4 @@
+import { createWorkflowFeedbackRepository } from '../db/workflow-feedback';
 import { createLineReplyRepository } from '../db/line-reply-repository';
 import { deliverEventReply } from './reply-delivery';
 import { loadSettingsSnapshot } from '../settings/runtime';
@@ -143,7 +144,7 @@ export class LineCommandWorkflow extends WorkflowEntrypoint<Env,{event:LineIngre
       if(reply)await deps.repo.saveEventReply(event.webhookEventId,reply);
       await deps.repo.claimEvent(event.webhookEventId,event.source.groupId);
     });
-    const status=await step.do('reply-once',attemptOptions,()=>deliverEventReply({eventId:event.webhookEventId,groupId:event.source.groupId,workflowId:input.instanceId,receivedAt,replyToken:event.replyToken,commandReply:reply,drainQueue:event.type!=='postback',publicBaseUrl:deps.publicBaseUrl},{repo:createLineReplyRepository(this.env.DB,deps.clock),line:deps.line,clock:deps.clock,isGroupAllowed:allowed}));
+    const status=await step.do('reply-once',attemptOptions,()=>deliverEventReply({eventId:event.webhookEventId,groupId:event.source.groupId,workflowId:input.instanceId,receivedAt,replyToken:event.replyToken,commandReply:reply,drainQueue:event.type!=='postback',publicBaseUrl:deps.publicBaseUrl},{repo:createLineReplyRepository(this.env.DB,deps.clock),line:deps.line,clock:deps.clock,isGroupAllowed:allowed,feedback:createWorkflowFeedbackRepository(this.env.DB)}));
     return {status};
   }
 }

@@ -72,5 +72,11 @@ export function createWorkflowFeedbackRepository(db: D1Database) {
     if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('invalid_limit');
     return (await db.prepare('SELECT * FROM workflow_feedback_results WHERE group_id=? AND materialized=0 ORDER BY rowid LIMIT ?').bind(groupId,limit).all()).results;
   }
-  return { lookupTrustedEarlyFailure, recordStage, commitOutcome, upsertEvidence, readEvidence, pendingByGroup };
+  async function markMaterialized(resultKey: string, groupId: string) {
+    await db.prepare(`UPDATE workflow_feedback_results SET materialized=1 WHERE result_key=? AND group_id=? AND EXISTS (SELECT 1 FROM line_result_outbox WHERE result_key=? AND group_id=?)`).bind(resultKey,groupId,resultKey,groupId).run();
+  }
+  async function hasOutbox(resultKey: string, groupId: string) {
+    return !!await db.prepare('SELECT 1 FROM line_result_outbox WHERE result_key=? AND group_id=?').bind(resultKey,groupId).first();
+  }
+  return { markMaterialized, hasOutbox, lookupTrustedEarlyFailure, recordStage, commitOutcome, upsertEvidence, readEvidence, pendingByGroup };
 }

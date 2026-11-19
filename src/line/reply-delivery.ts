@@ -1,3 +1,5 @@
+import { docsUnconfirmedCard } from './docs-summary-card';
+import type { createWorkflowFeedbackRepository } from '../db/workflow-feedback';
 import type { LineReplyRepository } from '../db/line-reply-repository';
 import type { Clock } from '../shared/time';
 import { LineReplyError, validateReplyMessages, type LineClient } from './client';
@@ -13,11 +15,28 @@ export async function retryReplyPersistence<T>(operation:()=>Promise<T>):Promise
 export async function deliverEventReply(input: {
   eventId:string; groupId:string; workflowId:string; receivedAt:string; replyToken:string;
   commandReply:CommandReply|null; drainQueue:boolean; publicBaseUrl:string;
-}, deps: {repo:LineReplyRepository;line:Pick<LineClient,'sendReplyMessages'>;clock:Clock;isGroupAllowed(groupId:string):Promise<boolean>})
+}, deps: {repo:LineReplyRepository;line:Pick<LineClient,'sendReplyMessages'>;clock:Clock;isGroupAllowed(groupId:string):Promise<boolean>;feedback?:ReturnType<typeof createWorkflowFeedbackRepository>})
 :Promise<'accepted'|'rejected'|'uncertain'|'ignored'|'duplicate'> {
   const fresh=()=>Number.isFinite(Date.parse(input.receivedAt)) && deps.clock.now().getTime()-Date.parse(input.receivedAt)<=45000;
   if(!input.replyToken.trim() || !fresh() || !await deps.isGroupAllowed(input.groupId))return 'ignored';
   const normal=input.commandReply ? renderCommandReply(input.commandReply,input.publicBaseUrl):[];
+  if(input.drainQueue && deps.feedback) {
+    try {
+      const rows=await deps.feedback.pendingByGroup(input.groupId,1);
+      const row=rows[0] as {kind:string;run_id:string;generation:number;notification_cycle:number;result_key:string;outcome_json:string}|undefined;
+      if(row) {
+        if(!await deps.feedback.hasOutbox(row.result_key,input.groupId)) {
+          const outcome=JSON.parse(row.outcome_json) as {outcome?:string;references?:{thaiDate?:string;airtableRunUrl?:string;publicBaseUrl?:string}};
+          const facts=outcome.references;
+          if(row.kind==='publication' && outcome.outcome==='unconfirmed' && facts?.thaiDate && facts.airtableRunUrl && facts.publicBaseUrl) {
+            const card=docsUnconfirmedCard({thaiDate:facts.thaiDate,airtableRunUrl:facts.airtableRunUrl},facts.publicBaseUrl);
+            await deps.repo.enqueueResult({resultKey:row.result_key,groupId:input.groupId,result:{schemaVersion:1,kind:'publication',runId:row.run_id,generation:row.generation,notificationCycle:row.notification_cycle,outcome:'unconfirmed',messages:[{type:'flex',altText:card.text,contents:card.contents}]}});
+          }
+        }
+        await deps.feedback.markMaterialized(row.result_key,input.groupId);
+      }
+    } catch(error) { console.error('workflow_feedback_repair_failed',error); }
+  }
   const head=input.drainQueue ? await deps.repo.head(input.groupId):null;
   const candidate=head?.state==='pending' && normal.length+head.result.messages.length<=5 ? head:null;
   let messages=candidate ? [...normal,...candidate.result.messages]:normal;
