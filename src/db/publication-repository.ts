@@ -560,7 +560,21 @@ export async function admitPublicationGoogleCopy(db: D1Database, runId: string, 
 export async function claimPublicationVerification(
   db: D1Database,
   attempt: { runId: string; generation: number; notificationCycle: number; groupId: string },
+  observation?: { verifierId: string; status: "active" | "terminal" | "absent" | "unavailable" | "interrupted" },
 ): Promise<{ status: "held" } | { status: "claimed"; verifierId: string; originWorkflowId: string; contextJson: string }> {
+  if (observation) {
+    if (observation.status !== "interrupted" && observation.status !== "absent") return { status: "held" };
+    const verifierId = `publication-verify-${crypto.randomUUID()}`;
+    const row = await db.prepare(`UPDATE publication_verification_claims SET verifier_id=?
+      WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND group_id=? AND verifier_id=? AND completed=0
+        AND EXISTS (SELECT 1 FROM publication_jobs WHERE publication_run_id=? AND generation=? AND notification_cycle=?
+          AND json_extract(settings_context_json, '$.replyGroupId')=?)
+      RETURNING origin_workflow_id, context_json`)
+      .bind(verifierId, attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId, observation.verifierId,
+        attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId)
+      .first<{ origin_workflow_id: string; context_json: string }>();
+    return row ? { status: "claimed", verifierId, originWorkflowId: row.origin_workflow_id, contextJson: row.context_json } : { status: "held" };
+  }
   const key = JSON.stringify([attempt.runId, attempt.generation, attempt.notificationCycle]);
   const verifierId = `publication-verify-${await sha256Hex(new TextEncoder().encode(key))}`;
   const row = await db.prepare(`INSERT INTO publication_verification_claims
@@ -573,4 +587,18 @@ export async function claimPublicationVerification(
     .bind(attempt.groupId, verifierId, attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId)
     .first<{ origin_workflow_id: string; context_json: string }>();
   return row ? { status: "claimed", verifierId, originWorkflowId: row.origin_workflow_id, contextJson: row.context_json } : { status: "held" };
+}
+
+export async function completePublicationVerification(
+  db: D1Database,
+  attempt: { runId: string; generation: number; notificationCycle: number; groupId: string },
+  verifierId: string,
+): Promise<boolean> {
+  const result = await db.prepare(`UPDATE publication_verification_claims SET completed=1
+    WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND group_id=? AND verifier_id=? AND completed=0
+      AND EXISTS (SELECT 1 FROM publication_jobs WHERE publication_run_id=? AND generation=? AND notification_cycle=?
+        AND json_extract(settings_context_json, '$.replyGroupId')=?)`)
+    .bind(attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId, verifierId,
+      attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId).run();
+  return result.meta.changes === 1;
 }
