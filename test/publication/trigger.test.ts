@@ -754,3 +754,40 @@ it('holds an interrupted bound handoff and rejects mismatched origin', async () 
   await expect(handleDocsTrigger(h.env,'line',clock,'2026-09-03',fetch,context,'event-hold')).rejects.toThrow('publication_event_identity_mismatch');
   expect(h.create).not.toHaveBeenCalled();
 });
+
+it('binds an initial LINE create before creation and replays the original run', async () => {
+  vi.restoreAllMocks();
+  const fetchMock = mockRun('Ready');
+  const h = makeTriggerEnv('running');
+  await h.env.DB.exec('DELETE FROM publication_regeneration_events');
+  await h.env.DB.exec('DELETE FROM line_command_ingress');
+  await h.env.DB.exec('DELETE FROM publication_jobs');
+  await h.env.DB.prepare('INSERT INTO line_command_ingress VALUES (?, ?, ?, ?, ?)').bind('initial-event', 'group-1', JSON.stringify({type:'docs'}), 'command-1', clock.now().toISOString()).run();
+  const { captureOperationContext } = await import('../../src/settings/runtime');
+  const context = await captureOperationContext(h.env, 'group-1');
+  h.get.mockRejectedValueOnce(new Error('instance.not_found'));
+  expect(await handleDocsTrigger(h.env, 'line', clock, undefined, fetch, context, 'initial-event')).toEqual({status:'started', publicationRunId:'rec-run-1'});
+  fetchMock.mockClear();
+  expect(await handleDocsTrigger(h.env, 'line', clock, undefined, fetch, context, 'initial-event')).toEqual({status:'started', publicationRunId:'rec-run-1'});
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(h.create).toHaveBeenCalledTimes(1);
+});
+
+it('holds an ambiguous initial create and distinguishes unavailable lookup from missing', async () => {
+  vi.restoreAllMocks();
+  mockRun('Ready');
+  const h = makeTriggerEnv('running');
+  await h.env.DB.exec('DELETE FROM publication_regeneration_events');
+  await h.env.DB.exec('DELETE FROM line_command_ingress');
+  await h.env.DB.exec('DELETE FROM publication_jobs');
+  await h.env.DB.prepare('INSERT INTO line_command_ingress VALUES (?, ?, ?, ?, ?)').bind('ambiguous-event', 'group-1', JSON.stringify({type:'docs'}), 'command-1', clock.now().toISOString()).run();
+  const { captureOperationContext } = await import('../../src/settings/runtime');
+  const context = await captureOperationContext(h.env, 'group-1');
+  h.get.mockRejectedValueOnce(new Error('instance.not_found')).mockRejectedValueOnce(new Error('lookup unavailable'));
+  h.create.mockRejectedValueOnce(new Error('timeout'));
+  await expect(handleDocsTrigger(h.env, 'line', clock, undefined, fetch, context, 'ambiguous-event')).rejects.toThrow('lookup unavailable');
+  h.get.mockRejectedValueOnce(new Error('instance.not_found'));
+  await expect(handleDocsTrigger(h.env, 'line', clock, undefined, fetch, context, 'ambiguous-event')).rejects.toThrow('publication_handoff_unconfirmed');
+  await expect(handleDocsTrigger(h.env, 'line', clock, undefined, fetch, {...context, replyGroupId:'other'}, 'ambiguous-event')).rejects.toThrow('publication_event_identity_mismatch');
+  expect(h.create).toHaveBeenCalledTimes(1);
+});

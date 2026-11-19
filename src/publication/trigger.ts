@@ -1,4 +1,4 @@
-import { advanceUnconfirmedPublicationRestart } from '../db/publication-repository';
+import { advanceUnconfirmedPublicationRestart, bindInitialPublicationCreate } from '../db/publication-repository';
 import { captureOperationContext } from "../settings/runtime";
 import {
   readPublicationContext,
@@ -52,17 +52,21 @@ export async function handleDocsTrigger(
   context?: OperationContext,
   trustedEventId?: string,
 ): Promise<DocsTriggerResult> {
+  const trustedGroupId = context?.replyGroupId;
   if (trigger === "line" && trustedEventId) {
     const ingress = await env.DB.prepare("SELECT group_id, operation FROM line_command_ingress WHERE event_id = ?")
       .bind(trustedEventId).first<{ group_id: string; operation: string }>();
-    const binding = await env.DB.prepare("SELECT publication_run_id, generation, workflow_id, action, handoff_status FROM publication_regeneration_events WHERE event_id = ?")
-      .bind(trustedEventId).first<{ publication_run_id: string; generation: number; workflow_id: string; action: string; handoff_status: string | null }>();
+    const binding = await env.DB.prepare("SELECT publication_run_id, generation, workflow_id, action, handoff_status, group_id, ingress_operation FROM publication_regeneration_events WHERE event_id = ?")
+      .bind(trustedEventId).first<{ publication_run_id: string; generation: number; workflow_id: string; action: string; handoff_status: string | null; group_id: string | null; ingress_operation: string | null }>();
     if (binding) {
       const operation = ingress ? JSON.parse(ingress.operation) : null;
       if (!ingress || !context?.replyGroupId || ingress.group_id !== context.replyGroupId ||
-          operation?.type !== "docs" || operation.publicationDate !== publicationDate || binding.action !== "regenerate")
+          operation?.type !== "docs" || operation.publicationDate !== publicationDate || !["regenerate", "create"].includes(binding.action) ||
+          (binding.action === "create" && (binding.group_id !== ingress.group_id || binding.ingress_operation !== ingress.operation)))
         throw new Error("publication_event_identity_mismatch");
       const publicationRunId = binding.publication_run_id;
+      if (binding.action === "create" && binding.handoff_status === "started")
+        return { status: "started", publicationRunId };
       if (binding.handoff_status === "regenerating")
         return { status: "regenerating", publicationRunId, generation: binding.generation };
       if (binding.handoff_status === "already_running") return { status: "already_running", publicationRunId };
@@ -198,8 +202,10 @@ export async function handleDocsTrigger(
     }
   }
 
+  let bindingCycle = current.job.notificationCycle + (current.job.state === "failed" || current.job.state === "validation_failed" ? 1 : 0);
   if(current.job.state!=='failed' && current.job.state!=='validation_failed') {
     const advanced=await advanceUnconfirmedPublicationRestart(env.DB,clock,publicationRunId,acquired.job.generation,current.job.notificationCycle);
+    if(advanced==='advanced') bindingCycle++;
     if(advanced==='contended')return {status:'already_running',publicationRunId};
   }
 
@@ -221,6 +227,13 @@ export async function handleDocsTrigger(
     return { status: "restarted", publicationRunId };
   }
 
+  if (trigger === "line" && trustedEventId && !replacing) {
+    if (!trustedGroupId) throw new Error("publication_event_identity_mismatch");
+    const binding = await bindInitialPublicationCreate(env.DB, trustedEventId, trustedGroupId, publicationDate, publicationRunId, acquired.job.generation, bindingCycle);
+    if (!binding) throw new Error("publication_event_identity_mismatch");
+    if (!binding.bindingCreated) return handleDocsTrigger(env, trigger, clock, publicationDate, fetcher, { ...context, replyGroupId: trustedGroupId }, trustedEventId);
+  }
+
   try {
     await env.PUBLICATION_WORKFLOW.create({
       id,
@@ -236,12 +249,13 @@ export async function handleDocsTrigger(
   } catch (error) {
     const raced = await lookupWorkflow(env, id);
     if (raced && activeStatuses.includes(raced.state.status)) {
-      if (replacing && trustedEventId) await env.DB.prepare("UPDATE publication_regeneration_events SET handoff_status = 'already_running' WHERE event_id = ?").bind(trustedEventId).run();
+      if (trigger === "line" && trustedEventId) await env.DB.prepare("UPDATE publication_regeneration_events SET handoff_status = 'already_running' WHERE event_id = ?").bind(trustedEventId).run();
       return { status: "already_running", publicationRunId };
     }
     throw error;
   }
   if (replacing && trustedEventId) await env.DB.prepare("UPDATE publication_regeneration_events SET handoff_status = 'regenerating' WHERE event_id = ?").bind(trustedEventId).run();
+  if (!replacing && trigger === "line" && trustedEventId) await env.DB.prepare("UPDATE publication_regeneration_events SET handoff_status = 'started' WHERE event_id = ?").bind(trustedEventId).run();
   return replacing
     ? {
         status: "regenerating",
