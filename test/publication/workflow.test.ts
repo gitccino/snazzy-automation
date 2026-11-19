@@ -516,3 +516,32 @@ it('renders verify-first uncertainty and preserves both safe failure codes witho
   expect(JSON.stringify(log.mock.calls)).not.toContain('SECRET');
  } finally {log.mockRestore();}
 });
+
+it('persists the primary failure and notice intent before cleanup fails', async () => {
+  vi.clearAllMocks();
+  const db = testEnv().DB, runId = crypto.randomUUID(), groupId = crypto.randomUUID();
+  const workflowId = `publication-${runId}`;
+  await db.prepare(`INSERT INTO publication_jobs (publication_run_id, publication_date, state, correlation_id, created_at, updated_at, generation, notification_cycle, settings_context_json) VALUES (?, ?, 'generating', ?, 'x', 'x', 1, 1, ?)`)
+    .bind(runId, '2026-11-20', workflowId, JSON.stringify({replyGroupId:groupId})).run();
+  stages.recoverPublicationFinalization.mockResolvedValue(null);
+  stages.validatePublication.mockRejectedValue(new OperationalError('primary_failed','SECRET original',true));
+  const facts = () => db.prepare('SELECT stage, failure_code FROM workflow_feedback WHERE run_id=?').bind(runId).first();
+  const notices = () => db.prepare('SELECT result_key, outcome_json FROM workflow_feedback_results WHERE run_id=?').bind(runId).all();
+  stages.failPublicationAfterExhaustion.mockImplementation(async () => {
+    expect(await facts()).toEqual({stage:'validate publication',failure_code:'primary_failed'});
+    expect((await notices()).results).toHaveLength(1);
+    throw new OperationalError('cleanup_failed','SECRET cleanup',true);
+  });
+  const log=vi.spyOn(console,'error').mockImplementation(()=>{});
+  try {
+    await expect(runPublicationWorkflow({publicationRunId:runId,trigger:'line'},retryingStep() as unknown as WorkflowStep,{...deps,db,config:{...deps.config,publicationRetryLimit:0}},workflowId,{groupId,notificationCycle:1})).rejects.toThrow();
+    expect(stages.failPublicationAfterExhaustion).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith('publication_failure_recording_unconfirmed',expect.objectContaining({recordingCode:'cleanup_failed'}));
+    expect(await facts()).toEqual({stage:'validate publication',failure_code:'primary_failed'});
+    const rows=(await notices()).results;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({result_key:JSON.stringify(['publication',runId,1,1,'terminal'])});
+    expect(JSON.parse(String(rows[0]?.outcome_json))).toMatchObject({stage:'validate publication',failureCode:'primary_failed',action:'verify',outcome:'unconfirmed'});
+    expect(JSON.stringify(rows)).not.toContain('SECRET');
+  } finally { log.mockRestore(); }
+});

@@ -143,6 +143,7 @@ export async function runPublicationWorkflow(
   step: WorkflowStep,
   deps: PublicationServiceDeps,
   instanceId?: string,
+  feedbackIdentity?: {groupId:string;notificationCycle:number},
 ): Promise<PublicationResult | null> {
   const retries = {
     retries: {
@@ -165,7 +166,18 @@ export async function runPublicationWorkflow(
     const notice=JSON.parse(json) as {text:string;contents?:Record<string,unknown>;outcome?:TerminalResultV1['outcome']}|null;
     if(notice)await step.do(name,persistenceOptions,()=>deps.notify(notice.text,notice.contents,notice.outcome));
   }
-  async function recordFailure(reason:string,displayDate:string|null,originalError:unknown) {
+  async function recordFailure(stage:string,reason:string,displayDate:string|null,originalError:unknown) {
+    if (params.trigger === "line" && feedbackIdentity) {
+      await step.do("persist primary publication failure",persistenceOptions,async()=>{
+        const job=await readPublicationJob(deps.db,runId);
+        if (!job || job.generation!==generation || job.notificationCycle!==feedbackIdentity.notificationCycle || job.correlationId!==instanceId)
+          throw new NonRetryableError("Publication identity unavailable","publication_generation_stale");
+        if (job.state === "succeeded") return;
+        const attempt={kind:"publication" as const,runId,generation,...feedbackIdentity};
+        const committed=await createWorkflowFeedbackRepository(deps.db).commitOutcome(attempt,{stage,failureCode:publicationErrorCode(originalError,"publication_stage_failed"),action:"verify",outcome:"unconfirmed",resultKey:JSON.stringify(["publication",runId,generation,feedbackIdentity.notificationCycle,"terminal"])});
+        if (!committed) throw new NonRetryableError("Publication identity unavailable","publication_generation_stale");
+      });
+    }
     type Notice={text:string;contents?:Record<string,unknown>;outcome:TerminalResultV1['outcome']};
     let noticeJson:string;
     try {
@@ -194,7 +206,7 @@ export async function runPublicationWorkflow(
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
-    await recordFailure("Unable to finalize the publication.",null,error);
+    await recordFailure("recover finalization","Unable to finalize the publication.",null,error);
     throw error;
   }
   if (recovered) {
@@ -215,7 +227,7 @@ export async function runPublicationWorkflow(
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
-    await recordFailure("Unable to read or validate publication data.",null,error);
+    await recordFailure("validate publication","Unable to read or validate publication data.",null,error);
     throw error;
   }
   if (validation.kind === "already_succeeded") return validation.result;
@@ -228,6 +240,7 @@ export async function runPublicationWorkflow(
   let result: PublicationResult;
   // Image errors use locally constructed safe reasons; other stages use fixed reasons.
   let failureReason = "Unable to prepare product images.";
+  let failureStage = "prepare product images";
   try {
     let imagePrepared;
     try {
@@ -245,24 +258,28 @@ export async function runPublicationWorkflow(
         failureReason = error.message;
       throw error;
     }
+    failureStage = "prepare outputs";
     failureReason = "Unable to prepare publication images and captions.";
     prepared = await step.do("prepare outputs", retries, () =>
       workflowCall(failureReason, () =>
         preparePublicationOutputs(deps, imagePrepared),
       ),
     );
+    failureStage = "ensure temporary document";
     failureReason = "Unable to create the temporary Google document.";
     const tempDocId = await step.do("ensure temporary document", retries, () =>
       workflowCall(failureReason, () =>
         ensureTemporaryDocument(deps, prepared),
       ),
     );
+    failureStage = "fill and verify document";
     failureReason = "Unable to fill or verify the Google document.";
     await step.do("fill and verify document", retries, () =>
       workflowCall(failureReason, () =>
         fillAndVerifyDocument(deps, prepared, tempDocId),
       ),
     );
+    failureStage = "finalize publication";
     failureReason = "Unable to finalize the publication.";
     result = await step.do("finalize publication", retries, () =>
       workflowCall(failureReason, () =>
@@ -271,7 +288,7 @@ export async function runPublicationWorkflow(
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
-    await recordFailure(failureReason,validation.value.thaiDate,error);
+    await recordFailure(failureStage,failureReason,validation.value.thaiDate,error);
     throw error;
   }
   // Notification failure must not delete or downgrade a completed document.
@@ -343,6 +360,7 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
       step,
       depsFor(this.env, { now: () => new Date() }, context,identity),
       event.instanceId,
+      context.replyGroupId ? {groupId:context.replyGroupId,notificationCycle:identity.notificationCycle} : undefined,
     );
   }
 }
