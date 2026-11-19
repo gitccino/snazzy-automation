@@ -711,3 +711,46 @@ it('allocates a new notification cycle when retrying an errored generating job w
  await repo.enqueueResult({groupId:group,resultKey:JSON.stringify(['publication','rec-run-1',1,2,'terminal']),result:{schemaVersion:1,kind:'publication',runId:'rec-run-1',generation:1,notificationCycle:2,outcome:'success',messages:[{type:'text',text:'finished'}]}});
  expect((await repo.head(group))?.result.outcome).toBe('unconfirmed');
 });
+
+it('replays the bound regeneration without selecting a replacement Ready run', async () => {
+  vi.restoreAllMocks();
+  const fetchMock = mockRun('Ready');
+  const h = makeTriggerEnv('complete');
+  await h.env.DB.exec('DELETE FROM publication_regeneration_events');
+  await h.env.DB.exec('DELETE FROM line_command_ingress');
+  await h.env.DB.exec('DELETE FROM publication_jobs');
+  await acquireOrResumeJob(h.env.DB, clock, 'rec-run-1', 'publication-rec-run-1');
+  await setJobState(h.env.DB, clock, 'rec-run-1', 'succeeded');
+  const { captureOperationContext } = await import('../../src/settings/runtime');
+  const context = await captureOperationContext(h.env, 'group-1');
+  await h.env.DB.prepare('INSERT INTO line_command_ingress VALUES (?, ?, ?, ?, ?)').bind('event-1', 'group-1', JSON.stringify({type:'docs'}), 'command-1', clock.now().toISOString()).run();
+  h.get.mockImplementation(async (id: string) => {
+    if (id.endsWith('-v2')) throw new Error('instance.not_found');
+    return {status:h.status, restart:h.restart, resume:h.resume};
+  });
+  const first = await handleDocsTrigger(h.env, 'line', clock, undefined, fetch, context, 'event-1');
+  fetchMock.mockClear();
+  fetchMock.mockResolvedValue(Response.json({records:[{id:'replacement', fields:{'Publication Date':'2026-09-02', Status:'Ready', Products:[]}}]}));
+  expect(await handleDocsTrigger(h.env, 'line', clock, undefined, fetch, context, 'event-1')).toEqual(first);
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(h.create).toHaveBeenCalledTimes(1);
+});
+
+it('holds an interrupted bound handoff and rejects mismatched origin', async () => {
+  vi.restoreAllMocks();
+  const h = makeTriggerEnv('running');
+  await h.env.DB.exec('DELETE FROM publication_regeneration_events');
+  await h.env.DB.exec('DELETE FROM line_command_ingress');
+  await h.env.DB.prepare('INSERT INTO line_command_ingress VALUES (?, ?, ?, ?, ?)').bind('event-hold', 'group-1', JSON.stringify({type:'docs'}), 'command-1', clock.now().toISOString()).run();
+  await h.env.DB.prepare("INSERT INTO publication_regeneration_events (event_id, publication_run_id, generation, notification_cycle, workflow_id, action, job_json) VALUES (?, ?, ?, ?, ?, ?, ?)").bind('event-hold','original',2,1,'original-v2','regenerate','{}').run();
+  const { captureOperationContext } = await import('../../src/settings/runtime');
+  const context = await captureOperationContext(h.env, 'group-1');
+  expect(await handleDocsTrigger(h.env,'line',clock,undefined,fetch,context,'event-hold')).toEqual({status:'already_running',publicationRunId:'original'});
+  h.get.mockRejectedValue(new Error('instance.not_found'));
+  await expect(handleDocsTrigger(h.env,'line',clock,undefined,fetch,context,'event-hold')).rejects.toThrow('publication_handoff_unconfirmed');
+  h.get.mockRejectedValue(new Error('lookup unavailable'));
+  await expect(handleDocsTrigger(h.env,'line',clock,undefined,fetch,context,'event-hold')).rejects.toThrow('lookup unavailable');
+  await expect(handleDocsTrigger(h.env,'line',clock,undefined,fetch,{...context,replyGroupId:'other'},'event-hold')).rejects.toThrow('publication_event_identity_mismatch');
+  await expect(handleDocsTrigger(h.env,'line',clock,'2026-09-03',fetch,context,'event-hold')).rejects.toThrow('publication_event_identity_mismatch');
+  expect(h.create).not.toHaveBeenCalled();
+});

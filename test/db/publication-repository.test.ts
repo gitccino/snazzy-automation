@@ -57,9 +57,10 @@ describe("publication-repository", () => {
       await setJobState(env.DB, clock, id, "succeeded");
     }
     const first = await reopenSuccessfulJobForRegeneration(env.DB, clock, "bound", 1, "event-1");
+    expect(first?.bindingCreated).toBe(true);
     await setJobState(env.DB, clock, "bound", "succeeded", undefined, 2);
-    expect(await reopenSuccessfulJobForRegeneration(env.DB, clock, "bound", 2, "event-1")).toEqual(first);
-    expect(await reopenSuccessfulJobForRegeneration(env.DB, clock, "other", 1, "event-1")).toEqual(first);
+    expect(await reopenSuccessfulJobForRegeneration(env.DB, clock, "bound", 2, "event-1")).toEqual({ ...first, bindingCreated: false });
+    expect(await reopenSuccessfulJobForRegeneration(env.DB, clock, "other", 1, "event-1")).toEqual({ ...first, bindingCreated: false });
     expect((await acquireOrResumeJob(env.DB, clock, "bound", "x")).job.generation).toBe(2);
     expect((await acquireOrResumeJob(env.DB, clock, "other", "x")).job.generation).toBe(1);
   });

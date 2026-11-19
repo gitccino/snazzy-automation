@@ -52,6 +52,26 @@ export async function handleDocsTrigger(
   context?: OperationContext,
   trustedEventId?: string,
 ): Promise<DocsTriggerResult> {
+  if (trigger === "line" && trustedEventId) {
+    const ingress = await env.DB.prepare("SELECT group_id, operation FROM line_command_ingress WHERE event_id = ?")
+      .bind(trustedEventId).first<{ group_id: string; operation: string }>();
+    const binding = await env.DB.prepare("SELECT publication_run_id, generation, workflow_id, action, handoff_status FROM publication_regeneration_events WHERE event_id = ?")
+      .bind(trustedEventId).first<{ publication_run_id: string; generation: number; workflow_id: string; action: string; handoff_status: string | null }>();
+    if (binding) {
+      const operation = ingress ? JSON.parse(ingress.operation) : null;
+      if (!ingress || !context?.replyGroupId || ingress.group_id !== context.replyGroupId ||
+          operation?.type !== "docs" || operation.publicationDate !== publicationDate || binding.action !== "regenerate")
+        throw new Error("publication_event_identity_mismatch");
+      const publicationRunId = binding.publication_run_id;
+      if (binding.handoff_status === "regenerating")
+        return { status: "regenerating", publicationRunId, generation: binding.generation };
+      if (binding.handoff_status === "already_running") return { status: "already_running", publicationRunId };
+      const workflow = await lookupWorkflow(env, binding.workflow_id);
+      if (workflow && activeStatuses.includes(workflow.state.status))
+        return { status: "already_running", publicationRunId };
+      throw new Error("publication_handoff_unconfirmed");
+    }
+  }
   context ??= await captureOperationContext(env, null);
   const requestedDate = publicationDate ?? todayBangkokDate(clock);
   const existing = await env.DB.prepare(
@@ -122,6 +142,8 @@ export async function handleDocsTrigger(
       acquired.job.generation,
       trustedEventId,
     );
+    if (replacement && trustedEventId && !replacement.bindingCreated)
+      return handleDocsTrigger(env, trigger, clock, publicationDate, fetcher, context, trustedEventId);
     if (!replacement || replacement.publicationRunId !== publicationRunId)
       return { status: "already_running", publicationRunId };
     acquired = { job: replacement, alreadySucceeded: false, ownsLock: true };
@@ -213,10 +235,13 @@ export async function handleDocsTrigger(
     });
   } catch (error) {
     const raced = await lookupWorkflow(env, id);
-    if (raced && activeStatuses.includes(raced.state.status))
+    if (raced && activeStatuses.includes(raced.state.status)) {
+      if (replacing && trustedEventId) await env.DB.prepare("UPDATE publication_regeneration_events SET handoff_status = 'already_running' WHERE event_id = ?").bind(trustedEventId).run();
       return { status: "already_running", publicationRunId };
+    }
     throw error;
   }
+  if (replacing && trustedEventId) await env.DB.prepare("UPDATE publication_regeneration_events SET handoff_status = 'regenerating' WHERE event_id = ?").bind(trustedEventId).run();
   return replacing
     ? {
         status: "regenerating",
