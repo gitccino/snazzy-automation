@@ -1,8 +1,25 @@
+import { lineCommandWorkflowId } from '../line/mutation-recovery';
+
 export type FeedbackAttempt = { kind: 'import' | 'publication'; runId: string; generation: number; notificationCycle: number; groupId: string };
+export type TrustedEarlyFailure = { eventId: string; context: string };
 export type FeedbackStage = { stage: string; failureCode?: string | null; references?: Record<string, unknown>; repair?: Record<string, unknown>; eventId?: string | null };
 export type FeedbackOutcome = FeedbackStage & { action: string; resultKey: string; outcome?: string };
 
 export function createWorkflowFeedbackRepository(db: D1Database) {
+  async function lookupTrustedEarlyFailure(a: FeedbackAttempt, eventId: string): Promise<TrustedEarlyFailure | null> {
+    const workflowId = await lineCommandWorkflowId(eventId);
+    const statement = a.kind === 'import'
+      ? db.prepare(`SELECT i.event_id AS eventId, r.settings_context_json AS context FROM line_command_ingress i JOIN import_runs r ON r.id=i.workflow_id
+          WHERE i.event_id=? AND i.group_id=? AND i.workflow_id=? AND r.id=? AND ?=1 AND ?=1 AND r.trigger='line'
+          AND json_extract(i.operation,'$.type')='upload' AND json_extract(r.settings_context_json,'$.replyGroupId')=i.group_id`)
+      : db.prepare(`SELECT i.event_id AS eventId, j.settings_context_json AS context FROM line_command_ingress i
+          JOIN publication_regeneration_events e ON e.event_id=i.event_id JOIN publication_jobs j ON j.publication_run_id=e.publication_run_id
+          WHERE i.event_id=? AND i.group_id=? AND i.workflow_id=? AND j.publication_run_id=? AND e.generation=? AND e.notification_cycle=?
+          AND j.generation=e.generation AND j.notification_cycle=e.notification_cycle AND j.correlation_id=e.workflow_id
+          AND e.group_id=i.group_id AND e.ingress_operation=i.operation AND json_extract(i.operation,'$.type')='docs'
+          AND json_extract(j.settings_context_json,'$.replyGroupId')=i.group_id`);
+    return await statement.bind(eventId,a.groupId,workflowId,a.runId,a.generation,a.notificationCycle).first<TrustedEarlyFailure>();
+  }
   const owner = (a: FeedbackAttempt) => a.kind === 'publication'
     ? db.prepare(`SELECT settings_context_json AS context FROM publication_jobs WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND json_extract(settings_context_json,'$.replyGroupId')=?`).bind(a.runId, a.generation, a.notificationCycle, a.groupId)
     : db.prepare(`SELECT settings_context_json AS context FROM import_runs WHERE id=? AND ?=1 AND ?=1 AND json_extract(settings_context_json,'$.replyGroupId')=?`).bind(a.runId, a.generation, a.notificationCycle, a.groupId);
@@ -55,5 +72,5 @@ export function createWorkflowFeedbackRepository(db: D1Database) {
     if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('invalid_limit');
     return (await db.prepare('SELECT * FROM workflow_feedback_results WHERE group_id=? AND materialized=0 ORDER BY rowid LIMIT ?').bind(groupId,limit).all()).results;
   }
-  return { recordStage, commitOutcome, upsertEvidence, readEvidence, pendingByGroup };
+  return { lookupTrustedEarlyFailure, recordStage, commitOutcome, upsertEvidence, readEvidence, pendingByGroup };
 }

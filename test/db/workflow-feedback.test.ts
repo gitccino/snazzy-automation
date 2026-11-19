@@ -74,3 +74,37 @@ it('applies the additive migration on fresh and seeded databases', async () => {
   expect(rows.results.map(row => row.status).sort()).toEqual(['completed', 'running']);
   expect(await db.prepare('SELECT state FROM line_result_outbox WHERE result_key=?').bind(key).first('state')).toBe('pending');
 });
+
+it.each(['import', 'publication'] as const)('looks up only trusted current LINE %s identity', async (kind) => {
+  const db = testEnv().DB, eventId = crypto.randomUUID(), groupId = crypto.randomUUID();
+  const { lineCommandWorkflowId } = await import('../../src/line/mutation-recovery');
+  const workflowId = await lineCommandWorkflowId(eventId);
+  const runId = kind === 'import' ? workflowId : crypto.randomUUID();
+  const operation = JSON.stringify(kind === 'import' ? {type: 'upload'} : {type: 'docs', publicationDate: '2026-11-20'});
+  const context = JSON.stringify({replyGroupId: groupId});
+  const a = {kind, runId, groupId, generation: kind === 'import' ? 1 : 2, notificationCycle: 1};
+  await db.prepare('INSERT INTO line_command_ingress VALUES (?,?,?,?,?)').bind(eventId, groupId, operation, workflowId, 'now').run();
+  if (kind === 'import') {
+    await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json) VALUES (?,?,'line','completed','now',?)").bind(runId, runId, context).run();
+  } else {
+    await db.prepare("INSERT INTO publication_jobs(publication_run_id,publication_date,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,?,'generating',?,'x','x',2,1,?)").bind(runId, runId, runId, context).run();
+    await db.prepare("INSERT INTO publication_regeneration_events(event_id,publication_run_id,generation,notification_cycle,workflow_id,action,job_json,group_id,ingress_operation) VALUES (?,?,2,1,?,'create','{}',?,?)").bind(eventId,runId,runId,groupId,operation).run();
+  }
+  const repo = createWorkflowFeedbackRepository(db);
+  expect(await repo.lookupTrustedEarlyFailure(a, eventId)).toEqual({eventId, context});
+  expect(await repo.lookupTrustedEarlyFailure({...a, groupId: 'wrong'}, eventId)).toBeNull();
+  expect(await repo.lookupTrustedEarlyFailure({...a, generation: 3}, eventId)).toBeNull();
+  expect(await repo.lookupTrustedEarlyFailure({...a, notificationCycle: 2}, eventId)).toBeNull();
+  await db.prepare('UPDATE line_command_ingress SET workflow_id=? WHERE event_id=?').bind('wrong',eventId).run();
+  expect(await repo.lookupTrustedEarlyFailure(a, eventId)).toBeNull();
+  await db.prepare('UPDATE line_command_ingress SET workflow_id=? WHERE event_id=?').bind(workflowId,eventId).run();
+  await db.prepare('DELETE FROM line_command_ingress WHERE event_id=?').bind(eventId).run();
+  expect(await repo.lookupTrustedEarlyFailure(a, eventId)).toBeNull();
+  await db.prepare('INSERT INTO line_command_ingress VALUES (?,?,?,?,?)').bind(eventId, groupId, JSON.stringify({type: 'other'}), workflowId, 'now').run();
+  expect(await repo.lookupTrustedEarlyFailure(a, eventId)).toBeNull();
+  if (kind === 'import') {
+    await db.prepare('UPDATE line_command_ingress SET operation=? WHERE event_id=?').bind(operation,eventId).run();
+    await db.prepare("UPDATE import_runs SET trigger='admin' WHERE id=?").bind(runId).run();
+    expect(await repo.lookupTrustedEarlyFailure(a, eventId)).toBeNull();
+  }
+});
