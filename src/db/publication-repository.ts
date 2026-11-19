@@ -110,11 +110,11 @@ export async function assertPublicationGeneration(
 
 export async function bindInitialPublicationCreate(
   db: D1Database, eventId: string, groupId: string, publicationDate: string | undefined,
-  runId: string, generation: number, notificationCycle: number,
+  runId: string, generation: number, notificationCycle: number, action: "create" | "restart" = "create",
 ): Promise<(PublicationJobRow & { bindingCreated: boolean }) | null> {
   const result = await db.prepare(`INSERT INTO publication_regeneration_events
     (event_id, publication_run_id, generation, notification_cycle, workflow_id, action, job_json, group_id, ingress_operation)
-    SELECT ?, j.publication_run_id, j.generation, j.notification_cycle, j.correlation_id, 'create', json_object(
+    SELECT ?, j.publication_run_id, j.generation, j.notification_cycle, j.correlation_id, ?, json_object(
       'publication_run_id', j.publication_run_id, 'publication_date', j.publication_date, 'state', j.state, 'correlation_id', j.correlation_id,
       'google_doc_id', j.google_doc_id, 'google_doc_url', j.google_doc_url, 'temp_doc_id', j.temp_doc_id, 'validation_result_json', j.validation_result_json,
       'attempt_count', j.attempt_count, 'created_at', j.created_at, 'updated_at', j.updated_at, 'generation', j.generation,
@@ -124,13 +124,13 @@ export async function bindInitialPublicationCreate(
       AND json_extract(i.operation, '$.publicationDate') IS ?
       AND j.publication_run_id = ? AND j.generation = ? AND j.notification_cycle = ?
     ON CONFLICT(event_id) DO NOTHING`)
-    .bind(eventId, groupId, eventId, groupId, publicationDate ?? null, runId, generation, notificationCycle).run();
+    .bind(eventId, action, groupId, eventId, groupId, publicationDate ?? null, runId, generation, notificationCycle).run();
   const binding = await db.prepare(`SELECT e.job_json FROM publication_regeneration_events e
     JOIN line_command_ingress i ON i.event_id = e.event_id
-    WHERE e.event_id = ? AND e.action = 'create' AND e.group_id = ? AND i.group_id = e.group_id AND i.operation = e.ingress_operation
+    WHERE e.event_id = ? AND e.action = ? AND e.group_id = ? AND i.group_id = e.group_id AND i.operation = e.ingress_operation
       AND json_extract(i.operation, '$.type') = 'docs' AND json_extract(i.operation, '$.publicationDate') IS ?
       AND e.publication_run_id = ? AND e.generation = ? AND e.notification_cycle = ?`)
-    .bind(eventId, groupId, publicationDate ?? null, runId, generation, notificationCycle).first<{ job_json: string }>();
+    .bind(eventId, action, groupId, publicationDate ?? null, runId, generation, notificationCycle).first<{ job_json: string }>();
   return binding ? { ...toRow(JSON.parse(binding.job_json) as JobRowRaw), bindingCreated: result.meta.changes === 1 } : null;
 }
 
@@ -317,7 +317,22 @@ export async function reopenFailedJobForRestart(
   generation = 1,
   context?: OperationContext,
   notificationCycle = 1,
+  event?: { id: string; groupId: string; publicationDate?: string; action: "create" | "restart" },
 ): Promise<boolean> {
+  if (event) {
+    const results = await db.batch([
+      db.prepare(`UPDATE publication_jobs SET settings_context_json = CASE WHEN temp_doc_id IS NULL AND finalization_json IS NULL THEN COALESCE(?, settings_context_json) ELSE settings_context_json END, notification_cycle = notification_cycle + 1, state = 'locked', correlation_id = ?, updated_at = ?
+        WHERE publication_run_id = ? AND (state = 'failed' OR (state = 'validation_failed' AND ? = 1)) AND generation = ? AND notification_cycle = ?
+        AND NOT EXISTS (SELECT 1 FROM publication_regeneration_events WHERE event_id = ?)
+        AND EXISTS (SELECT 1 FROM line_command_ingress WHERE event_id = ? AND group_id = ? AND json_extract(operation, '$.type') = 'docs' AND json_extract(operation, '$.publicationDate') IS ?)`)
+        .bind(context ? serializeContext(context) : null, correlationId, clock.now().toISOString(), publicationRunId, context ? 1 : 0, generation, notificationCycle, event.id, event.id, event.groupId, event.publicationDate ?? null),
+      db.prepare(`INSERT INTO publication_regeneration_events (event_id, publication_run_id, generation, notification_cycle, workflow_id, action, job_json, group_id, ingress_operation)
+        SELECT ?, j.publication_run_id, j.generation, j.notification_cycle, j.correlation_id, ?, '{}', i.group_id, i.operation
+        FROM publication_jobs j JOIN line_command_ingress i ON i.event_id = ? WHERE j.publication_run_id = ? AND changes() = 1`)
+        .bind(event.id, event.action, event.id, publicationRunId),
+    ]);
+    return results[1]?.meta.changes === 1;
+  }
   const result = await db
     .prepare(
       `UPDATE publication_jobs SET settings_context_json = CASE WHEN temp_doc_id IS NULL AND finalization_json IS NULL THEN COALESCE(?, settings_context_json) ELSE settings_context_json END, notification_cycle = notification_cycle + 1, state = 'locked', correlation_id = ?, updated_at = ?

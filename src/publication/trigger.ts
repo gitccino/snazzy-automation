@@ -61,12 +61,12 @@ export async function handleDocsTrigger(
     if (binding) {
       const operation = ingress ? JSON.parse(ingress.operation) : null;
       if (!ingress || !context?.replyGroupId || ingress.group_id !== context.replyGroupId ||
-          operation?.type !== "docs" || operation.publicationDate !== publicationDate || !["regenerate", "create"].includes(binding.action) ||
-          (binding.action === "create" && (binding.group_id !== ingress.group_id || binding.ingress_operation !== ingress.operation)))
+          operation?.type !== "docs" || operation.publicationDate !== publicationDate || !["regenerate", "create", "restart"].includes(binding.action) ||
+          (binding.action !== "regenerate" && (binding.group_id !== ingress.group_id || binding.ingress_operation !== ingress.operation)))
         throw new Error("publication_event_identity_mismatch");
       const publicationRunId = binding.publication_run_id;
-      if (binding.action === "create" && binding.handoff_status === "started")
-        return { status: "started", publicationRunId };
+      if ((binding.action === "create" || binding.action === "restart") && binding.handoff_status === "started")
+        return { status: binding.action === "restart" ? "restarted" : "started", publicationRunId };
       if (binding.handoff_status === "regenerating")
         return { status: "regenerating", publicationRunId, generation: binding.generation };
       if (binding.handoff_status === "already_running") return { status: "already_running", publicationRunId };
@@ -173,6 +173,7 @@ export async function handleDocsTrigger(
     return { status: "already_generated", publicationRunId };
   if (current.job.generation !== acquired.job.generation)
     return { status: "already_running", publicationRunId };
+  if (trigger === "line" && trustedEventId && !trustedGroupId) throw new Error("publication_event_identity_mismatch");
   if (
     current.job.state === "failed" ||
     current.job.state === "validation_failed"
@@ -185,6 +186,7 @@ export async function handleDocsTrigger(
       acquired.job.generation,
       context,
       current.job.notificationCycle,
+      trigger === "line" && trustedEventId && trustedGroupId && !replacing ? { id: trustedEventId, groupId: trustedGroupId, publicationDate, action: canRestart ? "restart" : "create" } : undefined,
     );
     if (!reopened) {
       const raced = await acquireOrResumeJob(
@@ -223,11 +225,20 @@ export async function handleDocsTrigger(
   if (savedContext) context = savedContext;
 
   if (canRestart && workflow) {
+    if (trigger === "line" && trustedEventId && !replacing) {
+      if (!trustedGroupId) throw new Error("publication_event_identity_mismatch");
+      if (current.job.state !== "failed" && current.job.state !== "validation_failed") {
+        const binding = await bindInitialPublicationCreate(env.DB, trustedEventId, trustedGroupId, publicationDate, publicationRunId, acquired.job.generation, bindingCycle, "restart");
+        if (!binding) throw new Error("publication_event_identity_mismatch");
+        if (!binding.bindingCreated) return handleDocsTrigger(env, trigger, clock, publicationDate, fetcher, { ...context, replyGroupId: trustedGroupId }, trustedEventId);
+      }
+    }
     await workflow.instance.restart();
+    if (trigger === "line" && trustedEventId) await env.DB.prepare("UPDATE publication_regeneration_events SET handoff_status = ? WHERE event_id = ?").bind(replacing ? "regenerating" : "started", trustedEventId).run();
     return { status: "restarted", publicationRunId };
   }
 
-  if (trigger === "line" && trustedEventId && !replacing) {
+  if (trigger === "line" && trustedEventId && !replacing && current.job.state !== "failed" && current.job.state !== "validation_failed") {
     if (!trustedGroupId) throw new Error("publication_event_identity_mismatch");
     const binding = await bindInitialPublicationCreate(env.DB, trustedEventId, trustedGroupId, publicationDate, publicationRunId, acquired.job.generation, bindingCycle);
     if (!binding) throw new Error("publication_event_identity_mismatch");

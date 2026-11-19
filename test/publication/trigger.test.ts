@@ -791,3 +791,24 @@ it('holds an ambiguous initial create and distinguishes unavailable lookup from 
   await expect(handleDocsTrigger(h.env, 'line', clock, undefined, fetch, {...context, replyGroupId:'other'}, 'ambiguous-event')).rejects.toThrow('publication_event_identity_mismatch');
   expect(h.create).toHaveBeenCalledTimes(1);
 });
+
+it('holds an ambiguous failed-job restart on replay without selecting a new Ready run', async () => {
+  vi.restoreAllMocks();
+  const fetchMock = mockRun('Ready');
+  const h = makeTriggerEnv('errored');
+  await h.env.DB.exec('DELETE FROM publication_regeneration_events');
+  await h.env.DB.exec('DELETE FROM line_command_ingress');
+  await h.env.DB.exec('DELETE FROM publication_jobs');
+  await acquireOrResumeJob(h.env.DB, clock, 'rec-run-1', 'publication-rec-run-1');
+  await setJobState(h.env.DB, clock, 'rec-run-1', 'failed');
+  await h.env.DB.prepare('INSERT INTO line_command_ingress VALUES (?, ?, ?, ?, ?)').bind('restart-event', 'group-1', JSON.stringify({type:'docs'}), 'command-1', clock.now().toISOString()).run();
+  const { captureOperationContext } = await import('../../src/settings/runtime');
+  const context = await captureOperationContext(h.env, 'group-1');
+  h.restart.mockRejectedValueOnce(new Error('restart timeout'));
+  await expect(handleDocsTrigger(h.env, 'line', clock, undefined, fetch, context, 'restart-event')).rejects.toThrow('restart timeout');
+  fetchMock.mockClear();
+  fetchMock.mockResolvedValue(Response.json({records:[{id:'replacement', fields:{'Publication Date':'2026-09-02', Status:'Ready', Products:[]}}]}));
+  await expect(handleDocsTrigger(h.env, 'line', clock, undefined, fetch, context, 'restart-event')).rejects.toThrow('publication_handoff_unconfirmed');
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(h.restart).toHaveBeenCalledTimes(1);
+});
