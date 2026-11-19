@@ -133,7 +133,7 @@ describe("runPublicationWorkflow", () => {
       deps,
       validated,
     );
-    expect(stages.ensureTemporaryDocument).toHaveBeenCalledWith(deps, prepared);
+    expect(stages.ensureTemporaryDocument).toHaveBeenCalledWith({ ...deps, copyOwner: deps.copyOwner }, prepared);
     expect(stages.fillAndVerifyDocument).toHaveBeenCalledWith(
       deps,
       prepared,
@@ -426,7 +426,7 @@ describe("runPublicationWorkflow", () => {
     await expect(
       PublicationWorkflow.prototype.run.call(
         { env } as unknown as PublicationWorkflow,
-        { payload: params } as WorkflowEvent<PublicationWorkflowParams>,
+        { payload: params, instanceId: "publication-rec-run-1" } as WorkflowEvent<PublicationWorkflowParams>,
         retryingStep() as unknown as WorkflowStep,
       ),
     ).resolves.toEqual(result);
@@ -449,7 +449,7 @@ describe("runPublicationWorkflow", () => {
     await expect(
       PublicationWorkflow.prototype.run.call(
         { env } as unknown as PublicationWorkflow,
-        { payload: params } as WorkflowEvent<PublicationWorkflowParams>,
+        { payload: params, instanceId: "publication-rec-run-1" } as WorkflowEvent<PublicationWorkflowParams>,
         retryingStep() as unknown as WorkflowStep,
       ),
     ).resolves.toEqual(result);

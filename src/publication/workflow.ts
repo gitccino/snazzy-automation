@@ -278,7 +278,7 @@ export async function runPublicationWorkflow(
     failureReason = "Unable to create the temporary Google document.";
     const tempDocId = await step.do("ensure temporary document", retries, () =>
       workflowCall(failureReason, () =>
-        ensureTemporaryDocument(deps, prepared),
+        ensureTemporaryDocument({ ...deps, copyOwner: instanceId && feedbackIdentity ? { workflowId: instanceId, notificationCycle: feedbackIdentity.notificationCycle } : deps.copyOwner }, prepared),
       ),
     );
     failureStage = "fill and verify document";
@@ -361,13 +361,13 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
     }
     const identity=await step.do('notification-identity',{retries:{limit:0,delay:'1 second'}},async()=>{
       const job=await readPublicationJob(this.env.DB,event.payload.publicationRunId);
-      if(!job || job.generation!==generation)throw new NonRetryableError('Publication identity unavailable','publication_generation_stale');
+      if(!job || job.generation!==generation || job.correlationId!==event.instanceId)throw new NonRetryableError('Publication identity unavailable','publication_generation_stale');
       return {runId:event.payload.publicationRunId,generation,notificationCycle:job.notificationCycle};
     });
     return runPublicationWorkflow(
       event.payload,
       step,
-      depsFor(this.env, { now: () => new Date() }, context,identity),
+      { ...depsFor(this.env, { now: () => new Date() }, context,identity), copyOwner: { workflowId: event.instanceId, notificationCycle: identity.notificationCycle } },
       event.instanceId,
       context.replyGroupId ? {groupId:context.replyGroupId,notificationCycle:identity.notificationCycle} : undefined,
     );

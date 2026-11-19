@@ -543,3 +543,15 @@ export async function advanceUnconfirmedPublicationRestart(db:D1Database,clock:C
   const current=await readPublicationJob(db,runId);
   return current?.generation===generation && current.notificationCycle===notificationCycle ? 'not_needed':'contended';
 }
+
+export async function admitPublicationGoogleCopy(db: D1Database, runId: string, generation: number, notificationCycle: number, workflowId: string): Promise<boolean> {
+  const owner = await db.prepare(`UPDATE publication_jobs SET updated_at=updated_at
+    WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND correlation_id=? AND state NOT IN ('succeeded','failed','validation_failed')`).bind(runId, generation, notificationCycle, workflowId).run();
+  if (!owner.meta.changes) return false;
+  const result = await db.prepare(`UPDATE publication_google_write_evidence SET state='may_have_written'
+    WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND EXISTS
+    (SELECT 1 FROM publication_jobs WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND correlation_id=? AND state NOT IN ('succeeded','failed','validation_failed'))`).bind(runId, generation, notificationCycle, runId, generation, notificationCycle, workflowId).run();
+  if (result.meta.changes) return true;
+  const legacy = await db.prepare(`SELECT 1 FROM publication_jobs WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND correlation_id=? AND state NOT IN ('succeeded','failed','validation_failed') AND NOT EXISTS (SELECT 1 FROM publication_google_write_evidence WHERE publication_run_id=? AND generation=? AND notification_cycle=?)`).bind(runId, generation, notificationCycle, workflowId, runId, generation, notificationCycle).first();
+  return !!legacy;
+}

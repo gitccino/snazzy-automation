@@ -33,6 +33,7 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 function baseDeps(overrides: Partial<PublicationServiceDeps> = {}): PublicationServiceDeps {
   return {
     db: env.DB,
+    copyOwner: { workflowId: "corr-1", notificationCycle: 1 },
     assets: { putIfAbsent: vi.fn(), signUrl: vi.fn(async (key: string) => `https://worker.example/assets/${encodeURIComponent(key)}?exp=1&sig=x`) },
     bucket: { get: vi.fn(), put: vi.fn() } as unknown as R2Bucket,
     images: { input: vi.fn() },
@@ -170,7 +171,7 @@ describe("publication stages", () => {
     await seedJob("generating", null, "publication-rec-run-1-v2");
     await env.DB.prepare("UPDATE publication_jobs SET generation=2,successful_generation=1,google_doc_id='old-doc',google_doc_url='old-url'").run();
     const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(token()).mockResolvedValueOnce(json({ files: [] })).mockResolvedValueOnce(json({ id: "new-v2" }));
-    await expect(ensureTemporaryDocument(baseDeps({ fetcher }), { ...prepared, generation: 2 })).resolves.toBe("new-v2");
+    await expect(ensureTemporaryDocument(baseDeps({ fetcher, copyOwner: { workflowId: "publication-rec-run-1-v2", notificationCycle: 1 } }), { ...prepared, generation: 2 })).resolves.toBe("new-v2");
     expect(new URL(String(fetcher.mock.calls[1]![0])).searchParams.get("q")).toContain("value='publication-rec-run-1-v2'");
     expect(JSON.parse(String(fetcher.mock.calls[2]![1]?.body))).toMatchObject({
       name: "Publication 2026-09-02 (v2) (in progress)", appProperties: { publicationRunId: "publication-rec-run-1-v2" },
@@ -436,6 +437,23 @@ describe("publication stages", () => {
     expect(new URL(String(fetcher.mock.calls[1]![0])).searchParams.get("q")).toContain("value='rec-run-1'");
     if (!existing) expect(JSON.parse(String(fetcher.mock.calls[2]![1]?.body))).toMatchObject({ appProperties: { publicationRunId: "rec-run-1" }, parents: ["folder-1"] });
     expect(await job()).toMatchObject({ temp_doc_id: "temp-doc" });
+  });
+
+  it("does not copy for a stale workflow owner", async () => {
+    await seedJob();
+    await env.DB.prepare("INSERT OR REPLACE INTO publication_google_write_evidence VALUES ('rec-run-1', 1, 1, 'tracking')").run();
+    const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(token()).mockResolvedValueOnce(json({ files: [] }));
+    await expect(ensureTemporaryDocument(baseDeps({ fetcher, copyOwner: { workflowId: "old", notificationCycle: 1 } }), prepared)).rejects.toMatchObject({ code: "publication_generation_stale" });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(await env.DB.prepare("SELECT state FROM publication_google_write_evidence WHERE publication_run_id='rec-run-1'").first()).toEqual({ state: "tracking" });
+  });
+
+  it("persists possible write before a lost copy response", async () => {
+    await seedJob();
+    await env.DB.prepare("INSERT OR REPLACE INTO publication_google_write_evidence VALUES ('rec-run-1', 1, 1, 'tracking')").run();
+    const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(token()).mockResolvedValueOnce(json({ files: [] })).mockRejectedValue(new Error("response lost"));
+    await expect(ensureTemporaryDocument(baseDeps({ fetcher }), prepared)).rejects.toThrow();
+    expect(await env.DB.prepare("SELECT state FROM publication_google_write_evidence WHERE publication_run_id='rec-run-1'").first()).toEqual({ state: "may_have_written" });
   });
 
   it.each([true, false])("signs, fills and verifies with captioning enabled=%s", async aiCaptionsEnabled => {

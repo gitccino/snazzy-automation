@@ -18,6 +18,7 @@ import type { Fetcher } from "../shared/http";
 import type { Clock } from "../shared/time";
 import { OperationalError } from "../shared/errors";
 import {
+  admitPublicationGoogleCopy,
   acquireOrResumeJob,
   readPublicationJob,
   claimPublicationDate,
@@ -80,6 +81,7 @@ import {
 
 export interface PublicationServiceDeps {
   db: D1Database;
+  copyOwner?: { workflowId: string; notificationCycle: number };
   assets: AssetStore;
   bucket: R2Bucket;
   images: ImagesBinding;
@@ -502,6 +504,8 @@ export async function ensureTemporaryDocument(
     deps.config.googleDriveFolderId,
     identity,
   );
+  if (!discovered && (!deps.copyOwner || !await admitPublicationGoogleCopy(deps.db, runId, generation, deps.copyOwner.notificationCycle, deps.copyOwner.workflowId)))
+    throw new OperationalError("publication_generation_stale", "Publication owner is stale", false);
   const docId =
     discovered ??
     (await copyTemplate(
