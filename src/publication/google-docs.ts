@@ -68,8 +68,10 @@ async function request(
   action: string,
   init: RequestInit = {},
   allowMissing = false,
+  beforeWrite?: () => Promise<void>,
 ): Promise<Response> {
   const token = await tokenProvider.getAccessToken();
+  await beforeWrite?.();
   let response: Response;
   try {
     response = await fetcher(url, {
@@ -237,6 +239,7 @@ export async function fillTemplate(
   docId: string,
   publicationDateText: string,
   products: DocProductContent[],
+  beforeWrite?: () => Promise<void>,
 ): Promise<void> {
   const doc = await getDocument(fetcher, tokenProvider, docId);
   const fullText = textRuns(doc).map((run) => run.content).join("");
@@ -252,7 +255,7 @@ export async function fillTemplate(
   await request(fetcher, tokenProvider, `${DOCS_BASE}/documents/${encodeURIComponent(docId)}:batchUpdate`, "docs batch update", {
     method: "POST",
     body: JSON.stringify({ requests }),
-  });
+  }, false, beforeWrite);
 }
 
 export async function verifyDocumentContainsProducts(
@@ -272,17 +275,18 @@ export async function finalizeDocument(
   tokenProvider: AccessTokenProvider,
   docId: string,
   finalTitle: string,
+  beforeWrite?: () => Promise<void>,
 ): Promise<string> {
   const encodedId = encodeURIComponent(docId);
   await request(fetcher, tokenProvider, `${DRIVE_BASE}/files/${encodedId}`, "drive rename", {
     method: "PATCH",
     body: JSON.stringify({ name: finalTitle }),
-  });
+  }, false, beforeWrite);
   return `https://docs.google.com/document/d/${encodedId}/edit`;
 }
 
-export async function deleteDocument(fetcher: Fetcher, tokenProvider: AccessTokenProvider, docId: string): Promise<void> {
+export async function deleteDocument(fetcher: Fetcher, tokenProvider: AccessTokenProvider, docId: string, beforeWrite?: () => Promise<void>): Promise<void> {
   await request(fetcher, tokenProvider, `${DRIVE_BASE}/files/${encodeURIComponent(docId)}`, "drive delete", {
     method: "DELETE",
-  }, true);
+  }, true, beforeWrite);
 }

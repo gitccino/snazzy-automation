@@ -4,7 +4,7 @@ import {
   ensureTemporaryDocument, failPublicationAfterExhaustion, fillAndVerifyDocument,
   finalizePublication, notifyPublicationSuccess, notifyPublicationValidationFailure,
   preparePublicationOutputs, validatePublication,
-  finalizeStoredPublication,
+  finalizeStoredPublication, recoverPublicationFinalization,
   type PublicationServiceDeps, type PreparedPublication, type ValidatedPublication,
 } from "../../src/publication/service";
 import type { Fetcher } from "../../src/shared/http";
@@ -148,7 +148,7 @@ describe("publication stages", () => {
       }
       return json({ id: "rec-run-1", fields });
     });
-    const deps = baseDeps({ fetcher });
+    const deps = baseDeps({ fetcher, copyOwner: { workflowId: "publication-rec-run-1-v2", notificationCycle: 1 } });
     if (failure === "D1") {
       deps.db = { prepare(sql: string) {
         if (sql.includes("successful_generation=generation") && loseResponse) { loseResponse = false; throw new Error("D1 unavailable"); }
@@ -162,6 +162,7 @@ describe("publication stages", () => {
     expect(await job()).toMatchObject({ state: "failed", google_doc_id: "old-doc", temp_doc_id: "candidate-v2" });
     expect((await env.DB.prepare("SELECT finalization_json FROM publication_jobs").first<{ finalization_json: string }>())?.finalization_json).toContain('"generation":2');
     await reopenFailedJobForRestart(env.DB, clock, "rec-run-1", "publication-rec-run-1-v2", 2);
+    deps.copyOwner = { workflowId: "publication-rec-run-1-v2", notificationCycle: 2 };
     await expect(finalizeStoredPublication(deps, "rec-run-1", 2)).resolves.toMatchObject({ googleDocId: "candidate-v2", productIds: ["A-1001"] });
     expect(titles).toEqual(["Publication 2026-09-02 (v2)", "Publication 2026-09-02 (v2)"]);
     expect(fields.Status).toBe("Generated");
@@ -448,6 +449,20 @@ describe("publication stages", () => {
     expect(await env.DB.prepare("SELECT state FROM publication_google_write_evidence WHERE publication_run_id='rec-run-1'").first()).toEqual({ state: "tracking" });
   });
 
+  it.each(["fill", "finalize", "recovery", "delete"].flatMap(stage => [true, false].map(tracked => ({ stage, tracked }))))("rejects stale owner before Google $stage (tracked=$tracked)", async ({ stage, tracked }) => {
+    await seedJob("generating", "temp-doc");
+    await env.DB.prepare("DELETE FROM publication_google_write_evidence").run();
+    if (tracked) await env.DB.prepare("INSERT INTO publication_google_write_evidence VALUES ('rec-run-1', 1, 1, 'tracking')").run();
+    const intent = { generation: 1, publicationDate: "2026-09-02", thaiDate: "Today", docId: "temp-doc", docUrl: "https://docs.google.com/document/d/temp-doc/edit", title: "Publication", productIds: ["A-1001"], generatedAt: clock.now().toISOString() };
+    if (stage === "finalize" || stage === "recovery") await env.DB.prepare("UPDATE publication_jobs SET finalization_json=?").bind(JSON.stringify(intent)).run();
+    const fetcher = vi.fn<Fetcher>().mockImplementation(async (url) => String(url).includes("oauth2") ? token() : String(url).includes("docs.googleapis.com") ? document("{{PUBLICATION_DATE}}\n{{PRODUCTS}}suffix{{END_PRODUCTS}}\n") : json({ id: "ok" }));
+    const deps = baseDeps({ fetcher, copyOwner: { workflowId: "old", notificationCycle: 1 } });
+    const action = stage === "fill" ? () => fillAndVerifyDocument(deps, prepared, "temp-doc") : stage === "finalize" ? () => finalizeStoredPublication(deps, "rec-run-1", 1) : stage === "recovery" ? () => recoverPublicationFinalization(deps, "rec-run-1", 1) : () => failPublicationAfterExhaustion(deps, "rec-run-1", "failed", null);
+    await expect(action()).rejects.toMatchObject({ code: "publication_generation_stale" });
+    expect(fetcher.mock.calls.some(([url, init]) => ["docs.googleapis.com", "www.googleapis.com"].includes(new URL(String(url)).hostname) && ["POST", "PATCH", "DELETE"].includes(init?.method ?? ""))).toBe(false);
+    expect((await env.DB.prepare("SELECT state FROM publication_google_write_evidence").all()).results).toEqual(tracked ? [{ state: "tracking" }] : []);
+  });
+
   it("persists possible write before a lost copy response", async () => {
     await seedJob();
     await env.DB.prepare("INSERT OR REPLACE INTO publication_google_write_evidence VALUES ('rec-run-1', 1, 1, 'tracking')").run();
@@ -458,6 +473,7 @@ describe("publication stages", () => {
 
   it.each([true, false])("signs, fills and verifies with captioning enabled=%s", async aiCaptionsEnabled => {
     await seedJob("generating", "temp-doc");
+    await env.DB.prepare("INSERT OR REPLACE INTO publication_google_write_evidence VALUES ('rec-run-1', 1, 1, 'tracking')").run();
     const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(json({ id: product.airtableRecordId }))
       .mockResolvedValueOnce(token())
       .mockResolvedValueOnce(document("{{PUBLICATION_DATE}}\n{{PRODUCTS}}suffix{{END_PRODUCTS}}\n"))
@@ -466,6 +482,7 @@ describe("publication stages", () => {
     const deps = baseDeps({ fetcher });
     deps.config = { ...deps.config, aiCaptionsEnabled };
     await fillAndVerifyDocument(deps, prepared, "temp-doc");
+    expect(await env.DB.prepare("SELECT state FROM publication_google_write_evidence WHERE publication_run_id='rec-run-1' AND generation=1 AND notification_cycle=1").first()).toEqual({ state: "may_have_written" });
     const requests = JSON.parse(String(fetcher.mock.calls[3]![1]?.body)).requests;
     expect(JSON.stringify(requests).includes("Caption 1:")).toBe(aiCaptionsEnabled);
     expect(JSON.stringify(requests).includes("หนึ่ง")).toBe(aiCaptionsEnabled);
