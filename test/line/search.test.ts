@@ -65,6 +65,8 @@ const docsCases: Array<[DocsTriggerResult, string]> = [
   [{ status: "already_running", publicationRunId: "run-1" }, "⚠️ มีงานสร้างเอกสารกำลังทำงานอยู่ run-1"],
   [{ status: "already_generated", publicationRunId: "run-1" }, "⚠️ สร้างเอกสารของ Publication Run นี้แล้ว run-1\nหากต้องการสร้างเวอร์ชันใหม่ ตั้งสถานะเป็น Ready แล้วส่งคำสั่ง /docs อีกครั้ง"],
   [{ status: "no_runnable_run" }, "⚠️ ยังไม่มี Publication Run ที่พร้อมวันนี้"],
+  [{ status: "owner_review", publicationRunId: "run-1" }, "⚠️ กรุณาตรวจสอบงานเดิมก่อนเริ่มใหม่ run-1"],
+  [{ status: "busy" }, "⚠️ มีงานสร้างเอกสารที่ต้องตรวจสอบ"],
 ];
 
 it.each(docsCases)("maps docs result %j to its Thai reply", async (result, expected) => {

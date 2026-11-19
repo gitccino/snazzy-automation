@@ -24,6 +24,8 @@ export type UploadTriggerResult =
 
 export type DocsTriggerResult =
   | { status: "no_runnable_run" }
+  | { status: "owner_review"; publicationRunId: string }
+  | { status: "busy" }
   | { status: "regenerating"; publicationRunId: string; generation: number }
   | {
       status: "started" | "restarted" | "resumed" | "already_running" | "already_generated";
@@ -146,6 +148,10 @@ function testSoldoutReply(caseNumber: number | null, publicBaseUrl: string): str
 
 function docsResultText(result: DocsTriggerResult, publicationDate?: string): string {
   switch (result.status) {
+    case "busy":
+      return "⚠️ มีงานสร้างเอกสารที่ต้องตรวจสอบ";
+    case "owner_review":
+      return `⚠️ กรุณาตรวจสอบงานเดิมก่อนเริ่มใหม่ ${result.publicationRunId}`;
     case "regenerating":
       return `เริ่มสร้างเอกสารเวอร์ชัน v${result.generation} แล้ว ${result.publicationRunId}`;
     case "started":

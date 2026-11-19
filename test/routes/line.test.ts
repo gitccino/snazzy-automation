@@ -159,6 +159,8 @@ it.each([
   [{ status: "already_running", publicationRunId: "run-1" }, { status: "already_running", publicationRunId: "run-1" }],
   [{ status: "already_generated", publicationRunId: "run-1" }, { status: "already_generated", publicationRunId: "run-1" }],
   [{ status: "no_runnable_run" }, { status: "no_runnable_run" }],
+  [{ status: "owner_review", publicationRunId: "run-1" }, { status: "owner_review", publicationRunId: "run-1" }],
+  [{ status: "busy" }, { status: "busy" }],
 ] as const)("preserves publication trigger status %#", (result, expected) => {
   expect(toLineDocsTriggerResult(result)).toEqual(expected);
 });

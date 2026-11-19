@@ -498,6 +498,30 @@ describe("handleDocsTrigger", () => {
     },
   );
 
+  it("holds a stopped Generating attempt for owner review without another create", async () => {
+    mockRun("Generating");
+    const h = makeTriggerEnv("errored");
+    const { captureOperationContext } = await import("../../src/settings/runtime");
+    const { savePublicationAttemptContext } = await import("../../src/db/execution-context-repository");
+    const { createWorkflowFeedbackRepository } = await import("../../src/db/workflow-feedback");
+    const context = { ...await captureOperationContext(h.env, null), replyGroupId: "owner" };
+    await acquireOrResumeJob(h.env.DB, clock, "rec-run-1", "publication-rec-run-1");
+    await savePublicationAttemptContext(h.env.DB, "rec-run-1", 1, context);
+    await setJobState(h.env.DB, clock, "rec-run-1", "failed");
+    const attempt = { kind: "publication" as const, runId: "rec-run-1", generation: 1, notificationCycle: 1, groupId: "owner" };
+    expect(await createWorkflowFeedbackRepository(h.env.DB).commitOutcome(attempt, { stage: "failed", action: "review", outcome: "failed", resultKey: "stale-test" })).toBe(true);
+    expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, context)).toEqual({ status: "owner_review", publicationRunId: "rec-run-1" });
+    expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, { ...context, replyGroupId: "other" })).toEqual({ status: "busy" });
+    h.status.mockResolvedValue({ status: "running" });
+    expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, context)).toEqual({ status: "already_running", publicationRunId: "rec-run-1" });
+    h.status.mockRejectedValue(new Error("unavailable"));
+    expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, context)).toEqual({ status: "owner_review", publicationRunId: "rec-run-1" });
+    expect(h.create).not.toHaveBeenCalled();
+    expect(h.restart).not.toHaveBeenCalled();
+    await h.env.DB.exec("DELETE FROM workflow_feedback_results WHERE result_key = 'stale-test'");
+    await h.env.DB.exec("DELETE FROM workflow_feedback WHERE run_id = 'rec-run-1'");
+  });
+
   it("does not restart a job that succeeds while Workflow status is being read", async () => {
     mockRun("Failed");
     const fixture = makeTriggerEnv("errored");

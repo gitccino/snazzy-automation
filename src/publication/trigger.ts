@@ -9,6 +9,7 @@ import {
   acquireOrResumeJob,
   reopenFailedJobForRestart,
   reopenSuccessfulJobForRegeneration,
+  readPublicationJob,
 } from "../db/publication-repository";
 import type { Env } from "../env";
 import { todayBangkokDate, type Clock } from "../shared/time";
@@ -18,6 +19,8 @@ import { OperationalError } from "../shared/errors";
 
 export type DocsTriggerResult =
   | { status: "no_runnable_run" }
+  | { status: "owner_review"; publicationRunId: string }
+  | { status: "busy" }
   | { status: "already_generated"; publicationRunId: string }
   | { status: "already_running"; publicationRunId: string }
   | { status: "regenerating"; publicationRunId: string; generation: number }
@@ -105,8 +108,20 @@ export async function handleDocsTrigger(
         status: "already_generated",
         publicationRunId: run.airtableRunId,
       };
-    if (run && trigger === "line" && run.status === "Generating")
-      return { status: "already_running", publicationRunId: run.airtableRunId };
+    if (run && trigger === "line" && run.status === "Generating") {
+      const job = await readPublicationJob(env.DB, run.airtableRunId);
+      const owner = job && await readPublicationContext(env.DB, run.airtableRunId);
+      if (!job || !owner?.replyGroupId || owner.replyGroupId !== trustedGroupId)
+        return { status: "busy" };
+      try {
+        const workflow = await lookupWorkflow(env, publicationWorkflowId(run.airtableRunId, job.generation));
+        if (workflow && activeStatuses.includes(workflow.state.status))
+          return { status: "already_running", publicationRunId: run.airtableRunId };
+      } catch {
+        // An unavailable lookup cannot establish that the original attempt stopped.
+      }
+      return { status: "owner_review", publicationRunId: run.airtableRunId };
+    }
     return { status: "no_runnable_run" };
   }
 
