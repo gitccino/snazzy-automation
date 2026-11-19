@@ -190,6 +190,15 @@ export async function runPublicationWorkflow(
       if(isContenderRejection(recordingError))throw recordingError;
       console.error('publication_failure_recording_unconfirmed',{runId,generation,originalCode:publicationErrorCode(originalError,'publication_stage_failed'),recordingCode:publicationErrorCode(recordingError,'failure_recording_failed')});
       noticeJson=await step.do('prepare unconfirmed publication notice',persistenceOptions,async()=>{
+        if (params.trigger === 'line' && feedbackIdentity) {
+          const saved=await deps.db.prepare(`SELECT outcome_json FROM workflow_feedback_results WHERE kind='publication' AND run_id=? AND generation=? AND notification_cycle=? AND group_id=? AND result_key=?`)
+            .bind(runId,generation,feedbackIdentity.notificationCycle,feedbackIdentity.groupId,JSON.stringify(['publication',runId,generation,feedbackIdentity.notificationCycle,'terminal'])).first<{outcome_json:string}>();
+          if (saved) {
+            const fact=JSON.parse(saved.outcome_json) as {stage:string;failureCode?:string};
+            const stage = fact.stage === 'prepare outputs' && fact.failureCode?.startsWith('anthropic_') ? 'สร้างคำบรรยาย' : ({'validate publication':'ตรวจสอบข้อมูล','prepare product images':'เตรียมรูปภาพ','prepare outputs':'เตรียมรูปภาพและคำบรรยาย','ensure temporary document':'สร้างเอกสาร','fill and verify document':'เขียนและตรวจสอบเอกสาร','finalize publication':'จัดเตรียมเอกสารขั้นสุดท้าย','recover finalization':'ตรวจสอบเอกสาร'} as Record<string,string>)[fact.stage] ?? 'เตรียมเอกสาร';
+            return JSON.stringify({text:`ขั้นตอน${stage}ไม่สำเร็จ\nสถานะการล้างข้อมูลหรือบันทึก Airtable ยังไม่แน่นอน\nกรุณาตรวจสอบงานเดิมใน Airtable ก่อนดำเนินการต่อ\nhttps://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`,outcome:'unconfirmed'} satisfies Notice);
+          }
+        }
         const card=docsUnconfirmedCard({thaiDate:displayDate??'ไม่สามารถอ่านวันที่รายการได้',airtableRunUrl:`https://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`},deps.config.publicBaseUrl);
         return JSON.stringify({text:card.text,contents:card.contents,outcome:'unconfirmed'} satisfies Notice);
       });

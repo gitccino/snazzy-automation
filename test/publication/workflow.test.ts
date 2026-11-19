@@ -545,3 +545,38 @@ it('persists the primary failure and notice intent before cleanup fails', async 
     expect(JSON.stringify(rows)).not.toContain('SECRET');
   } finally { log.mockRestore(); }
 });
+
+it.each(['cleanup_failed', 'airtable_update_failed'])('queues the saved primary failure once when %s occurs', async code => {
+  vi.clearAllMocks();
+  const db=testEnv().DB, runId=crypto.randomUUID(), groupId=crypto.randomUUID(), workflowId=`publication-${runId}`;
+  await db.prepare(`INSERT INTO publication_jobs (publication_run_id, publication_date, state, correlation_id, created_at, updated_at, generation, notification_cycle, settings_context_json) VALUES (?, ?, 'generating', ?, 'x', 'x', 1, 1, ?)`)
+    .bind(runId,runId,workflowId,JSON.stringify({replyGroupId:groupId})).run();
+  stages.recoverPublicationFinalization.mockResolvedValue(null);
+  stages.validatePublication.mockResolvedValue({kind:'ready',value:validated});
+  stages.preparePublicationOutputs.mockRejectedValue(new OperationalError('anthropic_create_message_failed','SECRET primary',true));
+  stages.failPublicationAfterExhaustion.mockRejectedValue(new OperationalError(code,'SECRET secondary',true));
+  const {createLineReplyRepository}=await import('../../src/db/line-reply-repository');
+  const repo=createLineReplyRepository(db,{now:()=>new Date()});
+  const key=JSON.stringify(['publication',runId,1,1,'terminal']);
+  const notify=async(text:string,contents?:Record<string,unknown>,outcome:'success'|'failed'|'unconfirmed'='success')=>repo.enqueueResult({groupId,resultKey:key,result:{schemaVersion:1,kind:'publication',runId,generation:1,notificationCycle:1,outcome,messages:[contents?{type:'flex',altText:text,contents}:{type:'text',text}]}});
+  const log=vi.spyOn(console,'error').mockImplementation(()=>{});
+  try {
+    for(let i=0;i<2;i++) await expect(runPublicationWorkflow({publicationRunId:runId,trigger:'line'},retryingStep() as unknown as WorkflowStep,{...deps,db,notify,config:{...deps.config,publicationRetryLimit:0}},workflowId,{groupId,notificationCycle:1})).rejects.toMatchObject({name:'anthropic_create_message_failed'});
+    const rows=(await db.prepare('SELECT result_key,result_json FROM line_result_outbox WHERE group_id=?').bind(groupId).all()).results;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.result_key).toBe(key);
+    const message=String(rows[0]?.result_json);
+    expect(message).toContain('คำบรรยาย');
+    expect(message).toContain('ตรวจสอบ');
+    expect(message).toContain('สถานะการล้างข้อมูลหรือบันทึก Airtable');
+    expect(message).not.toContain('SECRET');
+    expect(message).not.toContain('ยังยืนยันสถานะ');
+    expect(message).not.toContain('ลองใหม่');
+  } finally {
+    log.mockRestore();
+    await db.prepare('DELETE FROM line_result_outbox WHERE group_id=?').bind(groupId).run();
+    await db.prepare('DELETE FROM workflow_feedback_results WHERE run_id=?').bind(runId).run();
+    await db.prepare('DELETE FROM workflow_feedback WHERE run_id=?').bind(runId).run();
+    await db.prepare('DELETE FROM publication_jobs WHERE publication_run_id=?').bind(runId).run();
+  }
+});
