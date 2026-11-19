@@ -19,7 +19,7 @@ Before running mutations, record the deployed version and current settings priva
 
 ## Verification
 
-Root suite: 1073 passed / 28 failed. The failure-name multiset exactly matches baseline; no new failing tests. Typecheck and staging deployment dry-run passed. Source-only audit found terminal cards contain static icons and durable document/Airtable URLs; no expiring image field needs refreshing.
+Root suite: 1090 passed / 28 failed. The failure-name multiset exactly matches baseline; no new failing tests. Typecheck and staging deployment dry-run passed. Source-only audit found terminal cards contain static icons and durable document/Airtable URLs; no expiring image field needs refreshing.
 
 Remaining baseline failures (repeated names represent parameterized cases):
 
@@ -62,3 +62,18 @@ Remaining baseline failures (repeated names represent parameterized cases):
 - D1/settings backups and authoritative in-flight checks belong immediately before an approved rollout; backups captured during implementation would become stale. Read-only staging Workflow inventory was inspected without changing runs.
 
 The final fresh-context review is recorded after all local gates. The review scope starts at 249e51d (this queue feature's approved-plan baseline), including the pre-existing messenger reply changes integrated by Task 4, rather than re-reviewing unrelated earlier branch features.
+
+
+## Fresh review and regression fixes
+
+One independent read-only review found no Critical issues and five Important issues. All five were reproduced by failing tests and fixed:
+
+- An errored generating publication with an existing unconfirmed result now atomically allocates a new notification cycle before an explicit business restart, preserving its old result and temporary-document recovery data.
+- Unconfirmed cards now use verify-first title, alternative text and body throughout; no failure assertion or direct retry footer remains.
+- Historical saved-reply-only webhook IDs are suppressed before business preparation, including redelivery after old Workflow retention expires.
+- Definite rejections and ambiguous provider responses retain HTTP status and bounded LINE request ID in dispatch evidence.
+- Publication diagnostics preserve both sanitized original-stage and cleanup error codes across durable serialization, without raw provider messages or credentials.
+
+The two review suggestions about command reservation races and delayed real cards were treated as acceptance-test gaps and completed: deterministic reservation loss preserves the command reply, and a stored terminal card retains original date/group/URLs after a configuration change. No minor findings remain deferred. Ten baseline message fixtures captured using the pre-refactor renderer at 249e51d verify every rendered variant, including both unchanged start cards; the existing card builders were not changed except for the new uncertainty-specific builder.
+
+Reviewer exclusions remain intentional: the 28 baseline failures, unrelated mutation-followup pushes, live provider credentials, and historical branch work outside this queue range are not repaired or re-audited. Live LINE acceptance, remote migration compatibility, current backups and authoritative in-flight checks remain separately authorized rollout gates. All application changes are committed locally on messenger-demo; nothing was pushed, merged, migrated or deployed remotely.

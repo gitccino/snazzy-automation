@@ -2,6 +2,7 @@ import { validateReplyMessages } from '../line/client';
 import type { Clock } from '../shared/time';
 import type { LineReplyMessage, RejectionDisposition, TerminalResultV1 } from '../line/reply-types';
 
+export type ReplyProviderEvidence={status:number|null;requestId:string|null};
 export type OutboxHead = {
   sequence: number; groupId: string; state: string; result: TerminalResultV1;
 };
@@ -11,11 +12,11 @@ export type PrepareDispatchInput = {
 };
 export function createLineReplyRepository(db: D1Database, clock: Clock) {
   const now = () => clock.now().toISOString();
-  async function transition(eventId: string, phase: string, state: string, disposition: string | null = null, requestId: string | null = null) {
+  async function transition(eventId: string, phase: string, state: string, disposition: string | null = null, evidence:ReplyProviderEvidence={status:null,requestId:null}) {
     await db.batch([
-      db.prepare(`UPDATE line_reply_dispatches SET phase=?, disposition=?, request_id=?, updated_at=?
+      db.prepare(`UPDATE line_reply_dispatches SET phase=?, disposition=?, request_id=?, http_status=?, updated_at=?
         WHERE event_id=? AND phase IN ('dispatched','uncertain')`)
-        .bind(phase, disposition, requestId, now(), eventId),
+        .bind(phase, disposition, evidence.requestId?.slice(0,200)??null, evidence.status, now(), eventId),
       db.prepare(`UPDATE line_result_outbox SET state=?, owner_event_id=CASE WHEN ?='pending' THEN NULL ELSE owner_event_id END
         WHERE owner_event_id=? AND EXISTS(SELECT 1 FROM line_reply_dispatches WHERE event_id=? AND phase=?)`)
         .bind(state, state, eventId, eventId, phase),
@@ -61,9 +62,9 @@ export function createLineReplyRepository(db: D1Database, clock: Clock) {
       ]);
       return results[0]!.meta.changes === 1;
     },
-    accept: (eventId: string, requestId: string | null) => transition(eventId, 'accepted', 'accepted', null, requestId),
-    reject: (eventId: string, disposition: RejectionDisposition) => transition(eventId, 'rejected', disposition === 'retry_on_new_event' ? 'pending' : 'blocked', disposition),
-    markUncertain: (eventId: string) => transition(eventId, 'uncertain', 'uncertain'),
+    accept: (eventId: string, requestId: string | null) => transition(eventId, 'accepted', 'accepted', null, {status:200,requestId}),
+    reject: (eventId: string, disposition: RejectionDisposition, evidence?:ReplyProviderEvidence) => transition(eventId, 'rejected', disposition === 'retry_on_new_event' ? 'pending' : 'blocked', disposition, evidence),
+    markUncertain: (eventId: string,evidence?:ReplyProviderEvidence) => transition(eventId, 'uncertain', 'uncertain',null,evidence),
     async abandonPrepared(eventId: string) {
       await db.batch([
         db.prepare(`UPDATE line_reply_dispatches SET phase='abandoned',updated_at=? WHERE event_id=? AND phase='prepared'`).bind(now(), eventId),

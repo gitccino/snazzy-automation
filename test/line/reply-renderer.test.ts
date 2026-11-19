@@ -10,3 +10,9 @@ it('preserves long confirmation details losslessly with its actions', () => {
   expect(result.slice(0,-1)).toEqual([{type:'text',text:'x'.repeat(5000)},{type:'text',text:'x'}]);
   expect(result.at(-1)).toMatchObject({type:'template',template:{actions:[{data:'yes'},{data:'no'}]}});
 });
+
+import baselineReplies from '../fixtures/line-reply-bundles.json';
+import type { CommandReply } from '../../src/line/soldout';
+it.each(baselineReplies)('matches pre-refactor message objects: $name',({reply,expected})=>{
+ expect(renderCommandReply(reply as CommandReply,'https://original-worker.test')).toEqual(expected);
+});

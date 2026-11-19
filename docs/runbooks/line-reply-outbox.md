@@ -9,7 +9,7 @@ Tables contain business notification content. Use owner-only access and private 
 ```sql
 SELECT sequence, result_key, group_id, state, owner_event_id, created_at
 FROM line_result_outbox WHERE state != 'accepted' ORDER BY sequence;
-SELECT event_id, group_id, workflow_id, candidate_sequence, phase, updated_at, request_id, disposition
+SELECT event_id, group_id, workflow_id, candidate_sequence, phase, updated_at, request_id, http_status, disposition
 FROM line_reply_dispatches ORDER BY updated_at DESC LIMIT 30;
 ```
 
@@ -22,7 +22,7 @@ FROM line_reply_dispatches ORDER BY updated_at DESC LIMIT 30;
 - Dispatch `rejected`: explicit LINE rejection. Invalid token / HTTP 429 returns its bundle to pending for a fresh event. Never retry that token.
 - Dispatch `abandoned`: preparation safely cancelled before dispatch; old execution cannot cross its send fence.
 
-Normal command responses still work while an older result is held. Inspect the owner Workflow and LINE request ID. A 401/403 is configuration-blocked; a 5xx/network interruption is uncertain. Do not assume all 429s mean monthly quota: inspect LINE's own evidence. Raw provider message bodies are deliberately not retained.
+Normal command responses still work while an older result is held. Inspect the owner Workflow and LINE request ID. A 401/403 is configuration-blocked; a 5xx/network interruption is uncertain. Do not assume all 429s mean monthly quota: inspect LINE's own evidence. HTTP status and a bounded LINE request ID are retained; raw provider message bodies are deliberately not retained. Publication uncertainty logs retain only sanitized original/cleanup error codes.
 
 ## Pre-dispatch recovery
 
@@ -34,7 +34,7 @@ Do not clear the event row or reset a dispatched/uncertain result to pending. In
 
 Import/publication business state and notification state are separate. D1-only persistence steps retry twice with one-second delays. A failed enqueue never repeats numbering, import writes, image work or Google document work. Inspect the saved Workflow terminal snapshot before repair. Retry persistence with that exact payload, original group, date and result key; do not reconstruct from current Airtable or changed Settings.
 
-Result key: JSON `[kind, runId, generation, notificationCycle, "terminal"]`. An identical enqueue is a no-op. Conflicting content is an operational error, never an overwrite. Imports use cycle 1. An intentional failed/validation-failed publication restart increments its notification cycle atomically, so its later result does not replace the previous attempt's result. Successful regeneration still uses the existing new generation. Paused resume and notification-only repair must retain the original cycle.
+Result key: JSON `[kind, runId, generation, notificationCycle, "terminal"]`. An identical enqueue is a no-op. Conflicting content is an operational error, never an overwrite. Imports use cycle 1. An intentional failed/validation-failed publication restart increments its notification cycle atomically, so its later result does not replace the previous attempt's result. A deliberate retry of an errored job that already queued an unconfirmed notice also allocates a new cycle, even when failed cleanup left its business state generating; existing recovery data stays intact. Successful regeneration still uses the existing new generation. Paused resume and notification-only repair must retain the original cycle.
 
 Use the saved snapshot to call `enqueueResult` through an owner-controlled execution if the platform cannot resume the persistence step alone. A normal `/docs` restart is a new business attempt, not notification repair. Cleanup failure produces an `unconfirmed` notice and preserves the original business error; it does not claim a document was deleted or a job completed. Current Anthropic/Google credential errors require separate fixes.
 

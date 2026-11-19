@@ -15,7 +15,7 @@ import type { Env } from "../env";
 import { createAssetStore } from "../import/asset-store";
 import { createLineReplyRepository } from '../db/line-reply-repository';
 import { readPublicationJob } from '../db/publication-repository';
-import { docsWorkflowFailureCard } from '../line/docs-summary-card';
+import { docsUnconfirmedCard } from '../line/docs-summary-card';
 import type { TerminalResultV1 } from '../line/reply-types';
 import { OperationalError } from "../shared/errors";
 import type { Clock } from "../shared/time";
@@ -100,6 +100,11 @@ function depsFor(
   };
 }
 
+function publicationErrorCode(error:unknown,fallback:string):string {
+  const code=error instanceof OperationalError ? error.code : error instanceof Error ? error.name : '';
+  return /^[a-z][a-z0-9_]{0,99}$/.test(code)?code:fallback;
+}
+
 async function workflowCall<T>(
   reason: string,
   call: () => Promise<T>,
@@ -112,7 +117,9 @@ async function workflowCall<T>(
       throw new NonRetryableError(reason, error.code);
     }
     // Durable retries and their logs must not retain raw upstream bodies or secrets.
-    throw new Error(reason);
+    const safe=new Error(reason);
+    safe.name=publicationErrorCode(error,'publication_stage_failed');
+    throw safe;
   }
 }
 
@@ -157,7 +164,7 @@ export async function runPublicationWorkflow(
     const notice=JSON.parse(json) as {text:string;contents?:Record<string,unknown>;outcome?:TerminalResultV1['outcome']}|null;
     if(notice)await step.do(name,persistenceOptions,()=>deps.notify(notice.text,notice.contents,notice.outcome));
   }
-  async function recordFailure(reason:string,displayDate:string|null) {
+  async function recordFailure(reason:string,displayDate:string|null,originalError:unknown) {
     type Notice={text:string;contents?:Record<string,unknown>;outcome:TerminalResultV1['outcome']};
     let noticeJson:string;
     try {
@@ -168,9 +175,9 @@ export async function runPublicationWorkflow(
       }));
     } catch(recordingError) {
       if(isContenderRejection(recordingError))throw recordingError;
-      console.error('publication_failure_recording_unconfirmed',{runId,generation,code:recordingError instanceof OperationalError?recordingError.code:'failure_recording_failed'});
+      console.error('publication_failure_recording_unconfirmed',{runId,generation,originalCode:publicationErrorCode(originalError,'publication_stage_failed'),recordingCode:publicationErrorCode(recordingError,'failure_recording_failed')});
       noticeJson=await step.do('prepare unconfirmed publication notice',persistenceOptions,async()=>{
-        const card=docsWorkflowFailureCard({thaiDate:displayDate??'ไม่สามารถอ่านวันที่รายการได้',reason:'ยังยืนยันสถานะงานเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ',airtableRunUrl:`https://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`},deps.config.publicBaseUrl);
+        const card=docsUnconfirmedCard({thaiDate:displayDate??'ไม่สามารถอ่านวันที่รายการได้',airtableRunUrl:`https://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`},deps.config.publicBaseUrl);
         return JSON.stringify({text:card.text,contents:card.contents,outcome:'unconfirmed'} satisfies Notice);
       });
     }
@@ -186,7 +193,7 @@ export async function runPublicationWorkflow(
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
-    await recordFailure("Unable to finalize the publication.",null);
+    await recordFailure("Unable to finalize the publication.",null,error);
     throw error;
   }
   if (recovered) {
@@ -207,7 +214,7 @@ export async function runPublicationWorkflow(
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
-    await recordFailure("Unable to read or validate publication data.",null);
+    await recordFailure("Unable to read or validate publication data.",null,error);
     throw error;
   }
   if (validation.kind === "already_succeeded") return validation.result;
@@ -263,7 +270,7 @@ export async function runPublicationWorkflow(
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
-    await recordFailure(failureReason,validation.value.thaiDate);
+    await recordFailure(failureReason,validation.value.thaiDate,error);
     throw error;
   }
   // Notification failure must not delete or downgrade a completed document.

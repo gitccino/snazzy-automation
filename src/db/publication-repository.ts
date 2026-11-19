@@ -461,3 +461,15 @@ export async function putProductCaptions(
     .run();
   await assertPublicationGeneration(db, publicationRunId, generation);
 }
+
+/** An explicit business retry after a recorded uncertainty needs a new terminal identity. */
+export async function advanceUnconfirmedPublicationRestart(db:D1Database,clock:Clock,runId:string,generation:number,notificationCycle:number):Promise<'advanced'|'not_needed'|'contended'> {
+  const key=JSON.stringify(['publication',runId,generation,notificationCycle,'terminal']);
+  const updated=await db.prepare(`UPDATE publication_jobs SET notification_cycle=notification_cycle+1,updated_at=?
+    WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND state NOT IN ('succeeded','failed','validation_failed')
+      AND EXISTS(SELECT 1 FROM line_result_outbox WHERE result_key=? AND json_extract(result_json,'$.outcome')='unconfirmed')`)
+    .bind(clock.now().toISOString(),runId,generation,notificationCycle,key).run();
+  if(updated.meta.changes===1)return 'advanced';
+  const current=await readPublicationJob(db,runId);
+  return current?.generation===generation && current.notificationCycle===notificationCycle ? 'not_needed':'contended';
+}

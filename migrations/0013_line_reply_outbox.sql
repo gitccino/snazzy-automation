@@ -18,6 +18,7 @@ CREATE TABLE line_reply_dispatches (
   phase TEXT NOT NULL CHECK(phase IN ('prepared','dispatched','accepted','rejected','uncertain','abandoned')),
   updated_at TEXT NOT NULL,
   request_id TEXT,
+  http_status INTEGER,
   disposition TEXT
 );
 ALTER TABLE publication_jobs ADD COLUMN notification_cycle INTEGER NOT NULL DEFAULT 1;

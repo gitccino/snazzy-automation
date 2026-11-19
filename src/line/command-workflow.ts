@@ -128,7 +128,7 @@ export class LineCommandWorkflow extends WorkflowEntrypoint<Env,{event:LineIngre
     });
     const allowed=async(groupId:string)=>(await loadSettingsSnapshot(this.env)).config.lineAllowedGroupIds.includes(groupId);
     if(!await allowed(event.source.groupId))return {status:'ignored' as const};
-    const completed=await step.do('already-processed',()=>this.env.DB.prepare('SELECT event_id FROM line_events WHERE event_id=?').bind(event.webhookEventId).first<{event_id:string}>());
+    const completed=await step.do('already-processed',()=>this.env.DB.prepare('SELECT event_id FROM line_events WHERE event_id=? UNION ALL SELECT event_id FROM line_event_replies WHERE event_id=? LIMIT 1').bind(event.webhookEventId,event.webhookEventId).first<{event_id:string}>());
     if(completed)return {status:'duplicate' as const};
     const deps=await createWebhookDeps(this.env,input.instanceId,context);
     deps.retryTransientErrors=true;

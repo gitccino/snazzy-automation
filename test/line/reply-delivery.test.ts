@@ -1,3 +1,4 @@
+import type { LineReplyMessage } from '../../src/line/reply-types';
 import { expect, it } from 'vitest';
 import { testEnv } from '../helpers/env';
 import { fixedClock } from '../helpers/fakes';
@@ -5,11 +6,11 @@ import { createLineReplyRepository } from '../../src/db/line-reply-repository';
 import { createLineClient } from '../../src/line/client';
 import { deliverEventReply } from '../../src/line/reply-delivery';
 
-async function fixture(status = 200, throwNetwork = false) {
+async function fixture(status = 200, throwNetwork = false, storedMessages:LineReplyMessage[]=[{type:'text',text:'result'}]) {
  const clock=fixedClock('2026-11-19T08:00:00Z'); const groupId=crypto.randomUUID();
  const repo=createLineReplyRepository(testEnv().DB,clock); const requests:any[]=[];
  const line=createLineClient({channelAccessToken:'private',fetch:async(url,init)=>{requests.push({url,body:JSON.parse(String(init?.body))});if(throwNetwork)throw new Error('network');return Response.json({}, {status});}});
- await repo.enqueueResult({resultKey:groupId,groupId,result:{schemaVersion:1,kind:'import',runId:'run',generation:1,notificationCycle:1,outcome:'success',messages:[{type:'text',text:'result'}]}});
+ await repo.enqueueResult({resultKey:groupId,groupId,result:{schemaVersion:1,kind:'import',runId:'run',generation:1,notificationCycle:1,outcome:'success',messages:storedMessages}});
  const input={eventId:crypto.randomUUID(),groupId,workflowId:'wf',receivedAt:clock.now().toISOString(),replyToken:'fresh',commandReply:null,drainQueue:true,publicBaseUrl:'https://app.test'};
  const deps={repo,line,clock,isGroupAllowed:async()=>true};
  return {repo,requests,input,deps,groupId};
@@ -62,4 +63,34 @@ it('delayed results retain original data when a later day supplies the reply tok
  const h=await fixture();const tomorrow=fixedClock('2026-11-20T08:00:00Z');
  await deliverEventReply({...h.input,receivedAt:tomorrow.now().toISOString()},{...h.deps,clock:tomorrow});
  expect(h.requests[0].body.messages).toEqual([{type:'text',text:'result'}]);
+});
+it.each([400,503])('retains safe provider evidence for a %s reply response',async status=>{
+ const h=await fixture();h.deps.line=createLineClient({channelAccessToken:'private',fetch:async()=>Response.json({message:'Invalid messages'},{status,headers:{'x-line-request-id':'line-evidence'}})});
+ await deliverEventReply(h.input,h.deps);
+ expect(await testEnv().DB.prepare('SELECT request_id,http_status FROM line_reply_dispatches WHERE event_id=?').bind(h.input.eventId).first()).toEqual({request_id:'line-evidence',http_status:status});
+});
+
+it('a command losing the reservation race replies once without stealing the reserved result',async()=>{
+ const h=await fixture();let raced=false;
+ const repo={...h.repo,prepareDispatch:async(input:Parameters<typeof h.repo.prepareDispatch>[0])=>{
+  if(!raced && input.candidateSequence!==null) {
+   raced=true;expect(await h.repo.prepareDispatch({...input,eventId:crypto.randomUUID(),workflowId:'other-owner',messages:[{type:'text',text:'result'}]})).toBe('prepared');
+  }
+  return h.repo.prepareDispatch(input);
+ }};
+ await deliverEventReply({...h.input,commandReply:{kind:'text',text:'normal command'}},{...h.deps,repo});
+ expect(h.requests).toHaveLength(1);expect(h.requests[0].body.messages).toEqual([{type:'text',text:'normal command'}]);
+ expect(await h.repo.head(h.groupId)).toMatchObject({state:'reserved'});
+});
+it('an actual delayed terminal card keeps its original date, destination and links after configuration changes',async()=>{
+ const {docsWorkflowFailureCard}=await import('../../src/line/docs-summary-card');
+ const card=docsWorkflowFailureCard({thaiDate:'19 พฤศจิกายน 2569',reason:'Original job failed',airtableRunUrl:'https://airtable.com/oldBase/oldTable/originalRun'},'https://original-worker.test');
+ const h=await fixture(200,false,[{type:'flex',altText:card.text,contents:card.contents}]);
+ const tomorrow=fixedClock('2026-11-20T08:00:00Z');
+ await deliverEventReply({...h.input,receivedAt:tomorrow.now().toISOString(),publicBaseUrl:'https://new-worker.test'},{...h.deps,clock:tomorrow});
+ expect(h.requests[0].body.messages).toEqual([{type:'flex',altText:card.text,contents:card.contents}]);
+ expect(JSON.stringify(h.requests[0].body)).toContain('19 พฤศจิกายน 2569');
+ expect(JSON.stringify(h.requests[0].body)).toContain('https://airtable.com/oldBase/oldTable/originalRun');
+ expect(JSON.stringify(h.requests[0].body)).not.toContain('new-worker');
+ expect(await testEnv().DB.prepare('SELECT group_id FROM line_reply_dispatches WHERE event_id=?').bind(h.input.eventId).first()).toEqual({group_id:h.groupId});
 });

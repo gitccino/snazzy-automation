@@ -189,7 +189,7 @@ describe("runPublicationWorkflow", () => {
 
       await expect(
         runPublicationWorkflow(params, step as unknown as WorkflowStep, deps),
-      ).rejects.toThrow(new Error(reason));
+      ).rejects.toThrow(reason);
 
       expect(stages[stage]).toHaveBeenCalledTimes(6);
       expect(
@@ -315,7 +315,7 @@ describe("runPublicationWorkflow", () => {
         await expect(outcome).rejects.toBeInstanceOf(NonRetryableError);
       else if (failureKind)
         await expect(outcome).rejects.toThrow(
-          new Error("Unable to prepare publication notification."),
+          "Unable to prepare publication notification.",
         );
       else await expect(outcome).resolves.toBeNull();
 
@@ -498,4 +498,21 @@ it('retries only enqueue after a lost D1 response using the frozen terminal snap
  expect(attempts).toBe(2);expect((await repo.head(id))?.result.messages).toEqual([{type:'text',text:'original result'}]);
  expect(stages.notifyPublicationSuccess).toHaveBeenCalledTimes(1);
  expect(stages.finalizePublication).not.toHaveBeenCalled();
+});
+it('renders verify-first uncertainty and preserves both safe failure codes without secrets',async()=>{
+ vi.clearAllMocks();const log=vi.spyOn(console,'error').mockImplementation(()=>{});
+ stages.recoverPublicationFinalization.mockResolvedValue(null);
+ stages.validatePublication.mockRejectedValue(new OperationalError('anthropic_create_message_failed','SECRET original response',true));
+ stages.failPublicationAfterExhaustion.mockRejectedValue(new OperationalError('google_token_exchange_failed','SECRET refresh token',true));
+ const notify=vi.fn().mockResolvedValue(undefined);
+ try {
+  await expect(runPublicationWorkflow(params,retryingStep() as unknown as WorkflowStep,{...deps,notify,config:{...deps.config,publicationRetryLimit:0}})).rejects.toThrow();
+  expect(notify).toHaveBeenCalledWith(expect.stringContaining('ยังยืนยันสถานะ'),expect.objectContaining({type:'bubble'}),'unconfirmed');
+  const [alt,contents]=notify.mock.calls[0]!;
+  expect.soft(alt).not.toContain('สร้างเอกสารไม่สำเร็จ');expect.soft(alt).not.toContain('เพื่อลองใหม่');
+  expect.soft(JSON.stringify(contents)).not.toContain('สร้างเอกสารไม่สำเร็จ');expect.soft(JSON.stringify(contents)).not.toContain('เพื่อลองใหม่');
+  expect(JSON.stringify(contents)).toContain('ตรวจสอบ');
+  expect(log).toHaveBeenCalledWith('publication_failure_recording_unconfirmed',expect.objectContaining({originalCode:'anthropic_create_message_failed',recordingCode:'google_token_exchange_failed'}));
+  expect(JSON.stringify(log.mock.calls)).not.toContain('SECRET');
+ } finally {log.mockRestore();}
 });

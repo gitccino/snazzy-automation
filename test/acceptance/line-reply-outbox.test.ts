@@ -36,3 +36,15 @@ it('signed same-group messages drain durable FIFO across new workflow instances 
    expect(captured).toHaveLength(2);expect(await outbox.head(group)).toBeNull();
  } finally {fetcher.mockRestore();}
 });
+it('suppresses historical saved-reply-only redelivery before repeating business preparation',async()=>{
+ const {createLineRepository}=await import('../../src/db/line-repository');
+ const env={...testEnv(),...createTestEnv()} as Env;
+ const id=crypto.randomUUID(); const repo=createLineRepository(env.DB,{next:()=>crypto.randomUUID()},{now:()=>new Date()});
+ await repo.saveEventReply(id,{kind:'text',text:'historical push may already be accepted'});
+ const fetcher=vi.spyOn(globalThis,'fetch').mockRejectedValue(new Error('business or LINE must not be called'));
+ const step={do:async(_name:string,optionsOrCallback:any,callback?:any)=>(callback??optionsOrCallback)()} as unknown as WorkflowStep;
+ try {
+  const result=await LineCommandWorkflow.prototype.run.call({env} as unknown as LineCommandWorkflow,{payload:{event:{type:'message',webhookEventId:id,replyToken:'new',source:{type:'group',groupId:'CtestGroup',userId:'U1'},message:{type:'text',id:'m',text:'/upload'}},receivedAt:new Date().toISOString()},instanceId:id} as any,step);
+  expect(fetcher).not.toHaveBeenCalled();expect(result).toEqual({status:'duplicate'});
+ } finally {fetcher.mockRestore();}
+});

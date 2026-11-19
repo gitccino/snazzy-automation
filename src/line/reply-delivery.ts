@@ -38,9 +38,9 @@ export async function deliverEventReply(input: {
   try { receipt=await deps.line.sendReplyMessages(input.replyToken,messages); }
   catch(error) {
     if(error instanceof LineReplyError && error.classification==='definite_rejection') {
-      await retryReplyPersistence(()=>deps.repo.reject(input.eventId,error.disposition));return 'rejected';
+      await retryReplyPersistence(()=>deps.repo.reject(input.eventId,error.disposition,{status:error.status,requestId:error.requestId}));return 'rejected';
     }
-    await retryReplyPersistence(()=>deps.repo.markUncertain(input.eventId));return 'uncertain';
+    await retryReplyPersistence(()=>deps.repo.markUncertain(input.eventId,error instanceof LineReplyError?{status:error.status,requestId:error.requestId}:undefined));return 'uncertain';
   }
   // Receipt persistence is separate: retrying it must never repeat the external send.
   await retryReplyPersistence(()=>deps.repo.accept(input.eventId,receipt.requestId));
