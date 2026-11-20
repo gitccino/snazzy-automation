@@ -1,3 +1,4 @@
+import { selectPendingVerification } from '../db/pending-verification';
 import { createWorkflowFeedbackRepository } from '../db/workflow-feedback';
 import { createLineReplyRepository } from '../db/line-reply-repository';
 import { deliverEventReply } from './reply-delivery';
@@ -158,6 +159,31 @@ export class LineCommandWorkflow extends WorkflowEntrypoint<Env,{event:LineIngre
       await deps.repo.claimEvent(event.webhookEventId,event.source.groupId);
     });
     const status=await step.do('reply-once',attemptOptions,()=>deliverEventReply({eventId:event.webhookEventId,groupId:event.source.groupId,workflowId:input.instanceId,receivedAt,replyToken:event.replyToken,commandReply:reply,drainQueue:event.type!=='postback',publicBaseUrl:deps.publicBaseUrl},{repo:createLineReplyRepository(this.env.DB,deps.clock),line:deps.line,clock:deps.clock,isGroupAllowed:allowed,feedback:createWorkflowFeedbackRepository(this.env.DB)}));
+    if (event.type === 'message' && parsed && !parsed.ok && parsed.code === 'unknown_command') {
+      await step.do('dispatch-pending-verification', attemptOptions, async () => {
+        try {
+          if (!await allowed(event.source.groupId)) return;
+          const claim = await selectPendingVerification(this.env.DB, event.source.groupId);
+          if (!claim) return;
+          const workflow = claim.kind === 'import' ? this.env.IMPORT_WORKFLOW : this.env.PUBLICATION_WORKFLOW;
+          const origin = (await (await workflow.get(claim.originWorkflowId)).status()).status;
+          if (!['complete', 'errored', 'terminated'].includes(origin)) return;
+          try {
+            await (await workflow.get(claim.verifierId)).status();
+            return;
+          } catch (error) {
+            if (!(error instanceof Error && error.message.includes('instance.not_found'))) return;
+          }
+          if (claim.kind === 'import') {
+            await this.env.IMPORT_WORKFLOW.create({id: claim.verifierId, params: {kind:'verification', importRunId:claim.runId}});
+          } else {
+            await this.env.PUBLICATION_WORKFLOW.create({id: claim.verifierId, params: {kind:'verification', publicationRunId:claim.runId, generation:claim.generation, notificationCycle:claim.notificationCycle, groupId:claim.groupId, verifierId:claim.verifierId}});
+          }
+        } catch (error) {
+          console.error('Pending verification dispatch failed', error);
+        }
+      }).catch(error => console.error('Pending verification step interrupted', error));
+    }
     return {status};
   }
 }

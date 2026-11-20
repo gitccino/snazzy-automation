@@ -94,3 +94,24 @@ it('resumes a proven saved upload through signed ingress once without preparing 
   expect(sends).toHaveLength(1);expect(sends[0].messages).toEqual([{type:'text',text:'prepared'}]);
  } finally {fetcher.mockRestore();}
 });
+
+it('dispatches the saved same-group verification after the ordinary reply, and tolerates lookup failures', async () => {
+ const group='CtestGroup', foreign='foreign-'+crypto.randomUUID(), runId=crypto.randomUUID(), albumId=crypto.randomUUID(), order:string[]=[];
+ const context=JSON.stringify({replyGroupId:group});
+ const workflow={get:vi.fn(async(id:string)=>({status:async()=>{order.push('lookup:'+id);if(id===`import-${runId}`)return {status:'errored'};throw new Error('instance.not_found');}})),create:vi.fn(async({id}:any)=>{order.push('create:'+id);})};
+ const env={...testEnv(),...createTestEnv(),IMPORT_WORKFLOW:workflow} as unknown as Env;
+ await env.DB.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json) VALUES(?,?,'line','running','x',?)").bind(runId,albumId,context).run();
+ const {claimImportVerification}=await import('../../src/db/import-repository');
+ await claimImportVerification(env.DB,{runId,albumId,workflowId:`import-${runId}`,groupId:group,contextJson:context});
+ const repo=createLineReplyRepository(env.DB,{now:()=>new Date()});
+ const step={do:async(_n:string,a:any,b?:any)=>(b??a)()} as unknown as WorkflowStep;
+ const send=vi.spyOn(globalThis,'fetch').mockImplementation(async()=>{order.push('reply');return Response.json({});});
+ const run=async(groupId:string)=>{const id=crypto.randomUUID();await repo.enqueueResult({groupId,resultKey:id,result:{schemaVersion:1,kind:'import',runId:id,generation:1,notificationCycle:1,outcome:'success',messages:[{type:'text',text:'notice'}]}});return LineCommandWorkflow.prototype.run.call({env} as unknown as LineCommandWorkflow,{payload:{event:{type:'message',webhookEventId:id,replyToken:'token',source:{type:'group',groupId,userId:'U1'},message:{type:'text',id:'m',text:'hello'}},receivedAt:new Date().toISOString()},instanceId:id} as any,step);};
+ try {
+  await run(foreign);expect(order).toEqual([]);
+  await run(group);expect(order).toEqual(['reply',`lookup:import-${runId}`,`lookup:import-verification-${runId}`,`create:import-verification-${runId}`]);
+  expect(workflow.create).toHaveBeenCalledOnce();
+  workflow.get.mockRejectedValueOnce(new Error('outage'));order.length=0;
+  await run(group);expect(order[0]).toBe('reply');expect(workflow.create).toHaveBeenCalledOnce();
+ } finally {send.mockRestore();}
+});
