@@ -1,3 +1,5 @@
+import { validateReplyMessages } from "../line/client";
+import type { TerminalResultV1 } from "../line/reply-types";
 import { z } from "zod";
 import type { MarkerKind } from "../import/marker";
 import type { Clock, IdGenerator } from "../env";
@@ -36,6 +38,7 @@ export interface ImportRepository {
     status: "completed" | "completed_with_failures";
     orphanPhotoCount: number;
     checkpointPosition: number;
+    lineResult?: { readonly groupId: string; readonly result: Readonly<TerminalResultV1> };
   }): Promise<void>;
   findAssetByContentHash(contentHash: string): Promise<PhotoAssetRow | null>;
   findAssetByApplePhotoId(sourceAlbumId: string, applePhotoId: string): Promise<PhotoAssetRow | null>;
@@ -201,6 +204,14 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
 
     async finalizeImportRun(input) {
       const now = clock.now().toISOString();
+      const notice = input.lineResult;
+      if (notice) {
+        const value = notice.result;
+        validateReplyMessages(value.messages);
+        if (!notice.groupId.trim() || value.schemaVersion !== 1 || value.kind !== "import" || value.runId !== input.id || value.generation !== 1 || value.notificationCycle !== 1 || value.outcome !== (input.status === "completed" ? "success" : "partial")) throw new Error("import_invalid_result");
+      }
+      const key = JSON.stringify(["import", input.id, 1, 1, "terminal"]);
+      const json = notice ? JSON.stringify(notice.result) : null;
       const results = await db.batch([
         db.prepare(
           `UPDATE import_runs
@@ -209,6 +220,7 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
            WHERE id = ?
              AND source_album_id = ?
              AND status = 'running'
+             AND (? IS NULL OR json_extract(settings_context_json, '$.replyGroupId') = ?)
              AND NOT EXISTS (
                SELECT 1
                FROM product_groups
@@ -222,6 +234,7 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
           input.checkpointPosition,
           input.id,
           input.sourceAlbumId,
+          notice?.groupId ?? null, notice?.groupId ?? null,
         ),
         db.prepare(
           `INSERT INTO import_checkpoints (source_album_id, last_position, updated_at)
@@ -231,6 +244,11 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
              last_position = MAX(import_checkpoints.last_position, excluded.last_position),
              updated_at = excluded.updated_at`,
         ).bind(input.sourceAlbumId, input.checkpointPosition, now),
+        ...(notice ? [db.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at)
+          SELECT ?, ?, ?, ? WHERE changes() = 1
+          ON CONFLICT(result_key) DO UPDATE SET group_id = CASE
+            WHEN group_id = excluded.group_id AND result_json = excluded.result_json THEN group_id ELSE NULL END`)
+          .bind(key, notice.groupId, json, now)] : []),
       ]);
       if (results[0]?.meta.changes !== 1) {
         const terminal = await db
@@ -252,7 +270,11 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
             input.checkpointPosition,
           )
           .first<{ identical: number }>();
-        if (terminal === null) {
+        if (terminal === null || (notice && !await db.prepare(`SELECT 1 FROM line_result_outbox
+          WHERE result_key=? AND group_id=? AND result_json=? AND EXISTS
+          (SELECT 1 FROM import_runs WHERE id=? AND json_extract(settings_context_json, '$.replyGroupId')=?)
+          AND EXISTS (SELECT 1 FROM import_checkpoints WHERE source_album_id=? AND last_position>=?)`)
+          .bind(key, notice.groupId, json, input.id, notice.groupId, input.sourceAlbumId, input.checkpointPosition).first())) {
           throw new Error(`cannot finalize import run "${input.id}"`);
         }
       }
