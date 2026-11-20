@@ -98,7 +98,7 @@ it.each(['ignored', 'orphan'])('completes a verified %s grouping once and preser
   expect(result.messages[0].text).toContain(kind === 'ignored' ? 'ข้ามสินค้าซ้ำ 1' : 'a – b');
 });
 
-it('rejects classifications changed between reconstruction and completion', async () => {
+it.each(['classification', 'scan', 'checkpoint'])('rejects %s changed between reconstruction and completion', async (change) => {
   const env = testEnv(), db = env.DB, runId = crypto.randomUUID(), album = crypto.randomUUID(), owner = crypto.randomUUID();
   const context = JSON.stringify({replyGroupId:owner});
   const scan = [{applePhotoId:'a',position:0,captureAt:null,mediaType:'image/jpeg'}];
@@ -108,9 +108,11 @@ it('rejects classifications changed between reconstruction and completion', asyn
   await claimImportVerification(db,{runId,albumId:album,workflowId:importWorkflowId(runId),groupId:owner,contextJson:context});
   (env as any).IMPORT_WORKFLOW = {get: async () => ({status: async () => ({status:'errored'})})};
   let batches = 0;
-  const wrapped = new Proxy(db, {get(target, prop) { if (prop === 'batch') return async (statements: D1PreparedStatement[]) => { if (++batches === 2) await target.prepare("UPDATE photo_assets SET marker_kind='product_start', is_marker=1 WHERE source_album_id=?").bind(album).run(); return target.batch(statements); }; const value = Reflect.get(target,prop,target); return typeof value === 'function' ? value.bind(target) : value; }});
+  const wrapped = new Proxy(db, {get(target, prop) { if (prop === 'batch') return async (statements: D1PreparedStatement[]) => { if (++batches === 2) { if (change === 'classification') await target.prepare("UPDATE photo_assets SET marker_kind='product_start', is_marker=1 WHERE source_album_id=?").bind(album).run(); else if (change === 'scan') await target.prepare("UPDATE import_runs SET scan_evidence_json='[]' WHERE id=?").bind(runId).run(); else await target.prepare("INSERT INTO import_checkpoints VALUES(?,99,'new')").bind(album).run(); } return target.batch(statements); }; const value = Reflect.get(target,prop,target); return typeof value === 'function' ? value.bind(target) : value; }});
   await ImportWorkflow.prototype.run.call({env:{...env,DB:wrapped}} as any,{instanceId:`import-verification-${runId}`,payload:{kind:'verification',importRunId:runId}} as any,{do:async (_:string,cb:()=>Promise<unknown>)=>cb()} as any);
-  expect(await db.prepare('SELECT status FROM import_runs WHERE id=?').bind(runId).first('status')).toBe('running');
+  expect(await db.prepare('SELECT status,checkpoint_position FROM import_runs WHERE id=?').bind(runId).first()).toEqual({status:'running',checkpoint_position:null});
   expect(await db.prepare('SELECT completed FROM import_verification_claims WHERE import_run_id=?').bind(runId).first('completed')).toBeNull();
   expect(await db.prepare('SELECT count(*) FROM line_result_outbox WHERE group_id=?').bind(owner).first('count(*)')).toBe(0);
+  if (change === 'scan') expect(await db.prepare('SELECT scan_evidence_json FROM import_runs WHERE id=?').bind(runId).first('scan_evidence_json')).toBe('[]');
+  if (change === 'checkpoint') expect(await db.prepare('SELECT last_position FROM import_checkpoints WHERE source_album_id=?').bind(album).first('last_position')).toBe(99);
 });

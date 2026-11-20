@@ -88,3 +88,27 @@ it('completes a proven empty scan atomically and preserves the checkpoint', asyn
   expect(await db.prepare('SELECT status,checkpoint_position FROM import_runs WHERE id=?').bind(runId).first()).toEqual({status:'completed',checkpoint_position:42});
   expect(await db.prepare('SELECT last_position FROM import_checkpoints WHERE source_album_id=?').bind(albumId).first('last_position')).toBe(42);
 });
+
+it.each(['scan', 'checkpoint'])('fences a %s change after reading the grouping candidate', async change => {
+  const { readImportVerificationGroupingCandidate, completeImportVerification } = await import('../../src/db/import-repository');
+  const db = testEnv().DB, runId = crypto.randomUUID(), albumId = crypto.randomUUID(), groupId = crypto.randomUUID();
+  const contextJson = JSON.stringify({replyGroupId:groupId});
+  const input = {runId, albumId, workflowId:`import-${runId}`, groupId, contextJson};
+  const scan = [{applePhotoId:'a',position:0,captureAt:null,mediaType:'image/jpeg'}];
+  const facts = {version:1,savedCheckpoint:42,firstImportCutoffDate:null,ignoredGroupCount:0,orphanRange:{firstApplePhotoId:'a',lastApplePhotoId:'a',count:1},checkpointPosition:42};
+  await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json,scan_evidence_json,grouping_evidence_json) VALUES(?,?,'line','running','now',?,?,?)").bind(runId,albumId,contextJson,JSON.stringify(scan),JSON.stringify(facts)).run();
+  await db.prepare("INSERT INTO import_checkpoints VALUES(?,42,'old')").bind(albumId).run();
+  await db.prepare("INSERT INTO photo_assets(id,source_album_id,apple_photo_id,content_hash,position,is_marker,marker_kind,import_run_id,created_at) VALUES(?,?,'a','hash',0,0,'none',?,'now')").bind(crypto.randomUUID(),albumId,runId).run();
+  await claimImportVerification(db,input);
+  const verifierId = `import-verification-${runId}`;
+  const candidate = await readImportVerificationGroupingCandidate(db,runId,verifierId);
+  expect(candidate).not.toBeNull();
+  if (change === 'scan') await db.prepare("UPDATE import_runs SET scan_evidence_json='[]' WHERE id=?").bind(runId).run();
+  else await db.prepare('UPDATE import_checkpoints SET last_position=99 WHERE source_album_id=?').bind(albumId).run();
+  const result: TerminalResultV1 = {schemaVersion:1,kind:'import',runId,generation:1,notificationCycle:1,outcome:'success',messages:[{type:'text',text:'done'}]};
+  expect(await completeImportVerification(db,input,verifierId,result,false,candidate!)).toBe(false);
+  expect(await db.prepare('SELECT status,checkpoint_position,scan_evidence_json FROM import_runs WHERE id=?').bind(runId).first()).toEqual({status:'running',checkpoint_position:null,scan_evidence_json:change === 'scan' ? '[]' : JSON.stringify(scan)});
+  expect(await db.prepare('SELECT last_position FROM import_checkpoints WHERE source_album_id=?').bind(albumId).first('last_position')).toBe(change === 'checkpoint' ? 99 : 42);
+  expect(await db.prepare('SELECT completed FROM import_verification_claims WHERE import_run_id=?').bind(runId).first('completed')).toBeNull();
+  expect(await db.prepare('SELECT count(*) AS n FROM line_result_outbox WHERE group_id=?').bind(groupId).first('n')).toBe(0);
+});
