@@ -274,6 +274,38 @@ describe("import-repository", () => {
     expect(second.productId).toBe("A-501");
   });
 
+  it("claims an allocated Airtable create once and preserves its identity across runs", async () => {
+    const r = repo();
+    const album = `album-${crypto.randomUUID()}`;
+    const run = crypto.randomUUID();
+    await r.createImportRun({ id: run, sourceAlbumId: album, trigger: "cron" });
+    const input = { id: crypto.randomUUID(), importRunId: run, ordinal: 0, groupHash: `hash-${crypto.randomUUID()}`, firstPhotoId: "a", lastPhotoId: "b" };
+    const group = await r.upsertPendingGroup(input);
+    const productId = `product-${crypto.randomUUID()}`;
+    await r.setGroupState(group.id, "importing", { productId });
+    const claim = { groupId: group.id, productId, baseId: "base", tableId: "table" };
+    expect((await Promise.all([r.claimAirtableCreate(claim), r.claimAirtableCreate(claim)])).sort()).toEqual(["acquired", "existing"]);
+    expect(await r.claimAirtableCreate({ ...claim, productId: "wrong" })).toBe("conflict");
+    expect(await r.claimAirtableCreate({ ...claim, tableId: "other" })).toBe("conflict");
+    expect(await r.claimAirtableCreate({ ...claim, baseId: "other" })).toBe("conflict");
+    await expect(r.setGroupState(group.id, "failed", { productId: "wrong" })).rejects.toThrow();
+    await r.setGroupState(group.id, "failed", { productId: null });
+    await r.finalizeImportRun({ id: run, sourceAlbumId: album, status: "completed_with_failures", orphanPhotoCount: 0, checkpointPosition: 0 });
+    const next = crypto.randomUUID();
+    await r.createImportRun({ id: next, sourceAlbumId: album, trigger: "line" });
+    expect(await r.upsertPendingGroup({ ...input, id: crypto.randomUUID(), importRunId: next })).toMatchObject({ id: group.id, state: "pending", productId });
+    expect(await r.claimAirtableCreate(claim)).toBe("existing");
+    expect(await r.claimAirtableCreate({ ...claim, productId: "wrong" })).toBe("conflict");
+  });
+
+  it("rejects claims without the group's allocated product ID", async () => {
+    const r = repo();
+    const run = crypto.randomUUID();
+    await r.createImportRun({ id: run, sourceAlbumId: `album-${crypto.randomUUID()}`, trigger: "cron" });
+    const group = await r.upsertPendingGroup({ id: crypto.randomUUID(), importRunId: run, ordinal: 0, groupHash: `hash-${crypto.randomUUID()}`, firstPhotoId: "a", lastPhotoId: "b" });
+    expect(await r.claimAirtableCreate({ groupId: group.id, productId: "wrong", baseId: "base", tableId: "table" })).toBe("conflict");
+  });
+
   it("setGroupState updates failureReason and attemptCount independently", async () => {
     const r = repo();
     const runId = crypto.randomUUID();

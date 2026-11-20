@@ -45,7 +45,8 @@ export interface ImportRepository {
   findGroupByHash(groupHash: string): Promise<ProductGroupRow | null>;
   findConfirmedOverlap(sourceAlbumId: string, groupHash: string, photoIds: string[]): Promise<boolean>;
   upsertPendingGroup(input: { id: string; importRunId: string; ordinal: number; groupHash: string; firstPhotoId: string; lastPhotoId: string; photos?: Array<{ applePhotoId: string; r2Key: string | null }> }): Promise<ProductGroupRow>;
-  setGroupState(id: string, state: ProductGroupState, patch?: Partial<{ productId: string; airtableRecordId: string; failureReason: string | null; attemptCount: number }>): Promise<void>;
+  claimAirtableCreate(input: { groupId: string; productId: string; baseId: string; tableId: string }): Promise<"acquired" | "existing" | "conflict">;
+  setGroupState(id: string, state: ProductGroupState, patch?: Partial<{ productId: string | null; airtableRecordId: string; failureReason: string | null; attemptCount: number }>): Promise<void>;
 }
 
 const PhotoAssetDbRowSchema = z.object({
@@ -327,6 +328,7 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
              product_id = CASE
                WHEN product_groups.state = 'failed'
                  AND product_groups.import_run_id <> excluded.import_run_id
+                 AND NOT EXISTS (SELECT 1 FROM airtable_create_claims WHERE group_id = product_groups.id)
                THEN NULL ELSE product_groups.product_id END,
              airtable_record_id = CASE
                WHEN product_groups.state = 'failed'
@@ -357,8 +359,20 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
       return row;
     },
 
+    async claimAirtableCreate(input) {
+      const result = await db.prepare(`INSERT INTO airtable_create_claims (group_id, product_id, base_id, table_id)
+        SELECT id, product_id, ?, ? FROM product_groups WHERE id = ? AND product_id = ?
+        ON CONFLICT(group_id) DO NOTHING`)
+        .bind(input.baseId, input.tableId, input.groupId, input.productId).run();
+      if (result.meta.changes === 1) return "acquired";
+      const existing = await db.prepare(`SELECT 1 FROM airtable_create_claims
+        WHERE group_id = ? AND product_id = ? AND base_id = ? AND table_id = ?`)
+        .bind(input.groupId, input.productId, input.baseId, input.tableId).first();
+      return existing ? "existing" : "conflict";
+    },
+
     async setGroupState(id, state, patch = {}) {
-      await db
+      const result = await db
         .prepare(
           `UPDATE product_groups SET
              state = ?,
@@ -367,7 +381,9 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
              failure_reason = CASE WHEN ? THEN ? ELSE failure_reason END,
              attempt_count = COALESCE(?, attempt_count),
              updated_at = ?
-           WHERE id = ?`,
+           WHERE id = ? AND (? IS NULL OR NOT EXISTS (
+             SELECT 1 FROM airtable_create_claims WHERE group_id = product_groups.id AND product_id <> ?
+           ))`,
         )
         .bind(
           state,
@@ -378,8 +394,14 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
           patch.attemptCount ?? null,
           clock.now().toISOString(),
           id,
+          patch.productId ?? null,
+          patch.productId ?? null,
         )
         .run();
+      if (result.meta.changes === 0 && patch.productId != null) {
+        const claim = await db.prepare("SELECT product_id FROM airtable_create_claims WHERE group_id = ?").bind(id).first<{ product_id: string }>();
+        if (claim && claim.product_id !== patch.productId) throw new Error("Cannot change claimed product ID");
+      }
     },
   };
 }
