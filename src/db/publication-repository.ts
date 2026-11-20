@@ -649,11 +649,19 @@ export async function completePublicationVerification(
       AND EXISTS (SELECT 1 FROM publication_jobs WHERE publication_run_id=? AND generation=? AND notification_cycle=?
         AND json_extract(settings_context_json, '$.replyGroupId')=?
         AND (? IS NULL OR (correlation_id=? AND settings_context_json=?)))
-      AND result_json IS NULL AND (? IS NULL OR (origin_workflow_id=? AND context_json=?))`)
+      AND result_json IS NULL AND (? IS NULL OR (origin_workflow_id=? AND context_json=?))
+      AND (COALESCE(?, '') != 'failed' OR EXISTS (SELECT 1 FROM publication_jobs j
+        JOIN publication_google_write_evidence e ON e.publication_run_id=j.publication_run_id AND e.generation=j.generation AND e.notification_cycle=j.notification_cycle
+        JOIN workflow_feedback f ON f.kind='publication' AND f.run_id=j.publication_run_id AND f.generation=j.generation AND f.notification_cycle=j.notification_cycle AND f.group_id=publication_verification_claims.group_id AND f.context_json=j.settings_context_json
+        JOIN workflow_feedback_results r ON r.kind=f.kind AND r.run_id=f.run_id AND r.generation=f.generation AND r.notification_cycle=f.notification_cycle AND r.group_id=f.group_id AND r.revision=0
+        WHERE j.publication_run_id=publication_verification_claims.publication_run_id AND j.generation=publication_verification_claims.generation AND j.notification_cycle=publication_verification_claims.notification_cycle
+        AND j.state IN ('locked','validating','generating','failed') AND j.temp_doc_id IS NULL AND j.finalization_json IS NULL AND j.google_doc_id IS NULL AND j.google_doc_url IS NULL AND j.successful_generation=0
+        AND e.protocol_version=1 AND e.state='tracking' AND f.stage IN ('prepare product images','prepare outputs') AND length(f.failure_code)>0
+        AND json_extract(r.outcome_json,'$.stage')=f.stage AND json_extract(r.outcome_json,'$.failureCode')=f.failure_code AND json_extract(r.outcome_json,'$.outcome')='unconfirmed'))`)
     .bind(intent ? JSON.stringify(intent.result) : null, attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId, verifierId,
       attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId,
       intent?.originWorkflowId ?? null, intent?.originWorkflowId ?? null, intent?.contextJson ?? null,
-      intent?.originWorkflowId ?? null, intent?.originWorkflowId ?? null, intent?.contextJson ?? null);
+      intent?.originWorkflowId ?? null, intent?.originWorkflowId ?? null, intent?.contextJson ?? null, intent?.result.outcome ?? null);
   if (!intent) return (await update.run()).meta.changes === 1;
   const key = JSON.stringify(['publication', attempt.runId, attempt.generation, attempt.notificationCycle, 'verification']);
   const [result] = await db.batch([update, db.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at)

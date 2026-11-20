@@ -3,6 +3,7 @@ import {
   ProductImagePreparationFailure,
 } from "./product-images";
 import Anthropic from "@anthropic-ai/sdk";
+import { z } from "zod";
 import {
   WorkflowEntrypoint,
   type WorkflowEvent,
@@ -327,9 +328,21 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
         if (!["complete", "errored", "terminated"].includes(status)) throw new Error("publication_origin_not_stopped");
         const attempt = {runId:payload.publicationRunId, generation:payload.generation, notificationCycle:payload.notificationCycle, groupId:payload.groupId};
         const preGoogleFailure = await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId);
+        let confirmedFailed = false;
+        if (preGoogleFailure) {
+          try {
+            const context = JSON.parse(preGoogleFailure.context_json) as OperationContext;
+            const config = context.settings.config;
+            const url = `https://api.airtable.com/v0/${encodeURIComponent(config.airtableBaseId)}/${encodeURIComponent(config.airtablePublicationRunsTableId)}/${encodeURIComponent(attempt.runId)}`;
+            const response = await fetch(url, {headers:{Authorization:`Bearer ${this.env.AIRTABLE_TOKEN}`}});
+            if (!response.ok) throw new Error('airtable_read_failed');
+            const record = z.object({id:z.string(), fields:z.object({Status:z.string(), 'Google Doc URL':z.string().optional(), 'Generated At':z.string().optional()})}).parse(await response.json());
+            confirmedFailed = record.id === attempt.runId && record.fields.Status === 'Failed' && !record.fields['Google Doc URL'] && !record.fields['Generated At'] && !!await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId);
+          } catch { /* An unavailable or inconsistent record cannot confirm the outcome. */ }
+        }
         await completePublicationVerification(this.env.DB, attempt, payload.verifierId, {
           originWorkflowId:claim.origin_workflow_id, contextJson:claim.context_json,
-          result:{schemaVersion:1, kind:'publication', runId:attempt.runId, generation:attempt.generation, notificationCycle:attempt.notificationCycle, outcome:'unconfirmed', messages:[{type:'text', text:preGoogleFailure ? `⚠️ กรุณาตรวจสอบสถานะงานเดิมใน Airtable ก่อนส่ง /docs ซ้ำ\n${attempt.runId}` : `⚠️ ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${attempt.runId}`}]},
+          result:{schemaVersion:1, kind:'publication', runId:attempt.runId, generation:attempt.generation, notificationCycle:attempt.notificationCycle, outcome:confirmedFailed ? 'failed' : 'unconfirmed', messages:[{type:'text', text:confirmedFailed ? `ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed และไม่มีเอกสารที่บันทึกไว้\n${attempt.runId}` : preGoogleFailure ? `⚠️ กรุณาตรวจสอบสถานะงานเดิมใน Airtable ก่อนส่ง /docs ซ้ำ\n${attempt.runId}` : `⚠️ ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${attempt.runId}`}]},
         });
       });
       return null;
