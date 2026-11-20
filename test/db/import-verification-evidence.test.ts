@@ -80,3 +80,27 @@ it('writes grouping evidence once only for the running run and its exact saved s
   const repo = createImportRepository(db, {next:()=>''}, {now:()=>new Date()});
   expect(await repo.recordGroupingEvidence(id, scan, {...legacy, version:1, savedCheckpoint:4, firstImportCutoffDate:'2026-01-01'})).toEqual(legacy);
 });
+
+it('reconstructs no-group evidence from the original scan and album assets, rejecting legacy and inconsistent facts', async () => {
+  const repo = await import('../../src/db/import-repository');
+  const db = testEnv().DB, id = crypto.randomUUID(), album = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:'owner'});
+  const scan = [{applePhotoId:'a',position:0,captureAt:null,mediaType:'image/jpeg'}, {applePhotoId:'b',position:1,captureAt:null,mediaType:'image/jpeg'}];
+  const facts = {version:1,savedCheckpoint:null,firstImportCutoffDate:null,ignoredGroupCount:1,orphanRange:null,checkpointPosition:1};
+  await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json,scan_evidence_json,grouping_evidence_json) VALUES(?,?,'line','running','now',?,?,?)").bind(id,album,context,JSON.stringify(scan),JSON.stringify(facts)).run();
+  await repo.claimImportVerification(db,{runId:id,albumId:album,workflowId:importWorkflowId(id),groupId:'owner',contextJson:context});
+  const read = () => repo.readImportVerificationGroupingCandidate(db,id,`import-verification-${id}`);
+  expect(await read()).toBeNull();
+  await db.prepare("INSERT INTO photo_assets(id,source_album_id,apple_photo_id,content_hash,position,is_marker,marker_kind,import_run_id,created_at) VALUES(?,?,?,'hash',?,0,?,?,'now')").bind(crypto.randomUUID(),album,'a',0,'ignore_start',id).run();
+  await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at) VALUES('earlier',?,'admin','completed','now')").bind(album).run();
+  await db.prepare("INSERT INTO photo_assets(id,source_album_id,apple_photo_id,content_hash,position,is_marker,marker_kind,import_run_id,created_at) VALUES(?,?,?,'hash2',?,0,?,'earlier','now')").bind(crypto.randomUUID(),album,'b',1,'none').run();
+  expect(await read()).toMatchObject({ignoredGroupCount:1,orphanRange:null,checkpointPosition:1});
+  expect(await repo.readImportVerificationGroupingCandidate(db,id,'stale')).toBeNull();
+  await db.prepare("UPDATE photo_assets SET is_marker=1 WHERE source_album_id=? AND apple_photo_id='b'").bind(album).run();
+  expect(await read()).toBeNull();
+  await db.prepare("UPDATE photo_assets SET is_marker=0 WHERE source_album_id=? AND apple_photo_id='b'").bind(album).run();
+  await db.prepare('UPDATE import_runs SET grouping_evidence_json=? WHERE id=?').bind(JSON.stringify({...facts,ignoredGroupCount:0}),id).run();
+  expect(await read()).toBeNull();
+  await db.prepare('UPDATE import_runs SET grouping_evidence_json=? WHERE id=?').bind(JSON.stringify({ignoredGroupCount:1,orphanRange:null,checkpointPosition:1}),id).run();
+  expect(await read()).toBeNull();
+});

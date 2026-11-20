@@ -1,4 +1,4 @@
-import { computeGroupHash } from "../import/grouping";
+import { computeGroupHash, groupByMarkers } from "../import/grouping";
 import { importWorkflowId } from "../shared/ids";
 import { validateReplyMessages } from "../line/client";
 import type { TerminalResultV1 } from "../line/reply-types";
@@ -462,6 +462,46 @@ export async function readImportVerificationEvidence(db: D1Database, runId: stri
     scan = parsed.data === 'incomplete' ? 'incomplete' : 'complete';
   } catch { return null; }
   return { sourceAlbumId: row.source_album_id, contextJson: row.settings_context_json, scan, groups: { pending: row.pending, importing: row.importing, succeeded: row.succeeded, failed: row.failed } };
+}
+
+/** Reconstruct a no-product grouping only from the owning claim's captured inputs. */
+export async function readImportVerificationGroupingCandidate(db: D1Database, runId: string, verifierId: string) {
+  const row = await db.prepare(`SELECT r.source_album_id, r.scan_evidence_json, r.grouping_evidence_json
+    FROM import_verification_claims v JOIN import_runs r ON r.id=v.import_run_id
+    WHERE v.import_run_id=? AND v.verifier_id=? AND v.completed IS NULL AND v.origin_workflow_id=?
+      AND r.source_album_id=v.source_album_id AND r.status='running' AND r.trigger='line'
+      AND r.settings_context_json=v.context_json AND json_valid(v.context_json)
+      AND json_extract(v.context_json,'$.replyGroupId')=v.group_id
+      AND NOT EXISTS (SELECT 1 FROM product_groups g WHERE g.import_run_id=r.id)`)
+    .bind(runId, verifierId, importWorkflowId(runId)).first<{source_album_id:string; scan_evidence_json:string; grouping_evidence_json:string}>();
+  if (!row) return null;
+  const photoSchema = z.object({applePhotoId:z.string().min(1), position:z.number().int().nonnegative(), captureAt:z.string().nullable(), mediaType:z.literal('image/jpeg')});
+  const factsSchema = z.object({version:z.literal(1), savedCheckpoint:z.number().int().nonnegative().nullable(), firstImportCutoffDate:z.string().nullable(), ignoredGroupCount:z.number().int().nonnegative(), checkpointPosition:z.number().int(), orphanRange:z.object({firstApplePhotoId:z.string(),lastApplePhotoId:z.string(),count:z.number().int().positive()}).nullable()});
+  let scan: z.infer<typeof photoSchema>[], facts: z.infer<typeof factsSchema>;
+  try { scan = z.array(photoSchema).nonempty().parse(JSON.parse(row.scan_evidence_json)); facts = factsSchema.parse(JSON.parse(row.grouping_evidence_json)); } catch { return null; }
+  if (new Set(scan.map(p => p.applePhotoId)).size !== scan.length || new Set(scan.map(p => p.position)).size !== scan.length) return null;
+  const checkpoint = await db.prepare('SELECT last_position FROM import_checkpoints WHERE source_album_id=?').bind(row.source_album_id).first<{last_position:number}>();
+  if ((checkpoint?.last_position ?? null) !== facts.savedCheckpoint) return null;
+  const eligible = scan.filter(p => facts.firstImportCutoffDate === null || (p.captureAt !== null && p.captureAt >= facts.firstImportCutoffDate)).sort((a,b) => a.position-b.position);
+  const photos = [];
+  let ignoredGroupCount = 0, uncounted = false;
+  for (const photo of eligible) {
+    const assets = (await db.prepare('SELECT * FROM photo_assets WHERE source_album_id=? AND apple_photo_id=?').bind(row.source_album_id, photo.applePhotoId).all()).results;
+    if (assets.length !== 1) return null;
+    const parsed = PhotoAssetDbRowSchema.safeParse(assets[0]);
+    if (!parsed.success) return null;
+    const asset = toAssetRow(parsed.data);
+    if (parsed.data.marker_kind === null || parsed.data.is_marker !== (parsed.data.marker_kind === 'product_start' ? 1 : 0)) return null;
+    if (asset.markerKind === 'product_start') uncounted = false;
+    if (asset.markerKind === 'ignore_start') uncounted = photo.position > (facts.savedCheckpoint ?? -1);
+    if (asset.markerKind === 'none' && uncounted) { ignoredGroupCount++; uncounted = false; }
+    photos.push({applePhotoId:photo.applePhotoId, position:photo.position, markerKind:asset.markerKind, isMarker:asset.isMarker, r2Key:asset.r2Key});
+  }
+  const {groups, orphanPhotos} = groupByMarkers(photos);
+  const orphanRange = orphanPhotos.length ? {firstApplePhotoId:orphanPhotos[0]!.applePhotoId,lastApplePhotoId:orphanPhotos[orphanPhotos.length-1]!.applePhotoId,count:orphanPhotos.length} : null;
+  const checkpointPosition = scan.reduce((max,p) => Math.max(max,p.position), facts.savedCheckpoint ?? -1);
+  if (groups.length || ignoredGroupCount !== facts.ignoredGroupCount || checkpointPosition !== facts.checkpointPosition || JSON.stringify(orphanRange) !== JSON.stringify(facts.orphanRange)) return null;
+  return facts;
 }
 
 /** Read only complete candidate identities belonging to the active verifier and captured target. */
