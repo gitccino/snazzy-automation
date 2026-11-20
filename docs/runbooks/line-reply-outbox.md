@@ -24,6 +24,43 @@ FROM line_reply_dispatches ORDER BY updated_at DESC LIMIT 30;
 
 Normal command responses still work while an older result is held. Inspect the owner Workflow and LINE request ID. A 401/403 is configuration-blocked; a 5xx/network interruption is uncertain. Do not assume all 429s mean monthly quota: inspect LINE's own evidence. HTTP status and a bounded LINE request ID are retained; raw provider message bodies are deliberately not retained. Publication uncertainty logs retain only sanitized original/cleanup error codes.
 
+## Exact owner disposition
+
+Use an owner-authenticated Wrangler session from the repository root. This procedure has D1 write authority and is not available to LINE users. Select the explicit target (`local`, `staging`, or `production`); remote targets require the corresponding configured D1 database and Wrangler account access. Confirm the account and database mapping privately first:
+
+```sh
+npx wrangler whoami
+npx wrangler d1 list
+# Choose exactly one; replace TARGET with local, staging, or production.
+# For local use --local and omit --env. For remote use --remote --env TARGET.
+npx wrangler d1 execute snazzy-automation-TARGET --remote --env TARGET --command "SELECT sequence, result_key, group_id, state, owner_event_id, created_at FROM line_result_outbox o WHERE state != 'accepted' AND NOT EXISTS (SELECT 1 FROM line_reply_owner_dispositions d WHERE d.sequence=o.sequence) ORDER BY group_id, sequence" --json
+```
+
+Compare the group and oldest unresolved sequence with the originating job and the intended environment. Create a private JSON input file (mode 600) containing the exact values from that row; use a JSON editor to escape values correctly. Do not include a reply token or message body. This command is read-only unless `decision` is present:
+
+```json
+{"groupId":"GROUP_ID","sequence":123,"eventId":"OWNER_EVENT_ID"}
+```
+
+```sh
+chmod 600 owner-input.json
+npx tsx scripts/line-reply-owner.ts TARGET < owner-input.json
+```
+
+The output includes the saved workflow ID, dispatch phase, request ID, HTTP status, provider disposition and any existing owner disposition. If it returns no row, stop and recheck the exact target and identifiers. Inspect the named LINE command Workflow using its saved ID and the environment's Workflow name from `wrangler.jsonc`, for example:
+
+```sh
+npx wrangler workflows instances describe snazzy-line-command-staging WORKFLOW_ID --env staging --step-output=false
+```
+
+Workflow output can contain sensitive details; keep it private. Compare LINE's request evidence and the saved phase. Confirm the Workflow is terminal or explicitly terminated with authorization before closing a prepared reservation; elapsed time alone is insufficient. If evidence establishes LINE accepted the exact request, choose `confirmed_acceptance` (acceptance does not prove reading). If the outcome cannot be established and the owner accepts that the notification may have been missed, choose `close_unverifiable`; this does not assert delivery. Neither choice resends the result. Record an identifiable owner and a concise evidence-based reason, excluding tokens and message bodies. Add these fields to the private JSON file:
+
+```json
+{"groupId":"GROUP_ID","sequence":123,"eventId":"OWNER_EVENT_ID","decision":"close_unverifiable","actor":"OWNER_ID","reason":"Evidence reviewed; outcome cannot be established"}
+```
+
+Run the same command again. `recorded: true` confirms the guarded write; false means the tuple, state or FIFO head changed, or a disposition already exists. Reinspect rather than retrying blindly. The immutable disposition excludes this result from FIFO; the next eligible real group message may drain the next pending result. A later provider receipt remains evidence and cannot reopen the closed result. Remove the private input file when no longer needed.
+
 ## Pre-dispatch recovery
 
 An owner must first confirm the saved Workflow is terminal, or explicitly terminate it with authorization. Do not use elapsed time as evidence. Confirm dispatch phase is `prepared` and its result is `reserved` by that exact event. Then use the repository's `abandonPrepared(eventId)` in an owner-controlled execution against the selected DB. It uses an atomic batch to mark the dispatch abandoned and release only its own reserved result; `beginDispatch` on the old event subsequently fails. No public repair endpoint or automatic lease exists.

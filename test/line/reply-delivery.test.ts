@@ -118,3 +118,19 @@ it('keeps a command reply available when intent repair fails',async()=>{
  await deliverEventReply({...h.input,commandReply:{kind:'text',text:'command'}},{...h.deps,feedback});
  expect(h.requests[0].body.messages[0]).toEqual({type:'text',text:'command'});
 });
+
+it.each(['confirmed_acceptance', 'close_unverifiable'] as const)('owner %s advances FIFO and a late receipt never resends', async decision => {
+ const h = await fixture(200, true);
+ await h.repo.enqueueResult({resultKey:h.groupId+'-next',groupId:h.groupId,result:{schemaVersion:1,kind:'import',runId:'next',generation:1,notificationCycle:1,outcome:'success',messages:[{type:'text',text:'next'}]}});
+ expect(await deliverEventReply(h.input,h.deps)).toBe('uncertain');
+ const sequence=(await h.repo.head(h.groupId))!.sequence;
+ expect(await h.repo.recordOwnerDisposition({eventId:h.input.eventId,groupId:h.groupId,sequence,decision,actor:'owner',reason:'reviewed'})).toBe(true);
+ await h.repo.accept(h.input.eventId,'late-receipt');
+ const requests: LineReplyMessage[][]=[];
+ const deps={...h.deps,line:{sendReplyMessages:async (_token:string,messages:LineReplyMessage[])=>{requests.push(messages);return {requestId:'next-receipt'};}}};
+ expect(await deliverEventReply({...h.input,eventId:crypto.randomUUID()},deps)).toBe('accepted');
+ expect(requests).toEqual([[{type:'text',text:'next'}]]);
+ expect(await h.repo.head(h.groupId)).toBeNull();
+ expect(await deliverEventReply(h.input,deps)).toBe('ignored');
+ expect(requests).toHaveLength(1);
+});
