@@ -134,3 +134,11 @@ it.each(['confirmed_acceptance', 'close_unverifiable'] as const)('owner %s advan
  expect(await deliverEventReply(h.input,deps)).toBe('ignored');
  expect(requests).toHaveLength(1);
 });
+
+it('keeps a malformed queue head in place while sending the ordinary command', async () => {
+ const h=await fixture();
+ await testEnv().DB.prepare('UPDATE line_result_outbox SET result_json=? WHERE group_id=?').bind('{',h.groupId).run();
+ expect(await deliverEventReply({...h.input,commandReply:{kind:'text',text:'command'}},h.deps)).toBe('accepted');
+ expect(h.requests[0].body.messages).toEqual([{type:'text',text:'command'}]);
+ expect(await testEnv().DB.prepare('SELECT state FROM line_result_outbox WHERE group_id=?').bind(h.groupId).first()).toEqual({state:'pending'});
+});

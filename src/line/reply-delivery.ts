@@ -37,8 +37,16 @@ export async function deliverEventReply(input: {
       }
     } catch(error) { console.error('workflow_feedback_repair_failed',error); }
   }
-  const head=input.drainQueue ? await deps.repo.head(input.groupId):null;
-  const candidate=head?.state==='pending' && normal.length+head.result.messages.length<=5 ? head:null;
+  let head:Awaited<ReturnType<LineReplyRepository['head']>>=null;
+  try { if(input.drainQueue) head=await deps.repo.head(input.groupId); }
+  catch(error) { if(!(error instanceof SyntaxError))throw error; }
+  let candidate:typeof head=null;
+  if(head?.state==='pending') {
+    try {
+      validateReplyMessages(head.result.messages);
+      if(normal.length+head.result.messages.length<=5)candidate=head;
+    } catch { /* Keep the malformed head for owner inspection. */ }
+  }
   let messages=candidate ? [...normal,...candidate.result.messages]:normal;
   if(!messages.length)return 'ignored';
   validateReplyMessages(messages);
