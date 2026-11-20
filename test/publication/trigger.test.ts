@@ -498,7 +498,7 @@ describe("handleDocsTrigger", () => {
     },
   );
 
-  it("holds a stopped Generating attempt for owner review without another create", async () => {
+  it("dispatches one verifier for the owner of a stopped Generating attempt", async () => {
     mockRun("Generating");
     const h = makeTriggerEnv("errored");
     const { captureOperationContext } = await import("../../src/settings/runtime");
@@ -510,14 +510,18 @@ describe("handleDocsTrigger", () => {
     await setJobState(h.env.DB, clock, "rec-run-1", "failed");
     const attempt = { kind: "publication" as const, runId: "rec-run-1", generation: 1, notificationCycle: 1, groupId: "owner" };
     expect(await createWorkflowFeedbackRepository(h.env.DB).commitOutcome(attempt, { stage: "failed", action: "review", outcome: "failed", resultKey: "stale-test" })).toBe(true);
+    expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, context)).toEqual({ status: "checking", publicationRunId: "rec-run-1" });
+    const verifierId = h.create.mock.calls[0]![0].id;
+    expect(h.create).toHaveBeenCalledWith({ id: verifierId, params: { kind: "verification", publicationRunId: "rec-run-1", generation: 1, notificationCycle: 1, groupId: "owner", verifierId } });
     expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, context)).toEqual({ status: "owner_review", publicationRunId: "rec-run-1" });
     expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, { ...context, replyGroupId: "other" })).toEqual({ status: "busy" });
     h.status.mockResolvedValue({ status: "running" });
     expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, context)).toEqual({ status: "already_running", publicationRunId: "rec-run-1" });
     h.status.mockRejectedValue(new Error("unavailable"));
     expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, context)).toEqual({ status: "owner_review", publicationRunId: "rec-run-1" });
-    expect(h.create).not.toHaveBeenCalled();
+    expect(h.create).toHaveBeenCalledTimes(1);
     expect(h.restart).not.toHaveBeenCalled();
+    await h.env.DB.exec("DELETE FROM publication_verification_claims WHERE publication_run_id = 'rec-run-1'");
     await h.env.DB.exec("DELETE FROM workflow_feedback_results WHERE result_key = 'stale-test'");
     await h.env.DB.exec("DELETE FROM workflow_feedback WHERE run_id = 'rec-run-1'");
   });

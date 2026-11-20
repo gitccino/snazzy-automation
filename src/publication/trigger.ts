@@ -1,4 +1,4 @@
-import { advanceUnconfirmedPublicationRestart, bindInitialPublicationCreate } from '../db/publication-repository';
+import { advanceUnconfirmedPublicationRestart, bindInitialPublicationCreate, claimPublicationVerification } from '../db/publication-repository';
 import { captureOperationContext } from "../settings/runtime";
 import {
   readPublicationContext,
@@ -20,6 +20,7 @@ import { OperationalError } from "../shared/errors";
 export type DocsTriggerResult =
   | { status: "no_runnable_run" }
   | { status: "owner_review"; publicationRunId: string }
+  | { status: "checking"; publicationRunId: string }
   | { status: "busy" }
   | { status: "already_generated"; publicationRunId: string }
   | { status: "already_running"; publicationRunId: string }
@@ -114,9 +115,18 @@ export async function handleDocsTrigger(
       if (!job || !owner?.replyGroupId || owner.replyGroupId !== trustedGroupId)
         return { status: "busy" };
       try {
-        const workflow = await lookupWorkflow(env, publicationWorkflowId(run.airtableRunId, job.generation));
+        const originalId = publicationWorkflowId(run.airtableRunId, job.generation);
+        if (job.correlationId !== originalId) return { status: "owner_review", publicationRunId: run.airtableRunId };
+        const workflow = await lookupWorkflow(env, originalId);
         if (workflow && activeStatuses.includes(workflow.state.status))
           return { status: "already_running", publicationRunId: run.airtableRunId };
+        if (workflow && ["errored", "terminated", "complete"].includes(workflow.state.status)) {
+          const claim = await claimPublicationVerification(env.DB, { runId: run.airtableRunId, generation: job.generation, notificationCycle: job.notificationCycle, groupId: trustedGroupId! });
+          if (claim.status === "claimed" && claim.originWorkflowId === originalId) {
+            await env.PUBLICATION_WORKFLOW.create({ id: claim.verifierId, params: { kind: "verification", publicationRunId: run.airtableRunId, generation: job.generation, notificationCycle: job.notificationCycle, groupId: trustedGroupId!, verifierId: claim.verifierId } });
+            return { status: "checking", publicationRunId: run.airtableRunId };
+          }
+        }
       } catch {
         // An unavailable lookup cannot establish that the original attempt stopped.
       }
