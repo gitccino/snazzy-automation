@@ -241,6 +241,25 @@ describe("downloadAndGroupSnapshot", () => {
     expect(await deps.repo.getCheckpoint(sourceAlbumId)).toBeNull();
   });
 
+  it("finds new photos on a fresh run after empty verification", async () => {
+    const { claimImportVerification, completeEmptyImportVerification } = await import('../../src/db/import-repository');
+    const sourceAlbumId = crypto.randomUUID(), runId = crypto.randomUUID();
+    const snapshot: AlbumSnapshot = {sourceAlbumId, fetchedAt:'now', photos:[]};
+    const deps = await buildDeps(sourceAlbumId, snapshot, new Set(['marker']));
+    const db = testEnv().DB, contextJson = JSON.stringify({replyGroupId:'owner'});
+    await deps.repo.createImportRun({id:runId, sourceAlbumId, trigger:'line'});
+    await db.prepare('UPDATE import_runs SET settings_context_json=? WHERE id=?').bind(contextJson,runId).run();
+    await downloadAndGroupSnapshot(deps,runId);
+    const input = {runId, albumId:sourceAlbumId, workflowId:`import-${runId}`, groupId:'owner', contextJson};
+    await claimImportVerification(db,input);
+    expect(await completeEmptyImportVerification(db,input,`import-verification-${runId}`,{schemaVersion:1,kind:'import',runId,generation:1,notificationCycle:1,outcome:'success',messages:[{type:'text',text:'empty'}]})).toBe(true);
+    snapshot.photos.push(...['marker','new'].map((id,i) => ({...sourcePhoto(id,i),sourceAlbumId})));
+    const fresh = crypto.randomUUID();
+    await deps.repo.createImportRun({id:fresh,sourceAlbumId,trigger:'line'});
+    const result = await downloadAndGroupSnapshot(deps,fresh);
+    expect(result.pendingGroups[0]?.attachablePhotos.map(p => p.applePhotoId)).toEqual(['new']);
+  });
+
   it("downloads new photos, groups them, and excludes the marker from attachablePhotos", async () => {
     const sourceAlbumId = `album-${crypto.randomUUID()}`;
     const importRunId = crypto.randomUUID();

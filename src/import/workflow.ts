@@ -8,7 +8,7 @@ import {
 import { NonRetryableError } from "cloudflare:workflows";
 import { resolveImportContext } from "../settings/runtime";
 import { createAuditLog } from "../db/audit";
-import { createImportRepository, readImportVerificationEvidence, readImportVerificationCandidates, completeImportVerification } from "../db/import-repository";
+import { createImportRepository, readImportVerificationEvidence, readImportVerificationCandidates, completeImportVerification, completeEmptyImportVerification } from "../db/import-repository";
 import { createSequenceRepository } from "../db/sequence-repository";
 import type { Env } from "../env";
 import { createICloudClient } from "../icloud/client";
@@ -215,6 +215,11 @@ export class ImportWorkflow extends WorkflowEntrypoint<
         if (!['complete', 'errored', 'terminated'].includes(status)) throw new Error('import_origin_not_stopped');
         const result = await readImportVerificationEvidence(this.env.DB, runId, claim.origin_workflow_id, claim.group_id);
         if (!result || result.sourceAlbumId !== claim.source_album_id || result.contextJson !== claim.context_json) return null;
+        const input = {runId, albumId:claim.source_album_id, workflowId:claim.origin_workflow_id, groupId:claim.group_id, contextJson:claim.context_json};
+        if (await completeEmptyImportVerification(this.env.DB, input, event.instanceId,
+          {schemaVersion:1, kind:'import', runId, generation:1, notificationCycle:1, outcome:'success', messages:[{type:'text', text:'ไม่มีรูปใหม่สำหรับนำเข้า สามารถส่ง /upload อีกครั้งเมื่อมีรูปใหม่'}]})) {
+          return { ...result, candidates: [] };
+        }
         const candidates = await readImportVerificationCandidates(this.env.DB, runId, event.instanceId);
         const config = JSON.parse(claim.context_json)?.settings?.config;
         const verified: string[] = [];

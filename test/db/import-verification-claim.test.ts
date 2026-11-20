@@ -56,3 +56,35 @@ it('renews only once and fences stale completion', async () => {
   expect(await completeImportVerification(db, input, renewed.find(Boolean)!, result)).toBe(true);
   expect(await renewImportVerification(db, input, renewed.find(Boolean)!)).toBeNull();
 });
+
+it('completes a proven empty scan atomically and preserves the checkpoint', async () => {
+  const { completeEmptyImportVerification } = await import('../../src/db/import-repository');
+  const db = testEnv().DB, runId = crypto.randomUUID(), albumId = crypto.randomUUID();
+  const contextJson = JSON.stringify({replyGroupId:'owner'});
+  const input = {runId, albumId, workflowId:`import-${runId}`, groupId:'owner', contextJson};
+  const verifierId = `import-verification-${runId}`;
+  const result: TerminalResultV1 = {schemaVersion:1, kind:'import', runId, generation:1, notificationCycle:1, outcome:'success', messages:[{type:'text', text:'empty'}]};
+  await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json,scan_evidence_json) VALUES(?,?,'line','running','x',?,'[]')").bind(runId,albumId,contextJson).run();
+  await db.prepare("INSERT INTO import_checkpoints VALUES(?,42,'old')").bind(albumId).run();
+  await claimImportVerification(db,input);
+  expect(await completeEmptyImportVerification(db,input,'stale',result)).toBe(false);
+  await db.prepare("UPDATE import_runs SET scan_evidence_json='\"incomplete\"' WHERE id=?").bind(runId).run();
+  expect(await completeEmptyImportVerification(db,input,verifierId,result)).toBe(false);
+  await db.prepare("UPDATE import_runs SET scan_evidence_json='[]' WHERE id=?").bind(runId).run();
+  await db.prepare("INSERT INTO photo_assets(id,source_album_id,apple_photo_id,content_hash,position,import_run_id,created_at) VALUES('asset',?,'photo','hash',0,?,'now')").bind(albumId,runId).run();
+  expect(await completeEmptyImportVerification(db,input,verifierId,result)).toBe(false);
+  await db.prepare("DELETE FROM photo_assets WHERE id='asset'").run();
+  await db.prepare("INSERT INTO product_groups(id,import_run_id,ordinal,group_hash,state,first_photo_id,last_photo_id,created_at,updated_at) VALUES('group',?,0,'hash','pending','a','a','now','now')").bind(runId).run();
+  expect(await completeEmptyImportVerification(db,input,verifierId,result)).toBe(false);
+  await db.prepare("DELETE FROM product_groups WHERE id='group'").run();
+  expect(await completeEmptyImportVerification(db,{...input, contextJson:'{}'},verifierId,result)).toBe(false);
+  await db.exec("CREATE TRIGGER fail_empty_outbox BEFORE INSERT ON line_result_outbox BEGIN SELECT RAISE(ABORT, 'injected'); END");
+  await expect(completeEmptyImportVerification(db,input,verifierId,result)).rejects.toThrow();
+  expect(await db.prepare('SELECT status FROM import_runs WHERE id=?').bind(runId).first('status')).toBe('running');
+  expect(await db.prepare('SELECT completed FROM import_verification_claims WHERE import_run_id=?').bind(runId).first('completed')).toBeNull();
+  await db.exec('DROP TRIGGER fail_empty_outbox');
+  expect(await completeEmptyImportVerification(db,input,verifierId,result)).toBe(true);
+  expect(await completeEmptyImportVerification(db,input,verifierId,result)).toBe(false);
+  expect(await db.prepare('SELECT status,checkpoint_position FROM import_runs WHERE id=?').bind(runId).first()).toEqual({status:'completed',checkpoint_position:42});
+  expect(await db.prepare('SELECT last_position FROM import_checkpoints WHERE source_album_id=?').bind(albumId).first('last_position')).toBe(42);
+});
