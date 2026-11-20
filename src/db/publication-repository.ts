@@ -713,3 +713,15 @@ export async function completePublicationVerification(
     .bind(key, new Date().toISOString(), attempt.runId, attempt.generation, attempt.notificationCycle, verifierId)]);
   return result!.meta.changes === 1;
 }
+
+export async function admitPublicationCleanup(db: D1Database, runId: string, generation: number, notificationCycle: number, workflowId: string, docId: string): Promise<boolean> {
+  const row = await db.prepare(`INSERT INTO publication_cleanup_intents (publication_run_id, generation, notification_cycle, origin_workflow_id, context_json, doc_id)
+    SELECT publication_run_id, generation, notification_cycle, correlation_id, settings_context_json, ? FROM publication_jobs
+    WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND correlation_id=?
+      AND state NOT IN ('succeeded','failed','validation_failed') AND finalization_json IS NULL AND google_doc_id IS NOT ?
+    ON CONFLICT(publication_run_id, generation, notification_cycle) DO UPDATE SET doc_id=excluded.doc_id
+    WHERE publication_cleanup_intents.doc_id=excluded.doc_id AND publication_cleanup_intents.origin_workflow_id=excluded.origin_workflow_id
+      AND publication_cleanup_intents.context_json IS excluded.context_json
+    RETURNING doc_id`).bind(docId, runId, generation, notificationCycle, workflowId, docId).first();
+  return !!row;
+}
