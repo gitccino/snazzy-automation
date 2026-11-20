@@ -323,6 +323,8 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
           .first<{origin_workflow_id:string; context_json:string}>();
         const job = await readPublicationJob(this.env.DB, payload.publicationRunId);
         if (!claim || !job || job.generation !== payload.generation || job.notificationCycle !== payload.notificationCycle || job.correlationId !== claim.origin_workflow_id) return;
+        const status = (await (await this.env.PUBLICATION_WORKFLOW.get(claim.origin_workflow_id)).status()).status;
+        if (!["complete", "errored", "terminated"].includes(status)) throw new Error("publication_origin_not_stopped");
         const attempt = {runId:payload.publicationRunId, generation:payload.generation, notificationCycle:payload.notificationCycle, groupId:payload.groupId};
         const preGoogleFailure = await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId);
         await completePublicationVerification(this.env.DB, attempt, payload.verifierId, {

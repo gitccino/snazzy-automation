@@ -4,7 +4,7 @@ import { claimPublicationVerification } from '../../src/db/publication-repositor
 import { PublicationWorkflow } from '../../src/publication/workflow';
 
 it('fences verification entries and holds the current attempt without starting business work', async () => {
-  const env = testEnv(), runId = crypto.randomUUID(), groupId = crypto.randomUUID();
+  const env = {...testEnv(), PUBLICATION_WORKFLOW: {get: vi.fn(async () => ({status: async () => ({status: 'terminated'})}))}} as unknown as ReturnType<typeof testEnv>, runId = crypto.randomUUID(), groupId = crypto.randomUUID();
   const context = JSON.stringify({replyGroupId:groupId, target:'original'});
   await env.DB.prepare("INSERT INTO publication_jobs(publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,'generating','original','x','x',2,3,?)").bind(runId,context).run();
   const attempt = {runId,generation:2,notificationCycle:3,groupId};
@@ -28,4 +28,17 @@ it('fences verification entries and holds the current attempt without starting b
   expect(JSON.parse(row!.result_json!).outcome).toBe('unconfirmed');
   await run(payload);
   expect(step.do).toHaveBeenCalledTimes(8);
+});
+
+ it('holds verification while the original workflow is still running', async () => {
+  const env = {...testEnv(), PUBLICATION_WORKFLOW: {get: vi.fn(async () => ({status: async () => ({status: 'running'})}))}} as any;
+  const runId = crypto.randomUUID(), groupId = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:groupId});
+  await env.DB.prepare("INSERT INTO publication_jobs(publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,'generating','original','x','x',1,1,?)").bind(runId,context).run();
+  const attempt = {runId,generation:1,notificationCycle:1,groupId};
+  const claim = await claimPublicationVerification(env.DB,attempt);
+  if (claim.status !== 'claimed') throw new Error('missing claim');
+  await expect(PublicationWorkflow.prototype.run.call({env} as any, {payload:{kind:'verification',publicationRunId:runId,generation:1,notificationCycle:1,groupId,verifierId:claim.verifierId},instanceId:claim.verifierId} as any, {do: async (_:string, cb:()=>Promise<unknown>)=>cb()} as any)).rejects.toThrow('publication_origin_not_stopped');
+  const row = await env.DB.prepare('SELECT completed FROM publication_verification_claims WHERE publication_run_id=?').bind(runId).first();
+  expect(row.completed).toBe(0);
 });
