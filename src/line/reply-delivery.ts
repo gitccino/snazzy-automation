@@ -26,8 +26,13 @@ export async function deliverEventReply(input: {
       const row=rows[0] as {kind:string;run_id:string;generation:number;notification_cycle:number;result_key:string;outcome_json:string}|undefined;
       if(row) {
         if(!await deps.feedback.hasOutbox(row.result_key,input.groupId)) {
-          const outcome=JSON.parse(row.outcome_json) as {outcome?:string;references?:{thaiDate?:string;airtableRunUrl?:string;publicBaseUrl?:string}};
+          const outcome=JSON.parse(row.outcome_json) as {outcome?:string;result?:{messages:{type:string;text?:string}[]};references?:{thaiDate?:string;airtableRunUrl?:string;publicBaseUrl?:string}};
           const facts=outcome.references;
+          if(row.kind==='publication' && outcome.result) {
+            const result=outcome.result;
+            result.messages=[{type:'text',text:'ผลการตรวจสอบเปลี่ยนจากข้อความก่อนหน้า'},...result.messages];
+            await deps.repo.enqueueResult({resultKey:row.result_key,groupId:input.groupId,result:result as Parameters<LineReplyRepository['enqueueResult']>[0]['result']});
+          }
           if(row.kind==='publication' && outcome.outcome==='unconfirmed' && facts?.thaiDate && facts.airtableRunUrl && facts.publicBaseUrl) {
             const card=docsUnconfirmedCard({thaiDate:facts.thaiDate,airtableRunUrl:facts.airtableRunUrl},facts.publicBaseUrl);
             await deps.repo.enqueueResult({resultKey:row.result_key,groupId:input.groupId,result:{schemaVersion:1,kind:'publication',runId:row.run_id,generation:row.generation,notificationCycle:row.notification_cycle,outcome:'unconfirmed',messages:[{type:'flex',altText:card.text,contents:card.contents}]}});
@@ -44,7 +49,7 @@ export async function deliverEventReply(input: {
         let malformed=false;
         try { const result=JSON.parse(row.result_json); validateReplyMessages(result.messages); } catch { malformed=true; }
         if(malformed) {
-          const outcome=JSON.parse(row.outcome_json) as {outcome?:string;references?:{thaiDate?:string;airtableRunUrl?:string;publicBaseUrl?:string}};
+          const outcome=JSON.parse(row.outcome_json) as {outcome?:string;result?:{messages:{type:string;text?:string}[]};references?:{thaiDate?:string;airtableRunUrl?:string;publicBaseUrl?:string}};
           const facts=outcome.references;
           if(outcome.outcome==='unconfirmed' && facts?.thaiDate && facts.airtableRunUrl && facts.publicBaseUrl) {
             const card=docsUnconfirmedCard({thaiDate:facts.thaiDate,airtableRunUrl:facts.airtableRunUrl},facts.publicBaseUrl);

@@ -144,7 +144,8 @@ it.each(['pending materialization', 'queued', 'accepted', 'different action'] as
   expect(await db.prepare('SELECT completed,result_json FROM publication_verification_claims WHERE publication_run_id=?').bind(runId).first()).toEqual({completed:1,result_json:JSON.stringify(intent.result)});
   const after = (await db.prepare('SELECT * FROM line_result_outbox WHERE group_id=? ORDER BY sequence').bind(groupId).all()).results;
   expect(after.slice(0,before.length)).toEqual(before);
-  expect(after).toHaveLength(before.length + (state === 'different action' ? 1 : 0));
+  expect(after).toHaveLength(before.length);
+  if (state === 'different action') expect(await feedback.pendingByGroup(groupId,10)).toHaveLength(2);
   const saved = await db.prepare('SELECT * FROM workflow_feedback_results WHERE result_key=?').bind(key).first();
   expect(saved).toEqual({...original,materialized:state === 'queued' || state === 'accepted' ? 1 : 0});
   if (state === 'pending materialization') {
@@ -211,4 +212,39 @@ it('holds attempt advancement until the current verifier completes', async () =>
   await db.prepare("UPDATE publication_jobs SET state='failed' WHERE publication_run_id=?").bind(runId).run();
   expect(await completePublicationVerification(db,attempt,claim.verifierId)).toBe(true);
   expect(await reopenFailedJobForRestart(db,clock,runId,'workflow')).toBe(true);
+});
+
+it.each([false, true])('delivers a changed verification after its original, including held head=%s', async held => {
+  const { createWorkflowFeedbackRepository } = await import('../../src/db/workflow-feedback');
+  const runId=crypto.randomUUID(), groupId=crypto.randomUUID(), context=JSON.stringify({replyGroupId:groupId});
+  await db.prepare("INSERT INTO publication_jobs (publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,'generating','workflow','x','x',1,1,?)").bind(runId,context).run();
+  const attempt={runId,generation:1,notificationCycle:1,groupId}, feedback=createWorkflowFeedbackRepository(db);
+  const key=JSON.stringify(['publication',runId,1,1,'terminal']);
+  await feedback.commitOutcome({...attempt,kind:'publication'},{stage:'prepare outputs',failureCode:'anthropic_failed',action:'verify',outcome:'unconfirmed',resultKey:key,references:{thaiDate:'19 พฤศจิกายน 2569',airtableRunUrl:`https://airtable.com/base/table/${runId}`,publicBaseUrl:'https://old.test'}});
+  await db.prepare("INSERT INTO publication_google_write_evidence VALUES (?,1,1,'tracking',1)").bind(runId).run();
+  const claim=await claimPublicationVerification(db,attempt);
+  if(claim.status!=='claimed') throw new Error('expected claim');
+  const result={schemaVersion:1,kind:'publication',runId,generation:1,notificationCycle:1,outcome:'failed',messages:[{type:'text',text:'verified'}]} as const;
+  const intent={originWorkflowId:claim.originWorkflowId,contextJson:claim.contextJson,result:{...result,messages:[...result.messages]}};
+  expect(await completePublicationVerification(db,attempt,claim.verifierId,intent)).toBe(true);
+  expect(await completePublicationVerification(db,attempt,claim.verifierId,intent)).toBe(false);
+  expect(await feedback.pendingByGroup(groupId,10)).toHaveLength(2);
+  const clock=fixedClock('2026-11-19T08:00:00Z'), repo=createLineReplyRepository(db,clock), requests:any[]=[];
+  const line=createLineClient({channelAccessToken:'x',fetch:async (_url,init)=>{requests.push(JSON.parse(String(init?.body)));return Response.json({});}});
+  const input={groupId,workflowId:'wf',receivedAt:clock.now().toISOString(),replyToken:'fresh',commandReply:null,drainQueue:true,publicBaseUrl:'https://new.test'};
+  const deps={repo,line,clock,isGroupAllowed:async()=>true,feedback};
+  if(held) {
+    await repo.enqueueResult({resultKey:'held-'+runId,groupId,result:{...result,messages:[{type:'text',text:'held'}]}});
+    await db.prepare("UPDATE line_result_outbox SET state='blocked' WHERE result_key=?").bind('held-'+runId).run();
+    await deliverEventReply({...input,eventId:crypto.randomUUID()},deps);
+    await deliverEventReply({...input,eventId:crypto.randomUUID()},deps);
+    expect(requests).toHaveLength(0);
+    await db.prepare("UPDATE line_result_outbox SET state='accepted' WHERE result_key=?").bind('held-'+runId).run();
+  }
+  for(let i=0;i<3;i++) await deliverEventReply({...input,eventId:crypto.randomUUID()},deps);
+  expect(requests).toHaveLength(2);
+  expect(JSON.stringify(requests[0])).toContain('https://airtable.com/base/table/');
+  expect(JSON.stringify(requests[1])).toContain('ผลการตรวจสอบเปลี่ยนจากข้อความก่อนหน้า');
+  expect(JSON.stringify(requests[1])).toContain('verified');
+  expect((await db.prepare('SELECT result_key FROM line_result_outbox WHERE group_id=? AND result_key IN (?,?)').bind(groupId,key,`${key}:revision:1`).all()).results).toHaveLength(2);
 });

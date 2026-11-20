@@ -664,16 +664,22 @@ export async function completePublicationVerification(
       intent?.originWorkflowId ?? null, intent?.originWorkflowId ?? null, intent?.contextJson ?? null, intent?.result.outcome ?? null);
   if (!intent) return (await update.run()).meta.changes === 1;
   const key = JSON.stringify(['publication', attempt.runId, attempt.generation, attempt.notificationCycle, 'verification']);
-  const [result] = await db.batch([update, db.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at)
-    SELECT ?, group_id, result_json, ? FROM publication_verification_claims
-    WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND verifier_id=? AND changes()=1
-      AND NOT EXISTS (SELECT 1 FROM workflow_feedback_results f
-        WHERE f.kind='publication' AND f.run_id=publication_verification_claims.publication_run_id
-          AND f.generation=publication_verification_claims.generation AND f.notification_cycle=publication_verification_claims.notification_cycle
-          AND f.group_id=publication_verification_claims.group_id
-          AND f.revision=(SELECT MAX(revision) FROM workflow_feedback_results WHERE kind=f.kind AND run_id=f.run_id AND generation=f.generation AND notification_cycle=f.notification_cycle)
-          AND json_extract(f.outcome_json,'$.outcome')='unconfirmed' AND json_extract(f.outcome_json,'$.action')='verify'
-          AND json_extract(publication_verification_claims.result_json,'$.outcome')='unconfirmed')`)
+  const revision = db.prepare(`INSERT INTO workflow_feedback_results(kind,run_id,generation,notification_cycle,revision,result_key,outcome_json,group_id)
+    SELECT f.kind,f.run_id,f.generation,f.notification_cycle,f.revision+1,(SELECT result_key FROM workflow_feedback_results WHERE kind=f.kind AND run_id=f.run_id AND generation=f.generation AND notification_cycle=f.notification_cycle AND revision=0) || ':revision:' || (f.revision+1),
+      json_object('action','verified','outcome',json_extract(c.result_json,'$.outcome'),'result',json(c.result_json)),f.group_id
+    FROM publication_verification_claims c JOIN workflow_feedback_results f ON f.kind='publication' AND f.run_id=c.publication_run_id
+      AND f.generation=c.generation AND f.notification_cycle=c.notification_cycle AND f.group_id=c.group_id
+    WHERE c.publication_run_id=? AND c.generation=? AND c.notification_cycle=? AND c.verifier_id=? AND changes()=1
+      AND f.revision=(SELECT MAX(revision) FROM workflow_feedback_results WHERE kind=f.kind AND run_id=f.run_id AND generation=f.generation AND notification_cycle=f.notification_cycle)
+      AND NOT (json_extract(f.outcome_json,'$.outcome')='unconfirmed' AND json_extract(f.outcome_json,'$.action')='verify' AND json_extract(c.result_json,'$.outcome')='unconfirmed')
+      `)
+    .bind(attempt.runId, attempt.generation, attempt.notificationCycle, verifierId);
+  const [result] = await db.batch([update, revision, db.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at)
+    SELECT ?, group_id, result_json, ? FROM publication_verification_claims c
+    WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND verifier_id=? AND completed=1
+      AND NOT EXISTS (SELECT 1 FROM workflow_feedback_results f WHERE f.kind='publication' AND f.run_id=c.publication_run_id
+        AND f.generation=c.generation AND f.notification_cycle=c.notification_cycle AND f.group_id=c.group_id)
+    ON CONFLICT(result_key) DO NOTHING`)
     .bind(key, new Date().toISOString(), attempt.runId, attempt.generation, attempt.notificationCycle, verifierId)]);
   return result!.meta.changes === 1;
 }
