@@ -14,7 +14,7 @@ import type { Env } from "../env";
 import { createICloudClient } from "../icloud/client";
 import { isRetryable, OperationalError } from "../shared/errors";
 import { newCorrelationId } from "../shared/ids";
-import { bangkokDateTimeThai } from "../shared/time";
+import { bangkokDateTimeThai, todayBangkokDate } from "../shared/time";
 import { createAirtableProductsClient } from "./airtable-products";
 import { createAssetStore } from "./asset-store";
 import { createMarkerDetector } from "./marker";
@@ -208,7 +208,7 @@ export class ImportWorkflow extends WorkflowEntrypoint<
     if ("kind" in event.payload) {
       const runId = event.payload.importRunId;
       const evidence = await step.do("read-import-verification-evidence", async () => {
-        const claim = await this.env.DB.prepare("SELECT origin_workflow_id, group_id, source_album_id, context_json FROM import_verification_claims WHERE import_run_id=? AND verifier_id=?")
+        const claim = await this.env.DB.prepare("SELECT origin_workflow_id, group_id, source_album_id, context_json FROM import_verification_claims WHERE import_run_id=? AND verifier_id=? AND completed IS NULL")
           .bind(runId, event.instanceId).first<{origin_workflow_id: string; group_id: string; source_album_id: string; context_json: string}>();
         if (!claim) return null;
         const status = (await (await this.env.IMPORT_WORKFLOW.get(claim.origin_workflow_id)).status()).status;
@@ -216,8 +216,20 @@ export class ImportWorkflow extends WorkflowEntrypoint<
         const result = await readImportVerificationEvidence(this.env.DB, runId, claim.origin_workflow_id, claim.group_id);
         if (!result || result.sourceAlbumId !== claim.source_album_id || result.contextJson !== claim.context_json) return null;
         const candidates = await readImportVerificationCandidates(this.env.DB, runId, event.instanceId);
+        const config = JSON.parse(claim.context_json)?.settings?.config;
+        const verified: string[] = [];
+        if (typeof config?.airtableBaseId === 'string' && typeof config?.airtableProductsTableId === 'string') {
+          const airtable = createAirtableProductsClient({baseId:config.airtableBaseId, tableId:config.airtableProductsTableId, token:this.env.AIRTABLE_TOKEN, fetch:fetch.bind(globalThis)});
+          for (const candidate of candidates) {
+            try {
+              const date = new Date(candidate.createdAt);
+              if (!Number.isFinite(date.getTime())) continue;
+              if (await airtable.verifyProduct(candidate.recordId, {productId:candidate.productId, systemGroupId:candidate.groupHash, uploadDate:todayBangkokDate({now:()=>date}), imageCount:candidate.members.length})) verified.push(candidate.productId);
+            } catch { /* A failed read cannot confirm the row. */ }
+          }
+        }
         await completeImportVerification(this.env.DB, {runId, albumId:claim.source_album_id, workflowId:claim.origin_workflow_id, groupId:claim.group_id, contextJson:claim.context_json}, event.instanceId,
-          {schemaVersion:1, kind:'import', runId, generation:1, notificationCycle:1, outcome:'unconfirmed', messages:[{type:'text', text:`⚠️ ยังยืนยันผลการนำเข้าไม่ได้ กรุณาตรวจสอบงานเดิมก่อนส่ง /upload ซ้ำ\n${runId}`}]});
+          {schemaVersion:1, kind:'import', runId, generation:1, notificationCycle:1, outcome:'unconfirmed', messages:[{type:'text', text:`⚠️ ยังยืนยันผลการนำเข้าไม่ได้ กรุณาตรวจสอบงานเดิมก่อนส่ง /upload ซ้ำ\n${runId}${verified.length ? `\nตรวจพบ ${verified.length} แถวที่รหัสสินค้า รหัสกลุ่ม วันที่ และจำนวนภาพตรงกับข้อมูลเดิม (ยังไม่ได้ยืนยันตัวตนภาพ)` : ""}`}]});
         return { ...result, candidates };
       });
       return { kind: "verification", evidence };
