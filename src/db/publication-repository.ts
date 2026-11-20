@@ -593,6 +593,34 @@ export async function claimPublicationVerification(
   return row ? { status: "claimed", verifierId, originWorkflowId: row.origin_workflow_id, contextJson: row.context_json } : { status: "held" };
 }
 
+export async function readPreGoogleFailure(
+  db: D1Database,
+  attempt: { runId: string; generation: number; notificationCycle: number; groupId: string },
+  verifierId: string,
+): Promise<{ origin_workflow_id: string; context_json: string; stage: string; failure_code: string } | null> {
+  return await db.prepare(`SELECT c.origin_workflow_id, c.context_json, f.stage, f.failure_code
+    FROM publication_verification_claims c
+    JOIN publication_jobs j ON j.publication_run_id=c.publication_run_id AND j.generation=c.generation
+      AND j.notification_cycle=c.notification_cycle AND j.correlation_id=c.origin_workflow_id AND j.settings_context_json=c.context_json
+    JOIN publication_google_write_evidence e ON e.publication_run_id=c.publication_run_id AND e.generation=c.generation AND e.notification_cycle=c.notification_cycle
+    JOIN workflow_feedback f ON f.kind='publication' AND f.run_id=c.publication_run_id AND f.generation=c.generation
+      AND f.notification_cycle=c.notification_cycle AND f.group_id=c.group_id AND f.context_json=c.context_json
+    JOIN workflow_feedback_results r ON r.kind=f.kind AND r.run_id=f.run_id AND r.generation=f.generation
+      AND r.notification_cycle=f.notification_cycle AND r.group_id=f.group_id AND r.revision=0
+    WHERE c.publication_run_id=? AND c.generation=? AND c.notification_cycle=? AND c.group_id=? AND c.verifier_id=? AND c.completed=0
+      AND json_extract(c.context_json,'$.replyGroupId')=c.group_id
+      AND length(json_extract(c.context_json,'$.settings.config.airtableBaseId'))>0
+      AND length(json_extract(c.context_json,'$.settings.config.airtablePublicationRunsTableId'))>0
+      AND e.protocol_version=1 AND e.state='tracking'
+      AND j.state IN ('locked','validating','generating','failed') AND j.temp_doc_id IS NULL AND j.finalization_json IS NULL
+      AND j.google_doc_id IS NULL AND j.google_doc_url IS NULL AND j.successful_generation=0
+      AND f.stage IN ('prepare product images','prepare outputs') AND length(f.failure_code)>0
+      AND json_extract(r.outcome_json,'$.stage')=f.stage AND json_extract(r.outcome_json,'$.failureCode')=f.failure_code
+      AND json_extract(r.outcome_json,'$.outcome')='unconfirmed'`)
+    .bind(attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId, verifierId)
+    .first<{ origin_workflow_id: string; context_json: string; stage: string; failure_code: string }>();
+}
+
 export async function completePublicationVerification(
   db: D1Database,
   attempt: { runId: string; generation: number; notificationCycle: number; groupId: string },

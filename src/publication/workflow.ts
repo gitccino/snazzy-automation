@@ -14,7 +14,7 @@ import type { OperationContext } from "../settings/schema";
 import type { Env } from "../env";
 import { createAssetStore } from "../import/asset-store";
 import { createLineReplyRepository } from '../db/line-reply-repository';
-import { readPublicationJob, completePublicationVerification } from '../db/publication-repository';
+import { readPublicationJob, completePublicationVerification, readPreGoogleFailure } from '../db/publication-repository';
 import { createWorkflowFeedbackRepository } from '../db/workflow-feedback';
 import { docsUnconfirmedCard } from '../line/docs-summary-card';
 import type { TerminalResultV1 } from '../line/reply-types';
@@ -324,9 +324,10 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
         const job = await readPublicationJob(this.env.DB, payload.publicationRunId);
         if (!claim || !job || job.generation !== payload.generation || job.notificationCycle !== payload.notificationCycle || job.correlationId !== claim.origin_workflow_id) return;
         const attempt = {runId:payload.publicationRunId, generation:payload.generation, notificationCycle:payload.notificationCycle, groupId:payload.groupId};
+        const preGoogleFailure = await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId);
         await completePublicationVerification(this.env.DB, attempt, payload.verifierId, {
           originWorkflowId:claim.origin_workflow_id, contextJson:claim.context_json,
-          result:{schemaVersion:1, kind:'publication', runId:attempt.runId, generation:attempt.generation, notificationCycle:attempt.notificationCycle, outcome:'unconfirmed', messages:[{type:'text', text:`⚠️ ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${attempt.runId}`}]},
+          result:{schemaVersion:1, kind:'publication', runId:attempt.runId, generation:attempt.generation, notificationCycle:attempt.notificationCycle, outcome:'unconfirmed', messages:[{type:'text', text:preGoogleFailure ? `⚠️ กรุณาตรวจสอบสถานะงานเดิมใน Airtable ก่อนส่ง /docs ซ้ำ\n${attempt.runId}` : `⚠️ ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${attempt.runId}`}]},
         });
       });
       return null;

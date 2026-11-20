@@ -117,3 +117,35 @@ it('queues the unconfirmed verification behind the original result for the next 
   expect(requests.map(request => request.messages)).toEqual([original.messages, result.messages]);
   expect(await repo.head(groupId)).toBeNull();
 });
+
+it('proves only the current tracked pre-document failure without conflicting facts', async () => {
+  const { readPreGoogleFailure } = await import('../../src/db/publication-repository');
+  const runId = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:'owner', settings:{config:{airtableBaseId:'base', airtablePublicationRunsTableId:'table'}}});
+  await db.prepare("INSERT INTO publication_jobs (publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,'generating','workflow','x','x',1,1,?)").bind(runId,context).run();
+  const attempt = {runId,generation:1,notificationCycle:1,groupId:'owner'};
+  const claim = await claimPublicationVerification(db,attempt);
+  if (claim.status !== 'claimed') throw new Error('expected claim');
+  await db.prepare("INSERT INTO publication_google_write_evidence VALUES (?,1,1,'tracking',1)").bind(runId).run();
+  await db.prepare("INSERT INTO workflow_feedback(kind,run_id,generation,notification_cycle,group_id,context_json,stage,failure_code) VALUES ('publication',?,1,1,'owner',?,'prepare outputs','anthropic_failed')").bind(runId,context).run();
+  await db.prepare("INSERT INTO workflow_feedback_results(kind,run_id,generation,notification_cycle,revision,result_key,outcome_json,group_id) VALUES ('publication',?,1,1,0,?,?,'owner')").bind(runId,runId,JSON.stringify({stage:'prepare outputs',failureCode:'anthropic_failed',outcome:'unconfirmed'})).run();
+  const read = () => readPreGoogleFailure(db,attempt,claim.verifierId);
+  expect(await read()).toMatchObject({origin_workflow_id:'workflow',context_json:context,stage:'prepare outputs',failure_code:'anthropic_failed'});
+  expect(await readPreGoogleFailure(db,{...attempt,groupId:'foreign'},claim.verifierId)).toBeNull();
+  expect(await readPreGoogleFailure(db,attempt,'stale')).toBeNull();
+  for (const [sql, value] of [
+    ['UPDATE publication_google_write_evidence SET state=? WHERE publication_run_id=?','may_have_written'],
+    ['UPDATE publication_jobs SET temp_doc_id=? WHERE publication_run_id=?','doc'],
+    ['UPDATE publication_jobs SET finalization_json=? WHERE publication_run_id=?','{}'],
+    ['UPDATE publication_jobs SET correlation_id=? WHERE publication_run_id=?','other'],
+    ['UPDATE workflow_feedback SET failure_code=? WHERE run_id=?','other'],
+  ] as const) {
+    await db.prepare(sql).bind(value,runId).run();
+    expect(await read()).toBeNull();
+    const column = sql.match(/SET (\w+)=/)![1]!;
+    const original = column === 'state' ? 'tracking' : column === 'correlation_id' ? 'workflow' : column === 'failure_code' ? 'anthropic_failed' : null;
+    await db.prepare(sql).bind(original,runId).run();
+  }
+  await db.prepare('UPDATE publication_google_write_evidence SET protocol_version=NULL WHERE publication_run_id=?').bind(runId).run();
+  expect(await read()).toBeNull();
+});
