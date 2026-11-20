@@ -37,6 +37,23 @@ export async function deliverEventReply(input: {
       }
     } catch(error) { console.error('workflow_feedback_repair_failed',error); }
   }
+  if(input.drainQueue && deps.feedback) {
+    try {
+      const row=await deps.feedback.publicationHead(input.groupId);
+      if(row && row.result_key===JSON.stringify(['publication',row.run_id,row.generation,row.notification_cycle,'terminal'])) {
+        let malformed=false;
+        try { const result=JSON.parse(row.result_json); validateReplyMessages(result.messages); } catch { malformed=true; }
+        if(malformed) {
+          const outcome=JSON.parse(row.outcome_json) as {outcome?:string;references?:{thaiDate?:string;airtableRunUrl?:string;publicBaseUrl?:string}};
+          const facts=outcome.references;
+          if(outcome.outcome==='unconfirmed' && facts?.thaiDate && facts.airtableRunUrl && facts.publicBaseUrl) {
+            const card=docsUnconfirmedCard({thaiDate:facts.thaiDate,airtableRunUrl:facts.airtableRunUrl},facts.publicBaseUrl);
+            await deps.feedback.replaceUnsentHead(input.groupId,row.sequence,row.result_json,{schemaVersion:1,kind:'publication',runId:row.run_id,generation:row.generation,notificationCycle:row.notification_cycle,outcome:'unconfirmed',messages:[{type:'flex',altText:card.text,contents:card.contents}]});
+          }
+        }
+      }
+    } catch(error) { console.error('workflow_feedback_repair_failed',error); }
+  }
   let head:Awaited<ReturnType<LineReplyRepository['head']>>=null;
   try { if(input.drainQueue) head=await deps.repo.head(input.groupId); }
   catch(error) { if(!(error instanceof SyntaxError))throw error; }

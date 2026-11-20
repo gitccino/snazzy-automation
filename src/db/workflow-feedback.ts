@@ -72,11 +72,21 @@ export function createWorkflowFeedbackRepository(db: D1Database) {
     if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('invalid_limit');
     return (await db.prepare('SELECT * FROM workflow_feedback_results WHERE group_id=? AND materialized=0 ORDER BY rowid LIMIT ?').bind(groupId,limit).all()).results;
   }
+  async function publicationHead(groupId: string) {
+    return db.prepare(`SELECT o.sequence,o.result_json,f.run_id,f.generation,f.notification_cycle,f.result_key,f.outcome_json
+      FROM line_result_outbox o JOIN workflow_feedback_results f ON f.result_key=o.result_key AND f.group_id=o.group_id
+      WHERE o.group_id=? AND o.sequence=(SELECT MIN(sequence) FROM line_result_outbox WHERE group_id=? AND state!='accepted' AND NOT EXISTS(SELECT 1 FROM line_reply_owner_dispositions d WHERE d.sequence=line_result_outbox.sequence))
+      AND o.state='pending' AND o.owner_event_id IS NULL AND f.kind='publication' AND f.revision=0`).bind(groupId,groupId).first<{sequence:number;result_json:string;run_id:string;generation:number;notification_cycle:number;result_key:string;outcome_json:string}>();
+  }
+  async function replaceUnsentHead(groupId: string, sequence: number, raw: string, result: unknown) {
+    await db.prepare(`UPDATE line_result_outbox SET result_json=? WHERE group_id=? AND sequence=? AND result_json=? AND state='pending' AND owner_event_id IS NULL
+      AND NOT EXISTS(SELECT 1 FROM line_reply_dispatches WHERE candidate_sequence=line_result_outbox.sequence)`).bind(JSON.stringify(result),groupId,sequence,raw).run();
+  }
   async function markMaterialized(resultKey: string, groupId: string) {
     await db.prepare(`UPDATE workflow_feedback_results SET materialized=1 WHERE result_key=? AND group_id=? AND EXISTS (SELECT 1 FROM line_result_outbox WHERE result_key=? AND group_id=?)`).bind(resultKey,groupId,resultKey,groupId).run();
   }
   async function hasOutbox(resultKey: string, groupId: string) {
     return !!await db.prepare('SELECT 1 FROM line_result_outbox WHERE result_key=? AND group_id=?').bind(resultKey,groupId).first();
   }
-  return { markMaterialized, hasOutbox, lookupTrustedEarlyFailure, recordStage, commitOutcome, upsertEvidence, readEvidence, pendingByGroup };
+  return { publicationHead, replaceUnsentHead, markMaterialized, hasOutbox, lookupTrustedEarlyFailure, recordStage, commitOutcome, upsertEvidence, readEvidence, pendingByGroup };
 }

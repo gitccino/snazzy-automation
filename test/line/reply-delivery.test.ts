@@ -142,3 +142,27 @@ it('keeps a malformed queue head in place while sending the ordinary command', a
  expect(h.requests[0].body.messages).toEqual([{type:'text',text:'command'}]);
  expect(await testEnv().DB.prepare('SELECT state FROM line_result_outbox WHERE group_id=?').bind(h.groupId).first()).toEqual({state:'pending'});
 });
+
+it('repairs an unsent malformed publication head in place and does not duplicate on replay',async()=>{
+ const db=testEnv().DB, groupId=crypto.randomUUID(), runId=crypto.randomUUID(), clock=fixedClock('2026-11-20T08:00:00Z');
+ await db.prepare(`INSERT INTO publication_jobs(publication_run_id,publication_date,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,?,'generating',?,'x','x',2,1,?)`).bind(runId,runId,runId,JSON.stringify({replyGroupId:groupId})).run();
+ const {createWorkflowFeedbackRepository}=await import('../../src/db/workflow-feedback');
+ const feedback=createWorkflowFeedbackRepository(db), key=JSON.stringify(['publication',runId,2,1,'terminal']);
+ await feedback.commitOutcome({kind:'publication',runId,generation:2,notificationCycle:1,groupId},{stage:'prepare',action:'verify',outcome:'unconfirmed',resultKey:key,references:{thaiDate:'19 พฤศจิกายน 2569',airtableRunUrl:`https://airtable.com/base/table/${runId}`,publicBaseUrl:'https://old.test'}});
+ await db.prepare('INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at) VALUES (?,?,?,?)').bind(key,groupId,'{','x').run();
+ await feedback.markMaterialized(key,groupId);
+ const before=await db.prepare('SELECT sequence,group_id FROM line_result_outbox WHERE result_key=?').bind(key).first();
+ const sequence=(before as {sequence:number}).sequence, evidence=crypto.randomUUID();
+ await db.prepare("INSERT INTO line_reply_dispatches(event_id,group_id,workflow_id,received_at,candidate_sequence,messages_json,phase,updated_at) VALUES (?,?,'wf','x',?,'[]','rejected','x')").bind(evidence,groupId,sequence).run();
+ await feedback.replaceUnsentHead(groupId,sequence,'{',{bad:'replacement'});
+ expect(await db.prepare('SELECT result_json FROM line_result_outbox WHERE sequence=?').bind(sequence).first('result_json')).toBe('{');
+ await db.prepare('DELETE FROM line_reply_dispatches WHERE event_id=?').bind(evidence).run();
+ const requests:LineReplyMessage[][]=[], repo=createLineReplyRepository(db,clock);
+ const input={eventId:crypto.randomUUID(),groupId,workflowId:'wf',receivedAt:clock.now().toISOString(),replyToken:'fresh',commandReply:null,drainQueue:true,publicBaseUrl:'https://new.test'};
+ const deps={repo,feedback,clock,isGroupAllowed:async()=>true,line:{sendReplyMessages:async (_token:string,messages:LineReplyMessage[])=>{requests.push(messages);return {requestId:null};}}};
+ expect(await deliverEventReply(input,deps)).toBe('accepted');
+ await deliverEventReply({...input,eventId:crypto.randomUUID()},deps);
+ expect(requests).toHaveLength(1);
+ expect(JSON.stringify(requests)).toContain(`https://airtable.com/base/table/${runId}`);
+ expect((await db.prepare('SELECT sequence,group_id FROM line_result_outbox WHERE result_key=?').bind(key).all()).results).toEqual([before]);
+});
