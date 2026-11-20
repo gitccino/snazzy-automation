@@ -192,6 +192,7 @@ describe("publication stages", () => {
   });
   beforeEach(async () => {
     await env.DB.exec("DELETE FROM publication_product_cache");
+    await env.DB.exec("DELETE FROM publication_cleanup_intents");
     await env.DB.exec("DELETE FROM publication_jobs");
   });
 
@@ -542,6 +543,21 @@ describe("publication stages", () => {
     expect(fetcher.mock.calls[2]![1]?.method).toBe("DELETE");
     expect(await job()).toMatchObject({ state: "failed", temp_doc_id: null });
     expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining("ไม่สามารถอ่านวันที่รายการได้"), expect.objectContaining({ type: "bubble" }), expect.any(String));
+  });
+
+  it("records the exact cleanup intent before a lost delete response", async () => {
+    await seedJob("generating", "temp-doc");
+    let observed: unknown;
+    const fetcher = vi.fn<Fetcher>().mockImplementation(async (_url, init) => {
+      if (init?.method === "DELETE") {
+        observed = await env.DB.prepare("SELECT doc_id, origin_workflow_id FROM publication_cleanup_intents WHERE publication_run_id='rec-run-1'").first();
+        throw new Error("lost response");
+      }
+      return token();
+    });
+    await expect(failPublicationAfterExhaustion(baseDeps({ fetcher }), "rec-run-1", "failed", null)).rejects.toThrow("Google drive delete transport failed");
+    expect(observed).toEqual({ doc_id: "temp-doc", origin_workflow_id: "corr-1" });
+    expect(await job()).toMatchObject({ state: "generating", temp_doc_id: "temp-doc" });
   });
 
   it("retains the temp ID when deletion fails so cleanup can safely retry", async () => {

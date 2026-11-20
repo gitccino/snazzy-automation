@@ -20,6 +20,7 @@ import type { Clock } from "../shared/time";
 import { OperationalError } from "../shared/errors";
 import {
   admitPublicationGoogleCopy,
+  admitPublicationCleanup,
   acquireOrResumeJob,
   readPublicationJob,
   claimPublicationDate,
@@ -784,7 +785,12 @@ export async function failPublicationAfterExhaustion(
           false,
         );
       requireActiveJob(await readJob(deps, publicationRunId), generation);
-      await deleteDocument(deps.fetcher, tokens, docId, () => admitGoogleWrite(deps, publicationRunId, generation));
+      await deleteDocument(deps.fetcher, tokens, docId, async () => {
+        const owner = deps.copyOwner;
+        if (!owner || !await admitPublicationCleanup(deps.db, publicationRunId, generation, owner.notificationCycle, owner.workflowId, docId))
+          throw new OperationalError("publication_generation_stale", "Publication cleanup owner is stale", false);
+        await admitGoogleWrite(deps, publicationRunId, generation);
+      });
       await setTempDocId(
         deps.db,
         deps.clock,

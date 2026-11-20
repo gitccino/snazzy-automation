@@ -266,6 +266,7 @@ function docsRequest() {
 describe("publication acceptance", () => {
   beforeEach(async () => {
     await env.DB.exec("DELETE FROM publication_product_cache");
+    await env.DB.exec("DELETE FROM publication_cleanup_intents");
     await env.DB.exec("DELETE FROM publication_jobs");
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network forbidden in acceptance tests"));
   });
