@@ -134,7 +134,16 @@ export class LineCommandWorkflow extends WorkflowEntrypoint<Env,{event:LineIngre
     const provenance = parsed?.ok && (parsed.command.type === 'docs' || parsed.command.type === 'upload')
       ? { groupId: event.source.groupId, operation: JSON.stringify(parsed.command), workflowId: input.instanceId, receivedAt } : undefined;
     const completed=await step.do('already-processed',()=>this.env.DB.prepare('SELECT event_id FROM line_events WHERE event_id=? UNION ALL SELECT event_id FROM line_event_replies WHERE event_id=? LIMIT 1').bind(event.webhookEventId,event.webhookEventId).first<{event_id:string}>());
-    if(completed)return {status:'duplicate' as const};
+    if(completed) {
+      const saved = provenance && await this.env.DB.prepare(`SELECT r.reply_json FROM line_event_replies r
+        JOIN line_command_ingress i ON i.event_id = r.event_id
+        WHERE r.event_id = ? AND r.provenance = 'prepared' AND i.group_id = ? AND i.operation = ? AND i.workflow_id = ? AND i.received_at = ?`)
+        .bind(event.webhookEventId, provenance.groupId, provenance.operation, provenance.workflowId, provenance.receivedAt).first<{reply_json:string}>();
+      if (!saved) return {status:'duplicate' as const};
+      const deps = await createWebhookDeps(this.env,input.instanceId,context);
+      const status = await step.do('reply-once',attemptOptions,()=>deliverEventReply({eventId:event.webhookEventId,groupId:event.source.groupId,workflowId:input.instanceId,receivedAt,replyToken:event.replyToken,commandReply:JSON.parse(saved.reply_json) as CommandReply,drainQueue:true,publicBaseUrl:deps.publicBaseUrl},{repo:createLineReplyRepository(this.env.DB,deps.clock),line:deps.line,clock:deps.clock,isGroupAllowed:allowed,feedback:createWorkflowFeedbackRepository(this.env.DB)}));
+      return {status};
+    }
     const deps=await createWebhookDeps(this.env,input.instanceId,context);
     deps.retryTransientErrors=true;
     let reply=await step.do('prepare-reply',attemptOptions,async():Promise<CommandReply|null>=>{

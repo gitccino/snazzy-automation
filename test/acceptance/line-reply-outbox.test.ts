@@ -66,3 +66,31 @@ it('holds a lost upload reply and delivers its later result on a fresh same-grou
   await admit(crypto.randomUUID(),'hello');expect(await run(batches[2])).toEqual({status:'accepted'});expect(sends).toHaveLength(2);expect(sends[1].messages).toEqual([{type:'text',text:'final notice'}]);
  } finally {send.mockRestore();}
 });
+
+it('resumes a proven saved upload through signed ingress once without preparing again', async () => {
+ const id=crypto.randomUUID(), batches:any[]=[], sends:any[]=[];
+ const env={...testEnv(),...createTestEnv(),LINE_CHANNEL_SECRET:'secret',LINE_COMMAND_WORKFLOW:{createBatch:async(b:any[])=>{batches.push(...b);return [];},get:async()=>({status:async()=>({status:'running'})})}} as unknown as Env;
+ const body=JSON.stringify({events:[{type:'message',webhookEventId:id,replyToken:'token',source:{type:'group',groupId:'CtestGroup',userId:'U1'},message:{type:'text',id:'m',text:'/upload'}}]});
+ const response=await handleLineRoute(new Request('https://app/line/webhook',{method:'POST',headers:{'x-line-signature':await sign(body,'secret')},body}),env,{} as ExecutionContext);
+ expect(response.status).toBe(200);
+ const item=batches[0];
+ const ingress=await env.DB.prepare('SELECT * FROM line_command_ingress WHERE event_id=?').bind(id).first<any>();
+ const {createLineRepository}=await import('../../src/db/line-repository');
+ const repo=createLineRepository(env.DB,{next:()=>crypto.randomUUID()},{now:()=>new Date()});
+ await repo.saveEventReply(id,{kind:'text',text:'prepared'}, {groupId:ingress.group_id,operation:ingress.operation,workflowId:ingress.workflow_id,receivedAt:ingress.received_at});
+ await repo.claimEvent(id,ingress.group_id);
+ const step={do:async(_n:string,a:any,b?:any)=>(b??a)()} as unknown as WorkflowStep;
+ const fetcher=vi.spyOn(globalThis,'fetch').mockImplementation(async(url,init)=>{if(!String(url).endsWith('/message/reply'))throw new Error('business preparation repeated');sends.push(JSON.parse(String(init?.body)));return Response.json({});});
+ const run=(payload:any=item.params)=>LineCommandWorkflow.prototype.run.call({env} as unknown as LineCommandWorkflow,{payload,instanceId:item.id} as any,step);
+ try {
+  expect(await run({...item.params,event:{...item.params.event,message:{...item.params.event.message,text:'/docs'}}})).toEqual({status:'duplicate'});
+  const old='2020-01-01T00:00:00.000Z';
+  await env.DB.prepare('UPDATE line_command_ingress SET received_at=? WHERE event_id=?').bind(old,id).run();
+  expect(await run({...item.params,receivedAt:old})).toEqual({status:'ignored'});
+  expect(sends).toHaveLength(0);
+  await env.DB.prepare('UPDATE line_command_ingress SET received_at=? WHERE event_id=?').bind(ingress.received_at,id).run();
+  expect(await run()).toEqual({status:'accepted'});
+  expect(await run()).toEqual({status:'duplicate'});
+  expect(sends).toHaveLength(1);expect(sends[0].messages).toEqual([{type:'text',text:'prepared'}]);
+ } finally {fetcher.mockRestore();}
+});
