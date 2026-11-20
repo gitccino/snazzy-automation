@@ -97,6 +97,21 @@ async function startImport(
               const status = (await (await env.IMPORT_WORKFLOW.get(`import-${owner.id}`)).status()).status;
               live = status === "queued" || status === "running" || status === "waiting" || status === "waitingForPause";
             } catch { /* A failed lookup does not prove the job is live. */ }
+            const terminal = await env.DB.prepare(`SELECT r.status FROM import_runs r
+              JOIN import_checkpoints c ON c.source_album_id = r.source_album_id AND c.last_position >= r.checkpoint_position
+              JOIN line_result_outbox o ON o.result_key = ? AND o.group_id = ?
+              WHERE r.id = ? AND r.source_album_id = ? AND r.status IN ('completed', 'completed_with_failures')
+                AND r.checkpoint_position IS NOT NULL AND r.failure_reason IS NULL
+                AND json_valid(r.settings_context_json) AND json_extract(r.settings_context_json, '$.replyGroupId') = ?
+                AND json_valid(o.result_json) AND json_extract(o.result_json, '$.schemaVersion') = 1
+                AND json_extract(o.result_json, '$.kind') = 'import'
+                AND json_extract(o.result_json, '$.runId') = r.id
+                AND json_extract(o.result_json, '$.generation') = 1
+                AND json_extract(o.result_json, '$.notificationCycle') = 1
+                AND json_extract(o.result_json, '$.outcome') = CASE r.status WHEN 'completed' THEN 'success' ELSE 'partial' END`)
+              .bind(JSON.stringify(["import", owner.id, 1, 1, "terminal"]), context.replyGroupId, owner.id, sourceAlbumId, context.replyGroupId)
+              .first<{ status: "completed" | "completed_with_failures" }>();
+            if (terminal) return Response.json({ status: terminal.status === "completed" ? "completed" : "partial", importRunId: owner.id }, { status: 409 });
             if (!live) return Response.json({ status: "owner_review", importRunId: owner.id }, { status: 409 });
             return Response.json({ status: "already_running" }, { status: 409 });
           }

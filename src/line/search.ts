@@ -14,7 +14,7 @@ import { alreadyOutCard, saleSuccessCard, searchCard, type SearchCardReply } fro
 
 export type UploadTriggerResult =
   | { status: "started"; importRunId: string }
-  | { status: "owner_review"; importRunId: string }
+  | { status: "owner_review" | "completed" | "partial"; importRunId: string }
   | {
       status:
         | "already_running"
@@ -54,6 +54,10 @@ function uploadResultReply(result: UploadTriggerResult, publicBaseUrl: string): 
       return "⚠️ มีงานนำเข้าเดิมที่ต้องตรวจสอบ";
     case "owner_review":
       return `⚠️ กรุณาตรวจสอบงานนำเข้าเดิมก่อนเริ่มใหม่ ${result.importRunId}`;
+    case "completed":
+      return `✅ งานนำเข้าเดิมเสร็จแล้ว ${result.importRunId}`;
+    case "partial":
+      return `⚠️ งานนำเข้าเดิมเสร็จบางส่วน ${result.importRunId}`;
     case "sequence_not_bootstrapped":
       return "⚠️ ยังเริ่มนำเข้าไม่ได้ เพราะยังไม่ได้ตั้งค่าลำดับรหัสสินค้า";
     case "workflow_start_failed":

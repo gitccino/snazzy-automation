@@ -160,6 +160,39 @@ describe("handleUploadTrigger", () => {
       expect(createBatch).toHaveBeenCalledTimes(1);
     },
   );
+  it.each(["completed", "completed_with_failures"] as const)("observes %s finalization during workflow lookup", async (status) => {
+    const { env } = triggerEnv();
+    const runId = `original-${status}`, groupId = `owner-${status}`;
+    await createSequenceRepository(env.DB).bootstrap("product_id", 1);
+    const { captureOperationContext } = await import("../../src/settings/runtime");
+    const { createImportRepository } = await import("../../src/db/import-repository");
+    const context = await captureOperationContext(env, groupId);
+    const { createLineReplyRepository } = await import("../../src/db/line-reply-repository");
+    const { createLineClient } = await import("../../src/line/client");
+    const { deliverEventReply } = await import("../../src/line/reply-delivery");
+    const clock = { now: () => new Date() }, repo = createLineReplyRepository(env.DB, clock), requests: any[] = [];
+    await repo.enqueueResult({ resultKey: `older-${status}`, groupId: groupId, result: { schemaVersion: 1, kind: "import", runId: `older-${status}`, generation: 1, notificationCycle: 1, outcome: "success", messages: [{ type: "text", text: "older summary" }] } });
+    const createBatch = vi.fn().mockResolvedValue([]);
+    const get = vi.fn().mockImplementation(async () => ({ status: async () => {
+      const repo = createImportRepository(env.DB, { next: () => "id" }, { now: () => new Date() });
+      const album = await env.DB.prepare("SELECT source_album_id FROM import_runs WHERE id=?").bind(runId).first<string>("source_album_id");
+      await repo.finalizeImportRun({ id: runId, sourceAlbumId: album!, status, orphanPhotoCount: 0, checkpointPosition: 7,
+        lineResult: { groupId: groupId, result: { schemaVersion: 1, kind: "import", runId: runId, generation: 1, notificationCycle: 1, outcome: status === "completed" ? "success" : "partial", messages: [{ type: "text", text: "detailed summary" }] } } });
+      return { status: "complete" };
+    }}));
+    env.IMPORT_WORKFLOW = { createBatch, get } as unknown as typeof env.IMPORT_WORKFLOW;
+    await handleUploadTrigger(env, "line", runId, context, "event-original");
+    const response = await handleUploadTrigger(env, "line", "fresh", context, "event-fresh");
+    expect(await response.json()).toEqual({ status: status === "completed" ? "completed" : "partial", importRunId: runId });
+    expect(createBatch).toHaveBeenCalledTimes(1);
+    const line = createLineClient({ channelAccessToken: "x", fetch: async (_url, init) => { requests.push(JSON.parse(String(init?.body))); return Response.json({}); } });
+    const input = { eventId: crypto.randomUUID(), groupId: groupId, workflowId: "wf", receivedAt: clock.now().toISOString(), replyToken: "token", commandReply: { kind: "text" as const, text: `status ${runId}` }, drainQueue: true, publicBaseUrl: "https://example.test" };
+    const deps = { repo, line, clock, isGroupAllowed: async () => true };
+    await deliverEventReply(input, deps);
+    await deliverEventReply({ ...input, eventId: crypto.randomUUID() }, deps);
+    await deliverEventReply({ ...input, eventId: crypto.randomUUID() }, deps);
+    expect(requests.map(r => r.messages.map((m: any) => m.text))).toEqual([[`status ${runId}`, "older summary"], [`status ${runId}`, "detailed summary"], [`status ${runId}`]]);
+  });
   it.each(["foreign", "missing", "unavailable"] as const)(
     "keeps the original lock for %s reconciliation", async (scenario) => {
       const { env } = triggerEnv();
