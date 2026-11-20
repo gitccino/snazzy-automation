@@ -115,3 +115,30 @@ it('dispatches the saved same-group verification after the ordinary reply, and t
   await run(group);expect(order[0]).toBe('reply');expect(workflow.create).toHaveBeenCalledOnce();
  } finally {send.mockRestore();}
 });
+
+it('rotates pending imports and publication after repeated ordinary replies', async () => {
+ const group='CtestGroup', context=JSON.stringify({replyGroupId:group}), ids=['a','b'].map(x=>x+crypto.randomUUID()), publicationId=crypto.randomUUID(), order:string[]=[];
+ const workflow={get:vi.fn(async(id:string)=>({status:async()=>{order.push('lookup:'+id);return {status:'running'};}})),create:vi.fn()};
+ const env={...testEnv(),...createTestEnv(),IMPORT_WORKFLOW:workflow,PUBLICATION_WORKFLOW:workflow} as unknown as Env;
+ const {claimImportVerification}=await import('../../src/db/import-repository');
+ const {claimPublicationVerification}=await import('../../src/db/publication-repository');
+ for (const id of ids) {
+  await env.DB.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json) VALUES(?,?,'line','running','x',?)").bind(id,id,context).run();
+  await claimImportVerification(env.DB,{runId:id,albumId:id,workflowId:`import-${id}`,groupId:group,contextJson:context});
+ }
+ await env.DB.prepare("INSERT INTO publication_jobs(publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES(?,'generating',?,'x','x',1,1,?)").bind(publicationId,`pub-${publicationId}`,context).run();
+ await claimPublicationVerification(env.DB,{runId:publicationId,generation:1,notificationCycle:1,groupId:group});
+ const repo=createLineReplyRepository(env.DB,{now:()=>new Date()});
+ const step={do:async(_n:string,a:any,b?:any)=>(b??a)()} as unknown as WorkflowStep;
+ const send=vi.spyOn(globalThis,'fetch').mockImplementation(async()=>{order.push('reply');return Response.json({});});
+ try {
+  for(let i=0;i<3;i++) {
+   const id=crypto.randomUUID();
+   await repo.enqueueResult({groupId:group,resultKey:id,result:{schemaVersion:1,kind:'import',runId:id,generation:1,notificationCycle:1,outcome:'success',messages:[{type:'text',text:'notice'}]}});
+   await LineCommandWorkflow.prototype.run.call({env} as unknown as LineCommandWorkflow,{payload:{event:{type:'message',webhookEventId:id,replyToken:'token',source:{type:'group',groupId:group,userId:'U1'},message:{type:'text',id:'m',text:'hello'}},receivedAt:new Date().toISOString()},instanceId:id} as any,step);
+  }
+  expect(order.filter((_,i)=>i%2===0)).toEqual(['reply','reply','reply']);
+  expect(order.filter((_,i)=>i%2===1).sort()).toEqual([`lookup:import-${ids[0]}`,`lookup:import-${ids[1]}`,`lookup:pub-${publicationId}`].sort());
+  expect(workflow.create).not.toHaveBeenCalled();
+ } finally {send.mockRestore();}
+});
