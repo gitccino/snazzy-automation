@@ -1,5 +1,5 @@
 import { captureOperationContext } from "../settings/runtime";
-import { saveImportContextIfAbsent } from "../db/execution-context-repository";
+import { saveImportContextIfAbsent, parseContext } from "../db/execution-context-repository";
 import type { OperationContext } from "../settings/schema";
 import { OperationalError } from "../shared/errors";
 import type { Env } from "../env";
@@ -85,6 +85,24 @@ async function startImport(
     }
   } catch (error) {
     if (await repo.hasRunningImportRun(sourceAlbumId)) {
+      if (trigger === "line" && context?.replyGroupId) {
+        const owner = await env.DB.prepare("SELECT id, settings_context_json FROM import_runs WHERE source_album_id = ? AND status = 'running'")
+          .bind(sourceAlbumId).first<{ id: string; settings_context_json: string | null }>();
+        if (owner) {
+          let ownerGroup: string | null = null;
+          try { ownerGroup = parseContext(owner.settings_context_json)?.replyGroupId ?? null; } catch { /* Unreadable ownership is not evidence of ownership. */ }
+          if (ownerGroup === context.replyGroupId) {
+            let live = false;
+            try {
+              const status = (await (await env.IMPORT_WORKFLOW.get(`import-${owner.id}`)).status()).status;
+              live = status === "queued" || status === "running" || status === "waiting" || status === "waitingForPause";
+            } catch { /* A failed lookup does not prove the job is live. */ }
+            if (!live) return Response.json({ status: "owner_review", importRunId: owner.id }, { status: 409 });
+            return Response.json({ status: "already_running" }, { status: 409 });
+          }
+        }
+        return Response.json({ status: "busy" }, { status: 409 });
+      }
       return Response.json({ status: "already_running" }, { status: 409 });
     }
     throw error;

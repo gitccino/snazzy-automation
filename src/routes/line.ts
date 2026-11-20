@@ -36,6 +36,8 @@ import { handleUploadTrigger } from "./upload";
 const ImportTriggerResponseSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("started"), importRunId: z.string().min(1) }),
   z.object({ status: z.literal("already_running") }),
+  z.object({ status: z.literal("busy") }),
+  z.object({ status: z.literal("owner_review"), importRunId: z.string().min(1) }),
   z.object({ status: z.literal("sequence_not_bootstrapped") }),
   z.object({ status: z.literal("workflow_start_failed") }),
   z.object({ status: z.literal("import_trigger_failed") }),

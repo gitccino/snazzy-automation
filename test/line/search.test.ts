@@ -29,6 +29,8 @@ it("returns Thai not-found text for an unknown Product ID", async () => {
 const uploadCases: Array<[UploadTriggerResult, string]> = [
   [{ status: "started", importRunId: "import-1" }, "เริ่มการนำเข้าสินค้า\nimport-1"],
   [{ status: "already_running" }, "⚠️ มีงานนำเข้ากำลังทำงานอยู่"],
+  [{ status: "busy" }, "⚠️ มีงานนำเข้าเดิมที่ต้องตรวจสอบ"],
+  [{ status: "owner_review", importRunId: "original" }, "⚠️ กรุณาตรวจสอบงานนำเข้าเดิมก่อนเริ่มใหม่ original"],
   [{ status: "sequence_not_bootstrapped" }, "⚠️ ยังเริ่มนำเข้าไม่ได้ เพราะยังไม่ได้ตั้งค่าลำดับรหัสสินค้า"],
   [{ status: "workflow_start_failed" }, "⚠️ เริ่มงานนำเข้าไม่สำเร็จ กรุณาลอง /upload อีกครั้ง"],
   [{ status: "import_trigger_failed" }, "⚠️ ระบบเริ่มงานนำเข้าขัดข้อง กรุณาลอง /upload อีกครั้ง"],

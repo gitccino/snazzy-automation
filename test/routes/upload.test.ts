@@ -144,6 +144,40 @@ describe("handleUploadTrigger", () => {
       expect(await env.DB.prepare("SELECT status FROM import_runs WHERE id = ?").bind("stable").first("status")).toBe(state === "missing" ? "start_failed" : "running");
     },
   );
+  it.each(["running", "errored", "unknown"] as const)(
+    "reconciles a fresh LINE event against the original %s workflow", async (state) => {
+      const { env } = triggerEnv();
+      await createSequenceRepository(env.DB).bootstrap("product_id", 1);
+      const { captureOperationContext } = await import("../../src/settings/runtime");
+      const context = await captureOperationContext(env, "owner-group");
+      const createBatch = vi.fn().mockResolvedValue([]);
+      const get = vi.fn().mockResolvedValue({ status: async () => ({ status: state }) });
+      env.IMPORT_WORKFLOW = { createBatch, get } as unknown as typeof env.IMPORT_WORKFLOW;
+      await handleUploadTrigger(env, "line", "original", context, "event-original");
+      const response = await handleUploadTrigger(env, "line", "fresh", context, "event-fresh");
+      expect(await response.json()).toEqual(state === "running" ? { status: "already_running" } : { status: "owner_review", importRunId: "original" });
+      expect(get).toHaveBeenCalledWith("import-original");
+      expect(createBatch).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each(["foreign", "missing", "unavailable"] as const)(
+    "keeps the original lock for %s reconciliation", async (scenario) => {
+      const { env } = triggerEnv();
+      await createSequenceRepository(env.DB).bootstrap("product_id", 1);
+      const { captureOperationContext } = await import("../../src/settings/runtime");
+      const owner = await captureOperationContext(env, "owner-group");
+      const caller = scenario === "foreign" ? await captureOperationContext(env, "other-group") : owner;
+      const createBatch = vi.fn().mockResolvedValue([]);
+      const get = vi.fn().mockRejectedValue(new Error(scenario === "missing" ? "instance.not_found" : "unavailable"));
+      env.IMPORT_WORKFLOW = { createBatch, get } as unknown as typeof env.IMPORT_WORKFLOW;
+      await handleUploadTrigger(env, "line", "original", owner, "event-original");
+      const response = await handleUploadTrigger(env, "line", "fresh", caller, "event-fresh");
+      expect(await response.json()).toEqual(scenario === "foreign" ? { status: "busy" } : { status: "owner_review", importRunId: "original" });
+      expect(createBatch).toHaveBeenCalledTimes(1);
+      expect(await env.DB.prepare("SELECT status FROM import_runs WHERE id = ?").bind("original").first("status")).toBe("running");
+      if (scenario === "foreign") expect(get).not.toHaveBeenCalled();
+    },
+  );
   // Mutation: letting the D1 uniqueness race reject instead of returning a benign conflict.
   it("allows one concurrent running import per album using real D1", async () => {
     const { env, create } = triggerEnv();

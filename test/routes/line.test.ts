@@ -145,6 +145,8 @@ it("returns 400 for a signed malformed top-level payload", async () => {
 it.each([
   [{ status: "started", importRunId: "import-1" }, { status: "started", importRunId: "import-1" }],
   [{ status: "already_running" }, { status: "already_running" }],
+  [{ status: "busy" }, { status: "busy" }],
+  [{ status: "owner_review", importRunId: "original" }, { status: "owner_review", importRunId: "original" }],
   [{ status: "sequence_not_bootstrapped" }, { status: "sequence_not_bootstrapped" }],
   [{ status: "workflow_start_failed" }, { status: "workflow_start_failed" }],
   [{ status: "import_trigger_failed" }, { status: "import_trigger_failed" }],
