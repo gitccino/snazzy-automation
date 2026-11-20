@@ -71,3 +71,42 @@ it('refuses an oversized terminal bundle before inserting a poison FIFO head',as
  await expect(repo.enqueueResult({resultKey:groupId,groupId,result:{...result,messages:Array.from({length:6},()=>({type:'text',text:'x'}))}})).rejects.toThrow();
  expect(await repo.head(groupId)).toBeNull();
 });
+it('guards owner closure and keeps late provider evidence from reopening FIFO', async () => {
+  const { repo, groupId, enqueue, prepare } = fixture();
+  await enqueue('a'); await enqueue('b');
+  const sequence = (await repo.head(groupId))!.sequence;
+  const eventId = 'e' + groupId;
+  await prepare('e', sequence); await repo.beginDispatch(eventId); await repo.markUncertain(eventId);
+  const decision = { eventId, sequence, groupId, decision: 'close_unverifiable' as const, actor: 'owner', reason: 'no receipt' };
+  expect(await repo.recordOwnerDisposition({ ...decision, groupId: 'wrong' })).toBe(false);
+  expect(await repo.recordOwnerDisposition({ ...decision, eventId: 'wrong' })).toBe(false);
+  expect(await repo.recordOwnerDisposition({ ...decision, sequence: sequence + 1 })).toBe(false);
+  await expect(repo.recordOwnerDisposition({ ...decision, actor: ' ' })).rejects.toThrow();
+  expect((await Promise.all([repo.recordOwnerDisposition(decision), repo.recordOwnerDisposition({ ...decision, reason: 'other' })])).sort()).toEqual([false, true]);
+  const next = (await repo.head(groupId))!.sequence;
+  expect(next).toBeGreaterThan(sequence);
+  await repo.reject(eventId, 'retry_on_new_event', { status: 429, requestId: 'late' });
+  expect((await repo.head(groupId))!.sequence).toBe(next);
+  expect(await prepare('next', next)).toBe('prepared');
+  expect(await testEnv().DB.prepare('SELECT phase,request_id FROM line_reply_dispatches WHERE event_id=?').bind(eventId).first()).toEqual({ phase: 'rejected', request_id: 'late' });
+});
+it('prevents a closed prepared dispatch from sending later', async () => {
+  const { repo, groupId, enqueue, prepare } = fixture();
+  await enqueue('a'); await enqueue('b');
+  const sequence = (await repo.head(groupId))!.sequence;
+  await prepare('e', sequence);
+  expect(await repo.recordOwnerDisposition({ eventId: 'e' + groupId, sequence, groupId, decision: 'close_unverifiable', actor: 'owner', reason: 'closed' })).toBe(true);
+  expect(await repo.beginDispatch('e' + groupId)).toBe(false);
+  expect((await repo.head(groupId))!.sequence).toBeGreaterThan(sequence);
+});
+it('serializes owner closure against a provider retry transition', async () => {
+  const { repo, groupId, enqueue, prepare } = fixture();
+  await enqueue('a'); await enqueue('b');
+  const sequence = (await repo.head(groupId))!.sequence, eventId = 'e' + groupId;
+  await prepare('e', sequence); await repo.beginDispatch(eventId); await repo.markUncertain(eventId);
+  const [closed] = await Promise.all([
+    repo.recordOwnerDisposition({ eventId, sequence, groupId, decision: 'close_unverifiable', actor: 'owner', reason: 'unknown' }),
+    repo.reject(eventId, 'retry_on_new_event', { status: 429, requestId: 'receipt' }),
+  ]);
+  expect((await repo.head(groupId))!.sequence).toBe(closed ? sequence + 1 : sequence);
+});
