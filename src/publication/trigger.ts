@@ -122,6 +122,14 @@ export async function handleDocsTrigger(
           return { status: "already_running", publicationRunId: run.airtableRunId };
         if (workflow && ["errored", "terminated", "complete"].includes(workflow.state.status)) {
           const claim = await claimPublicationVerification(env.DB, { runId: run.airtableRunId, generation: job.generation, notificationCycle: job.notificationCycle, groupId: trustedGroupId! });
+          if (claim.status === "held") {
+            const saved = await env.DB.prepare(`SELECT verifier_id FROM publication_verification_claims
+              WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND group_id=? AND completed=0 AND origin_workflow_id=?`)
+              .bind(run.airtableRunId, job.generation, job.notificationCycle, trustedGroupId, originalId).first<{ verifier_id: string }>();
+            const verifier = saved && await lookupWorkflow(env, saved.verifier_id);
+            if (verifier && activeStatuses.includes(verifier.state.status))
+              return { status: "checking", publicationRunId: run.airtableRunId };
+          }
           if (claim.status === "claimed" && claim.originWorkflowId === originalId) {
             await env.PUBLICATION_WORKFLOW.create({ id: claim.verifierId, params: { kind: "verification", publicationRunId: run.airtableRunId, generation: job.generation, notificationCycle: job.notificationCycle, groupId: trustedGroupId!, verifierId: claim.verifierId } });
             return { status: "checking", publicationRunId: run.airtableRunId };

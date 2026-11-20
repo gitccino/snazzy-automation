@@ -513,8 +513,10 @@ describe("handleDocsTrigger", () => {
     expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, context)).toEqual({ status: "checking", publicationRunId: "rec-run-1" });
     const verifierId = h.create.mock.calls[0]![0].id;
     expect(h.create).toHaveBeenCalledWith({ id: verifierId, params: { kind: "verification", publicationRunId: "rec-run-1", generation: 1, notificationCycle: 1, groupId: "owner", verifierId } });
-    expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, context)).toEqual({ status: "owner_review", publicationRunId: "rec-run-1" });
+    h.get.mockImplementation(async (id: string) => ({ status: vi.fn().mockResolvedValue({ status: id === verifierId ? "running" : "errored" }) }));
+    expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, context)).toEqual({ status: "checking", publicationRunId: "rec-run-1" });
     expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, { ...context, replyGroupId: "other" })).toEqual({ status: "busy" });
+    h.get.mockResolvedValue({ status: h.status, restart: h.restart, resume: h.resume });
     h.status.mockResolvedValue({ status: "running" });
     expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, context)).toEqual({ status: "already_running", publicationRunId: "rec-run-1" });
     h.status.mockRejectedValue(new Error("unavailable"));
