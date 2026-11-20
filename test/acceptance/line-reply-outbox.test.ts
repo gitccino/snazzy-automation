@@ -48,3 +48,21 @@ it('suppresses historical saved-reply-only redelivery before repeating business 
   expect(fetcher).not.toHaveBeenCalled();expect(result).toEqual({status:'duplicate'});
  } finally {fetcher.mockRestore();}
 });
+
+it('holds a lost upload reply and delivers its later result on a fresh same-group event',async()=>{
+ const group='CtestGroup', id=crypto.randomUUID(), batches:any[]=[], handoffs:any[]=[], sends:any[]=[];
+ const env={...testEnv(),...createTestEnv(),LINE_CHANNEL_SECRET:'secret',LINE_COMMAND_WORKFLOW:{createBatch:async(b:any[])=>{batches.push(...b);return [];},get:async()=>({status:async()=>({status:'running'})})},IMPORT_WORKFLOW:{createBatch:async(x:any[])=>{handoffs.push(...x);return [];},get:async()=>({status:async()=>({status:'running'})})}} as unknown as Env;
+ await env.DB.prepare("INSERT OR IGNORE INTO sequences (name,next_value,bootstrapped_at) VALUES ('product_id',1,'now')").run();
+ const step={do:async(_n:string,a:any,b?:any)=>(b??a)()} as unknown as WorkflowStep;
+ const send=vi.spyOn(globalThis,'fetch').mockImplementation(async(url,init)=>{if(String(url).includes('/member/'))return Response.json({userId:'U1',displayName:'Tester'});if(!String(url).endsWith('/message/reply'))throw new Error('unexpected fetch: '+String(url));sends.push(JSON.parse(String(init?.body)));if(sends.length===1)throw new Error('accepted but response lost');return Response.json({});});
+ const admit=async(eventId:string,text:string)=>{const body=JSON.stringify({events:[{type:'message',webhookEventId:eventId,replyToken:'token-'+eventId,source:{type:'group',groupId:group,userId:'U1'},message:{type:'text',id:'m-'+eventId,text}}]});expect((await handleLineRoute(new Request('https://app/line/webhook',{method:'POST',headers:{'x-line-signature':await sign(body,'secret')},body}),env,{} as ExecutionContext)).status).toBe(200);};
+ const run=async(item:any)=>LineCommandWorkflow.prototype.run.call({env} as unknown as LineCommandWorkflow,{payload:item.params,instanceId:item.id} as any,step);
+ try {
+  await admit(id,'/upload');const first=batches[0];expect(await run(first)).toEqual({status:'uncertain'});
+  await admit(id,'/upload');expect(await run(batches[1])).toEqual({status:'duplicate'});
+  expect(handoffs).toHaveLength(1);expect(sends).toHaveLength(1);
+  expect(await env.DB.prepare('SELECT phase FROM line_reply_dispatches WHERE event_id=?').bind(id).first()).toEqual({phase:'uncertain'});
+  const repo=createLineReplyRepository(env.DB,{now:()=>new Date()});await repo.enqueueResult({groupId:group,resultKey:id,result:{schemaVersion:1,kind:'import',runId:id,generation:1,notificationCycle:1,outcome:'success',messages:[{type:'text',text:'final notice'}]}});
+  await admit(crypto.randomUUID(),'hello');expect(await run(batches[2])).toEqual({status:'accepted'});expect(sends).toHaveLength(2);expect(sends[1].messages).toEqual([{type:'text',text:'final notice'}]);
+ } finally {send.mockRestore();}
+});
