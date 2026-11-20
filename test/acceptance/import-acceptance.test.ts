@@ -175,6 +175,8 @@ async function buildHarness(
     ),
     airtable,
     productIdPrefix: "A",
+    airtableBaseId: "base",
+    airtableTableId: "table",
     assetUrlTtlSeconds: 300,
   };
 
@@ -268,6 +270,7 @@ describe("import acceptance", () => {
     const db = testEnv().DB;
     await db.batch([
       db.prepare("DELETE FROM audit_events"),
+      db.prepare("DELETE FROM airtable_create_claims"),
       db.prepare("DELETE FROM product_group_image_members"),
       db.prepare("DELETE FROM product_groups"),
       db.prepare("DELETE FROM photo_assets"),
@@ -275,6 +278,16 @@ describe("import acceptance", () => {
       db.prepare("DELETE FROM import_runs"),
       db.prepare("DELETE FROM sequences"),
     ]);
+  });
+
+  it("holds a lost create response when replay cannot find the row", async () => {
+    const create = vi.fn(async () => { throw new OperationalError("airtable_response_lost", "response lost", true); });
+    const harness = await buildHarness(`album-${crypto.randomUUID()}`, productGroupOf(9, 1), { idPrefix: "lost-id", createProduct: create });
+    const result = await harness.startAndRun("lost-run", "cron");
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(result.failedGroups).toEqual([expect.objectContaining({ productId: "A-501", errorCode: "airtable_create_unconfirmed" })]);
+    expect(await groupStates("lost-run")).toEqual([expect.objectContaining({ product_id: "A-501", state: "failed" })]);
+    expect(JSON.stringify(harness.push.mock.calls)).toContain("กรุณาให้เจ้าของตรวจสอบ");
   });
 
   it("1. imports a 100-photo snapshot into nine deterministic Products", async () => {
@@ -424,14 +437,14 @@ describe("import acceptance", () => {
 
     expect(result).toEqual({
       importRunId: "case-6-run-1", succeededProductIds: ["A-502"],
-      failedGroups: [{ groupId: "case-6-id-21", productId: "A-501", errorCode: "airtable_rate_limited" }],
+      failedGroups: [{ groupId: "case-6-id-21", productId: "A-501", errorCode: "airtable_create_unconfirmed" }],
     });
     expect([...harness.created.values()].map((row) => row.productId)).toEqual(["A-502"]);
     expect(await groupStates("case-6-run-1")).toEqual([
-      { product_id: "A-501", state: "failed", attempt_count: 6, failure_reason: "airtable_rate_limited" },
+      { product_id: "A-501", state: "failed", attempt_count: 2, failure_reason: "airtable_create_unconfirmed" },
       { product_id: "A-502", state: "succeeded", attempt_count: 1, failure_reason: null },
     ]);
-    expect((await auditActions("case-6-run-1")).filter((action) => action === "product_group_attempt_failed")).toHaveLength(6);
+    expect((await auditActions("case-6-run-1")).filter((action) => action === "product_group_attempt_failed")).toHaveLength(2);
   });
 
   it("7. reports every exhausted group with burned Product ID and code", async () => {
@@ -446,20 +459,20 @@ describe("import acceptance", () => {
     expect(result).toEqual({
       importRunId: "case-7-run-1", succeededProductIds: [],
       failedGroups: [
-        { groupId: "case-7-id-31", productId: "A-501", errorCode: "airtable_rate_limited" },
-        { groupId: "case-7-id-32", productId: "A-502", errorCode: "airtable_rate_limited" },
-        { groupId: "case-7-id-33", productId: "A-503", errorCode: "airtable_rate_limited" },
+        { groupId: "case-7-id-31", productId: "A-501", errorCode: "airtable_create_unconfirmed" },
+        { groupId: "case-7-id-32", productId: "A-502", errorCode: "airtable_create_unconfirmed" },
+        { groupId: "case-7-id-33", productId: "A-503", errorCode: "airtable_create_unconfirmed" },
       ],
     });
     expect(await groupStates("case-7-run-1")).toEqual([
-      { product_id: "A-501", state: "failed", attempt_count: 6, failure_reason: "airtable_rate_limited" },
-      { product_id: "A-502", state: "failed", attempt_count: 6, failure_reason: "airtable_rate_limited" },
-      { product_id: "A-503", state: "failed", attempt_count: 6, failure_reason: "airtable_rate_limited" },
+      { product_id: "A-501", state: "failed", attempt_count: 2, failure_reason: "airtable_create_unconfirmed" },
+      { product_id: "A-502", state: "failed", attempt_count: 2, failure_reason: "airtable_create_unconfirmed" },
+      { product_id: "A-503", state: "failed", attempt_count: 2, failure_reason: "airtable_create_unconfirmed" },
     ]);
     expect((await auditActions("case-7-run-1")).filter((action) => action === "product_id_allocated")).toHaveLength(3);
   });
 
-  it("8. later /upload resets a failed group with a fresh ID and imports its new sibling", async () => {
+  it("8. later /upload holds the claimed group and imports its new sibling", async () => {
     let failBurnedGroup = true;
     const firstSpecs = productGroupOf(9, 1);
     const harness = await buildHarness(`album-${crypto.randomUUID()}`, firstSpecs, {
@@ -477,14 +490,14 @@ describe("import acceptance", () => {
 
     expect(first).toEqual({
       importRunId: "case-8-run-1", succeededProductIds: [],
-      failedGroups: [{ groupId: "case-8-id-11", productId: "A-501", errorCode: "airtable_timeout" }],
+      failedGroups: [{ groupId: "case-8-id-11", productId: "A-501", errorCode: "airtable_create_unconfirmed" }],
     });
-    expect(second).toEqual({ importRunId: "case-8-run-2", succeededProductIds: ["A-502", "A-503"], failedGroups: [] });
-    expect([...harness.created.values()].map((row) => row.productId)).toEqual(["A-502", "A-503"]);
+    expect(second).toEqual({ importRunId: "case-8-run-2", succeededProductIds: ["A-502"], failedGroups: [{ groupId: "case-8-id-11", productId: "A-501", errorCode: "airtable_create_unconfirmed" }] });
+    expect([...harness.created.values()].map((row) => row.productId)).toEqual(["A-502"]);
     const rows = await testEnv().DB.prepare("SELECT product_id, state, attempt_count FROM product_groups WHERE import_run_id = ? ORDER BY ordinal").bind("case-8-run-2").all();
     expect(rows.results).toEqual([
+      { product_id: "A-501", state: "failed", attempt_count: 1 },
       { product_id: "A-502", state: "succeeded", attempt_count: 1 },
-      { product_id: "A-503", state: "succeeded", attempt_count: 1 },
     ]);
   });
 
@@ -527,10 +540,10 @@ describe("import acceptance", () => {
     const expectedSucceeded = ["A-501", "A-503", "A-504", "A-505", "A-506", "A-507", "A-508", "A-509", "A-510", "A-511", "A-512", "A-513", "A-514", "A-515", "A-516", "A-517", "A-518", "A-519", "A-520", "A-521", "A-522", "A-523", "A-524", "A-525", "A-526", "A-527", "A-528", "A-529", "A-530", "A-531", "A-532", "A-533", "A-534", "A-535", "A-536", "A-537", "A-538", "A-539", "A-540", "A-541", "A-542", "A-543", "A-544", "A-545"];
     expect(result).toEqual({
       importRunId: "case-10-run-500", succeededProductIds: expectedSucceeded,
-      failedGroups: [{ groupId: "case-10-id-502", productId: "A-502", errorCode: "airtable_rate_limited" }],
+      failedGroups: [{ groupId: "case-10-id-502", productId: "A-502", errorCode: "airtable_create_unconfirmed" }],
     });
     expect(harness.push).toHaveBeenCalledTimes(1);
-    const expectedSummary = "นำเข้ารูปภาพ — 2026-09-01 16:00 ICT\nสำเร็จ 44 รายการ\nA-501, A-503, A-504, A-505, A-506, A-507, A-508, A-509, A-510, A-511, A-512, A-513, A-514, A-515, A-516, A-517, A-518, A-519, A-520, A-521, A-522, A-523, A-524, A-525, A-526, A-527, A-528, A-529, A-530, A-531, A-532, A-533, A-534, A-535, A-536, A-537, A-538, A-539, A-540, A-541, A-542, A-543, A-544, A-545\nล้มเหลว 1 รายการ\n- A-502: Airtable จำกัดจำนวนคำขอชั่วคราว\nแก้ไขแล้วพิมพ์ /upload เพื่อลองใหม่";
+    const expectedSummary = "นำเข้ารูปภาพ — 2026-09-01 16:00 ICT\nสำเร็จ 44 รายการ\nA-501, A-503, A-504, A-505, A-506, A-507, A-508, A-509, A-510, A-511, A-512, A-513, A-514, A-515, A-516, A-517, A-518, A-519, A-520, A-521, A-522, A-523, A-524, A-525, A-526, A-527, A-528, A-529, A-530, A-531, A-532, A-533, A-534, A-535, A-536, A-537, A-538, A-539, A-540, A-541, A-542, A-543, A-544, A-545\nล้มเหลว 1 รายการ\n- A-502: ไม่สามารถยืนยันการสร้างสินค้าใน Airtable กรุณาให้เจ้าของตรวจสอบ";
     expect(harness.push).toHaveBeenCalledWith("CtestGroup", expectedSummary, expect.objectContaining({ type: "bubble" }));
     expect([...harness.created.values()].map((row) => row.productId)).toEqual(expectedSucceeded);
   });

@@ -259,6 +259,8 @@ export class ImportWorkflow extends WorkflowEntrypoint<
         fetch: fetcher,
       }),
       productIdPrefix: config.productIdPrefix,
+      airtableBaseId: config.airtableBaseId,
+      airtableTableId: config.airtableProductsTableId,
       assetUrlTtlSeconds: 300,
     };
     const outbox=createLineReplyRepository(this.env.DB,clock);

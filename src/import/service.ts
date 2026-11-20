@@ -49,6 +49,8 @@ export interface ProcessGroupDeps extends ImportServiceDeps {
   audit: AuditLog;
   airtable: AirtableProductsClient;
   productIdPrefix: string;
+  airtableBaseId: string;
+  airtableTableId: string;
   assetUrlTtlSeconds: number;
 }
 
@@ -362,6 +364,10 @@ export async function processProductGroupAttempt(
         };
       }),
     );
+    const claim = await deps.repo.claimAirtableCreate({ groupId: group.groupRowId, productId, baseId: deps.airtableBaseId, tableId: deps.airtableTableId });
+    if (claim !== "acquired") {
+      throw new OperationalError("airtable_create_unconfirmed", "Airtable creation requires owner review", false);
+    }
     const created = await deps.airtable.createProduct({
       productId,
       systemGroupId: group.groupId,

@@ -105,6 +105,7 @@ async function buildProcessDeps(
 ): Promise<{ deps: ProcessGroupDeps; group: PersistedGroup }> {
   const env = testEnv();
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM airtable_create_claims WHERE group_id IN (SELECT id FROM product_groups WHERE group_hash LIKE 'task13-group-%')"),
     env.DB.prepare(
       "DELETE FROM product_groups WHERE group_hash LIKE 'task13-group-%'",
     ),
@@ -158,6 +159,8 @@ async function buildProcessDeps(
       ),
       airtable: fakeAirtable(airtableOverrides),
       productIdPrefix: "A",
+      airtableBaseId: "base",
+      airtableTableId: "table",
       assetUrlTtlSeconds: 300,
     },
     group: {
@@ -864,55 +867,13 @@ describe("processProductGroupAttempt", () => {
     ]);
   });
 
-  it("reuses the Product ID on a Workflow retry and records success", async () => {
-    let createCalls = 0;
-    const { deps, group } = await buildProcessDeps({
-      createProduct: async () => {
-        createCalls += 1;
-        if (createCalls === 1) {
-          throw new OperationalError(
-            "airtable_rate_limited",
-            "rate limited",
-            true,
-          );
-        }
-        return { recordId: "rec-ok" };
-      },
-    });
-
-    await expect(
-      processProductGroupAttempt(deps, group, "run-retry"),
-    ).rejects.toMatchObject({ code: "airtable_rate_limited" });
-    await expect(
-      processProductGroupAttempt(deps, group, "run-retry"),
-    ).resolves.toEqual({ outcome: "succeeded", productId: "A-501" });
-
-    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
-      state: "succeeded",
-      productId: "A-501",
-      airtableRecordId: "rec-ok",
-      attemptCount: 2,
-    });
-    expect(await auditRows("run-retry")).toEqual([
-      {
-        actor: "system:import",
-        action: "product_id_allocated",
-        before_value: null,
-        after_value: "A-501",
-      },
-      {
-        actor: "system:import",
-        action: "product_group_attempt_failed",
-        before_value: "A-501",
-        after_value: "airtable_rate_limited",
-      },
-      {
-        actor: "system:import",
-        action: "product_group_succeeded",
-        before_value: "importing",
-        after_value: "A-501",
-      },
-    ]);
+  it("holds the allocated ID when a create retry cannot find the row", async () => {
+    const create = vi.fn(async () => { throw new OperationalError("airtable_rate_limited", "rate limited", true); });
+    const { deps, group } = await buildProcessDeps({ createProduct: create });
+    await expect(processProductGroupAttempt(deps, group, "run-retry")).rejects.toMatchObject({ code: "airtable_rate_limited" });
+    await expect(processProductGroupAttempt(deps, group, "run-retry")).rejects.toMatchObject({ code: "airtable_create_unconfirmed", retryable: false });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({ productId: "A-501", attemptCount: 2 });
   });
 
   it("keeps verified success importing until its audit succeeds, then recovers on retry", async () => {
