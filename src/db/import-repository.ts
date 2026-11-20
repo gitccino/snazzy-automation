@@ -22,10 +22,11 @@ export interface ProductGroupRow {
 
 export type ScanPhoto = { applePhotoId: string; position: number; captureAt: string | null; mediaType: "image/jpeg" };
 
-export type GroupingOutcome = { ignoredGroupCount: number; orphanRange: OrphanRange | null; checkpointPosition: number };
+export type GroupingOutcome = { countedIgnoreMarkerIds?: string[]; ignoredGroupCount: number; orphanRange: OrphanRange | null; checkpointPosition: number };
 export type GroupingEvidence = GroupingOutcome & ({ version: 1; savedCheckpoint: number | null; firstImportCutoffDate: string | null } | { version?: never });
 
 export interface ImportRepository {
+  countedIgnoreMarkerIds(albumId: string, excludeRunId: string): Promise<string[]>;
   recordGroupingEvidence(id: string, scan: ScanPhoto[], evidence: GroupingOutcome & { version: 1; savedCheckpoint: number | null; firstImportCutoffDate: string | null }): Promise<GroupingEvidence>;
   claimImportScan(id: string): Promise<boolean>;
   getImportScan(id: string): Promise<ScanPhoto[] | "incomplete" | null>;
@@ -123,13 +124,24 @@ function toGroupRow(input: unknown): ProductGroupRow {
   };
 }
 
+async function countedIgnoreMarkerIds(db: D1Database, albumId: string, excludeRunId: string): Promise<string[]> {
+  const rows = await db.prepare(`SELECT DISTINCT j.value AS id FROM import_runs r, json_each(CASE WHEN json_valid(r.grouping_evidence_json) THEN r.grouping_evidence_json ELSE '{}' END, '$.countedIgnoreMarkerIds') j
+    WHERE r.source_album_id=? AND r.id<>? AND r.status IN ('completed','completed_with_failures') AND r.failure_reason IS NULL AND j.type='text'`).bind(albumId, excludeRunId).all<{id:string}>();
+  return rows.results.map(row => row.id);
+}
+
 export function createImportRepository(db: D1Database, _ids: IdGenerator, clock: Clock): ImportRepository {
   return {
+    countedIgnoreMarkerIds: (albumId, excludeRunId) => countedIgnoreMarkerIds(db, albumId, excludeRunId),
     async recordGroupingEvidence(id, scan, evidence) {
       const row = await db.prepare(`UPDATE import_runs SET grouping_evidence_json = COALESCE(grouping_evidence_json, ?)
-        WHERE id = ? AND status = 'running' AND scan_evidence_json = ? RETURNING grouping_evidence_json`)
+        WHERE id = ? AND (status = 'running' OR (status IN ('completed','completed_with_failures') AND grouping_evidence_json IS NOT NULL)) AND scan_evidence_json = ? RETURNING grouping_evidence_json`)
         .bind(JSON.stringify(evidence), id, JSON.stringify(scan)).first<{grouping_evidence_json: string}>();
-      if (!row) throw new Error("Import grouping evidence claim lost");
+      if (!row) {
+        const terminal = await db.prepare(`SELECT grouping_evidence_json FROM import_runs WHERE id=? AND status IN ('completed','completed_with_failures') AND scan_evidence_json=?`).bind(id, JSON.stringify(scan)).first<{grouping_evidence_json:string | null}>();
+        if (!terminal) throw new Error("Import grouping evidence claim lost");
+        return terminal.grouping_evidence_json ? JSON.parse(terminal.grouping_evidence_json) as GroupingEvidence : evidence;
+      }
       return JSON.parse(row.grouping_evidence_json) as GroupingEvidence;
     },
     async claimImportScan(id) {
@@ -476,7 +488,7 @@ export async function readImportVerificationGroupingCandidate(db: D1Database, ru
     .bind(runId, verifierId, importWorkflowId(runId)).first<{source_album_id:string; scan_evidence_json:string; grouping_evidence_json:string}>();
   if (!row) return null;
   const photoSchema = z.object({applePhotoId:z.string().min(1), position:z.number().int().nonnegative(), captureAt:z.string().nullable(), mediaType:z.literal('image/jpeg')});
-  const factsSchema = z.object({version:z.literal(1), savedCheckpoint:z.number().int().nonnegative().nullable(), firstImportCutoffDate:z.string().nullable(), ignoredGroupCount:z.number().int().nonnegative(), checkpointPosition:z.number().int(), orphanRange:z.object({firstApplePhotoId:z.string(),lastApplePhotoId:z.string(),count:z.number().int().positive()}).nullable()});
+  const factsSchema = z.object({version:z.literal(1), savedCheckpoint:z.number().int().nonnegative().nullable(), firstImportCutoffDate:z.string().nullable(), countedIgnoreMarkerIds:z.array(z.string().min(1)).optional(), ignoredGroupCount:z.number().int().nonnegative(), checkpointPosition:z.number().int(), orphanRange:z.object({firstApplePhotoId:z.string(),lastApplePhotoId:z.string(),count:z.number().int().positive()}).nullable()});
   let scan: z.infer<typeof photoSchema>[], facts: z.infer<typeof factsSchema>;
   try { scan = z.array(photoSchema).nonempty().parse(JSON.parse(row.scan_evidence_json)); facts = factsSchema.parse(JSON.parse(row.grouping_evidence_json)); } catch { return null; }
   if (new Set(scan.map(p => p.applePhotoId)).size !== scan.length || new Set(scan.map(p => p.position)).size !== scan.length) return null;
@@ -484,7 +496,9 @@ export async function readImportVerificationGroupingCandidate(db: D1Database, ru
   if ((checkpoint?.last_position ?? null) !== facts.savedCheckpoint) return null;
   const eligible = scan.filter(p => facts.firstImportCutoffDate === null || (p.captureAt !== null && p.captureAt >= facts.firstImportCutoffDate)).sort((a,b) => a.position-b.position);
   const photos = [];
-  let ignoredGroupCount = 0, uncounted = false;
+  const countedBefore = new Set(await countedIgnoreMarkerIds(db, row.source_album_id, runId));
+  const countedIds: string[] = [];
+  let markerId = '', ignoredGroupCount = 0, uncounted = false;
   for (const photo of eligible) {
     const assets = (await db.prepare('SELECT * FROM photo_assets WHERE source_album_id=? AND apple_photo_id=?').bind(row.source_album_id, photo.applePhotoId).all()).results;
     if (assets.length !== 1) return null;
@@ -493,14 +507,14 @@ export async function readImportVerificationGroupingCandidate(db: D1Database, ru
     const asset = toAssetRow(parsed.data);
     if (parsed.data.marker_kind === null || parsed.data.is_marker !== (parsed.data.marker_kind === 'product_start' ? 1 : 0)) return null;
     if (asset.markerKind === 'product_start') uncounted = false;
-    if (asset.markerKind === 'ignore_start') uncounted = photo.position > (facts.savedCheckpoint ?? -1);
-    if (asset.markerKind === 'none' && uncounted) { ignoredGroupCount++; uncounted = false; }
+    if (asset.markerKind === 'ignore_start') { markerId = photo.applePhotoId; uncounted = photo.position > (facts.savedCheckpoint ?? -1) && (!facts.countedIgnoreMarkerIds || !countedBefore.has(markerId)); }
+    if (asset.markerKind === 'none' && uncounted) { ignoredGroupCount++; countedIds.push(markerId); uncounted = false; }
     photos.push({applePhotoId:photo.applePhotoId, position:photo.position, markerKind:asset.markerKind, isMarker:asset.isMarker, r2Key:asset.r2Key});
   }
   const {groups, orphanPhotos} = groupByMarkers(photos);
   const orphanRange = orphanPhotos.length ? {firstApplePhotoId:orphanPhotos[0]!.applePhotoId,lastApplePhotoId:orphanPhotos[orphanPhotos.length-1]!.applePhotoId,count:orphanPhotos.length} : null;
   const checkpointPosition = scan.reduce((max,p) => Math.max(max,p.position), facts.savedCheckpoint ?? -1);
-  if (groups.length || ignoredGroupCount !== facts.ignoredGroupCount || checkpointPosition !== facts.checkpointPosition || JSON.stringify(orphanRange) !== JSON.stringify(facts.orphanRange)) return null;
+  if (groups.length || (facts.countedIgnoreMarkerIds && JSON.stringify(countedIds) !== JSON.stringify(facts.countedIgnoreMarkerIds)) || ignoredGroupCount !== facts.ignoredGroupCount || checkpointPosition !== facts.checkpointPosition || JSON.stringify(orphanRange) !== JSON.stringify(facts.orphanRange)) return null;
   return {...facts, scanEvidenceJson:row.scan_evidence_json, groupingEvidenceJson:row.grouping_evidence_json, photos};
 }
 

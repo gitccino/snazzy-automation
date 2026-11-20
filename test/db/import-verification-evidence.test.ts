@@ -69,7 +69,7 @@ it('writes grouping evidence once only for the running run and its exact saved s
   const row = await db.prepare('SELECT grouping_evidence_json FROM import_runs WHERE id=?').bind(id).first<{grouping_evidence_json:string}>();
   expect(JSON.parse(row!.grouping_evidence_json)).toEqual(facts);
   await db.prepare("UPDATE import_runs SET status='completed' WHERE id=?").bind(id).run();
-  await expect(repo.recordGroupingEvidence(id, scan, facts)).rejects.toThrow();
+  expect(await repo.recordGroupingEvidence(id, scan, facts)).toEqual(facts);
 });
 
  it('replays legacy evidence without inventing inputs', async () => {

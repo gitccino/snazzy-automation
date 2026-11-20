@@ -1716,7 +1716,7 @@ describe("ignore marker storage and minimum photos", () => {
     const { deps, runId } = await setup(ids as string[]);
     await downloadAndGroupSnapshot(deps, runId);
     const row = await testEnv().DB.prepare("SELECT grouping_evidence_json FROM import_runs WHERE id=?").bind(runId).first<{grouping_evidence_json:string}>();
-    expect(JSON.parse(row!.grouping_evidence_json)).toEqual({ ...expected, version: 1, savedCheckpoint: null, firstImportCutoffDate: null });
+    expect(JSON.parse(row!.grouping_evidence_json)).toEqual({ ...expected, version: 1, savedCheckpoint: null, firstImportCutoffDate: null, countedIgnoreMarkerIds: expected.ignoredGroupCount ? ["ignore"] : [] });
   });
 
   it("records original inputs and full scan when cutoff filters photos, and keeps them on replay", async () => {
@@ -1754,6 +1754,36 @@ describe("ignore marker storage and minimum photos", () => {
     const laterRun = crypto.randomUUID();
     await deps.repo.createImportRun({ id: laterRun, sourceAlbumId: deps.sourceAlbumId, trigger: "line" });
     expect((await downloadAndGroupSnapshot(deps, laterRun)).ignoredGroupCount).toBe(1);
+  });
+
+  it("does not recount a recovered ignored group after positions shift", async () => {
+    const { deps, runId, snapshot } = await setup(["ignore", "extra"]);
+    const db = testEnv().DB;
+    const owner = crypto.randomUUID(), context = JSON.stringify({replyGroupId: owner});
+    await db.prepare("UPDATE import_runs SET settings_context_json=? WHERE id=?").bind(context, runId).run();
+    expect((await downloadAndGroupSnapshot(deps, runId)).ignoredGroupCount).toBe(1);
+    const { claimImportVerification } = await import('../../src/db/import-repository');
+    const { importWorkflowId } = await import('../../src/shared/ids');
+    const { ImportWorkflow } = await import('../../src/import/workflow');
+    await claimImportVerification(db, {runId, albumId:deps.sourceAlbumId, workflowId:importWorkflowId(runId), groupId:owner, contextJson:context});
+    const env = {...testEnv(), IMPORT_WORKFLOW:{get:async () => ({status:async () => ({status:'errored'})})}};
+    await ImportWorkflow.prototype.run.call({env} as any, {instanceId:`import-verification-${runId}`, payload:{kind:'verification', importRunId:runId}} as any, {do:async (_:string, cb:()=>Promise<unknown>)=>cb()} as any);
+    expect(await db.prepare('SELECT status FROM import_runs WHERE id=?').bind(runId).first('status')).toBe('completed');
+    snapshot.photos = ['p1','p2','p3','ignore','extra','ignore2','new-photo'].map((id, i) => ({...sourcePhoto(id, i + 1), sourceAlbumId:deps.sourceAlbumId}));
+    const next = crypto.randomUUID();
+    await deps.repo.createImportRun({id:next, sourceAlbumId:deps.sourceAlbumId, trigger:'line'});
+    expect((await downloadAndGroupSnapshot(deps, next)).ignoredGroupCount).toBe(1);
+  });
+
+  it("retains counted marker identity after normal completion while allowing an uncounted marker", async () => {
+    const { deps, runId, snapshot } = await setup(["ignore", "extra", "ignore2"]);
+    expect((await downloadAndGroupSnapshot(deps, runId)).ignoredGroupCount).toBe(1);
+    await finalizeImportRun(deps.repo, runId, deps.sourceAlbumId, false, 0, 3);
+    snapshot.photos = ["p1", "p2", "p3", "p4", "ignore", "extra", "ignore2", "new-photo"].map((id, i) => ({ ...sourcePhoto(id, i + 1), sourceAlbumId: deps.sourceAlbumId }));
+    const next = crypto.randomUUID();
+    await deps.repo.createImportRun({ id: next, sourceAlbumId: deps.sourceAlbumId, trigger: "line" });
+    expect((await downloadAndGroupSnapshot(deps, next)).ignoredGroupCount).toBe(1);
+    expect((await downloadAndGroupSnapshot(deps, next)).ignoredGroupCount).toBe(1);
   });
 
   it("counts separate ignored products without counting their individual photos", async () => {

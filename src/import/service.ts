@@ -163,6 +163,9 @@ export async function downloadAndGroupSnapshot(
             photo.captureAt >= firstImportCutoffDate,
         );
 
+  const countedBefore = new Set(await deps.repo.countedIgnoreMarkerIds(deps.sourceAlbumId, importRunId));
+  const countedIgnoreMarkerIds: string[] = [];
+  let markerId = "";
   let ignoring = false;
   let ignoredGroupCount = 0;
   let uncountedNewIgnoreGroup = false;
@@ -178,10 +181,12 @@ export async function downloadAndGroupSnapshot(
     }
     if (markerKind === "ignore_start") {
       ignoring = true;
-      uncountedNewIgnoreGroup = photo.position > (savedCheckpoint ?? -1);
+      markerId = photo.applePhotoId;
+      uncountedNewIgnoreGroup = photo.position > (savedCheckpoint ?? -1) && !countedBefore.has(markerId);
     }
     if (markerKind === "none" && uncountedNewIgnoreGroup) {
       ignoredGroupCount++;
+      countedIgnoreMarkerIds.push(markerId);
       uncountedNewIgnoreGroup = false;
     }
     let r2Key = asset?.r2Key ?? null;
@@ -261,8 +266,8 @@ export async function downloadAndGroupSnapshot(
     savedCheckpoint ?? -1,
   );
 
-  if (groups.length === 0 && evidence.length > 0) {
-    const saved = await deps.repo.recordGroupingEvidence(importRunId, evidence, { version: 1, savedCheckpoint, firstImportCutoffDate, orphanRange, checkpointPosition, ignoredGroupCount });
+  if (evidence.length > 0) {
+    const saved = await deps.repo.recordGroupingEvidence(importRunId, evidence, { version: 1, savedCheckpoint, firstImportCutoffDate, orphanRange, checkpointPosition, ignoredGroupCount, countedIgnoreMarkerIds });
     return { pendingGroups, orphanRange: saved.orphanRange, checkpointPosition: saved.checkpointPosition, ignoredGroupCount: saved.ignoredGroupCount, heldGroups };
   }
   return { pendingGroups, orphanRange, checkpointPosition, ignoredGroupCount, heldGroups };
