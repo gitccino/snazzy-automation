@@ -58,3 +58,23 @@ it('does not complete an empty scan while the original workflow is still running
   await expect(ImportWorkflow.prototype.run.call({env} as any,{instanceId:`import-verification-${runId}`,payload:{kind:'verification',importRunId:runId}} as any,step as any)).rejects.toThrow('import_origin_not_stopped');
   expect(await env.DB.prepare('SELECT status FROM import_runs WHERE id=?').bind(runId).first('status')).toBe('running');
 });
+
+it.each([
+  ['interrupted scan', '"incomplete"'],
+  ['legacy nonempty scan without grouping evidence', JSON.stringify([{applePhotoId:'photo', position:0, captureAt:null, mediaType:'image/jpeg'}])],
+])('holds %s instead of inferring an empty result', async (_name, scan) => {
+  const env = testEnv(), runId = crypto.randomUUID(), albumId = crypto.randomUUID();
+  const owner = crypto.randomUUID();
+  const contextJson = JSON.stringify({replyGroupId:owner});
+  await env.DB.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json,scan_evidence_json) VALUES(?,?,'line','running','now',?,?)").bind(runId, albumId, contextJson, scan).run();
+  await claimImportVerification(env.DB, {runId, albumId, workflowId:importWorkflowId(runId), groupId:owner, contextJson});
+  (env as any).IMPORT_WORKFLOW = {get: async () => ({status: async () => ({status:'errored'})})};
+  const step = {do: async (_name: string, callback: () => Promise<unknown>) => callback()};
+  const run = () => ImportWorkflow.prototype.run.call({env} as any, {instanceId:`import-verification-${runId}`, payload:{kind:'verification', importRunId:runId}} as any, step as any);
+  await run();
+  await run();
+  const claim = await env.DB.prepare('SELECT result_json FROM import_verification_claims WHERE import_run_id=?').bind(runId).first<{result_json:string}>();
+  expect(JSON.parse(claim!.result_json).outcome).toBe('unconfirmed');
+  expect(await env.DB.prepare('SELECT status FROM import_runs WHERE id=?').bind(runId).first('status')).toBe('running');
+  expect(await env.DB.prepare('SELECT count(*) AS count FROM line_result_outbox WHERE group_id=?').bind(owner).first('count')).toBe(1);
+});
