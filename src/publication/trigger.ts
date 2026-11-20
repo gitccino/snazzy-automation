@@ -131,8 +131,14 @@ export async function handleDocsTrigger(
               return { status: "checking", publicationRunId: run.airtableRunId };
           }
           if (claim.status === "claimed" && claim.originWorkflowId === originalId) {
-            await env.PUBLICATION_WORKFLOW.create({ id: claim.verifierId, params: { kind: "verification", publicationRunId: run.airtableRunId, generation: job.generation, notificationCycle: job.notificationCycle, groupId: trustedGroupId!, verifierId: claim.verifierId } });
-            return { status: "checking", publicationRunId: run.airtableRunId };
+            try {
+              await env.PUBLICATION_WORKFLOW.create({ id: claim.verifierId, params: { kind: "verification", publicationRunId: run.airtableRunId, generation: job.generation, notificationCycle: job.notificationCycle, groupId: trustedGroupId!, verifierId: claim.verifierId } });
+              return { status: "checking", publicationRunId: run.airtableRunId };
+            } catch {
+              const verifier = await lookupWorkflow(env, claim.verifierId);
+              if (verifier && activeStatuses.includes(verifier.state.status))
+                return { status: "checking", publicationRunId: run.airtableRunId };
+            }
           }
         }
       } catch {
