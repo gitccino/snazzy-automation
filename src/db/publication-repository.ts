@@ -769,3 +769,18 @@ export async function claimPublicationCleanupDispatch(
     RETURNING dispatch_verifier_id`).bind(verifierId,attempt.runId,attempt.generation,attempt.notificationCycle,attempt.groupId,verifierId).first();
   return !!row;
 }
+
+export async function recordPublicationCleanupReceipt(
+  db: D1Database,
+  receipt: {runId: string; generation: number; notificationCycle: number; groupId: string; verifierId: string; docId: string; acknowledged: boolean},
+): Promise<boolean> {
+  if (receipt.acknowledged !== true) return false;
+  const row = await db.prepare(`UPDATE publication_cleanup_intents AS i SET deletion_acknowledged=1
+    WHERE i.publication_run_id=? AND i.generation=? AND i.notification_cycle=? AND i.doc_id=? AND i.dispatch_verifier_id=?
+      AND EXISTS (SELECT 1 FROM publication_verification_claims c WHERE c.publication_run_id=i.publication_run_id
+        AND c.generation=i.generation AND c.notification_cycle=i.notification_cycle AND c.group_id=?
+        AND c.origin_workflow_id=i.origin_workflow_id AND c.context_json IS i.context_json)
+    RETURNING deletion_acknowledged`)
+    .bind(receipt.runId,receipt.generation,receipt.notificationCycle,receipt.docId,receipt.verifierId,receipt.groupId).first();
+  return !!row;
+}

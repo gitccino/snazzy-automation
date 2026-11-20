@@ -141,7 +141,7 @@ it('reads the saved cleanup ID using the captured folder and leaves the outcome 
   const runId = crypto.randomUUID(), groupId = crypto.randomUUID();
   const context = JSON.stringify({replyGroupId:groupId,settings:{config:{googleDriveFolderId:'folder'}}});
   await env.DB.prepare("INSERT INTO publication_jobs(publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,'generating','original','x','x',1,1,?)").bind(runId,context).run();
-  await env.DB.prepare("INSERT INTO publication_cleanup_intents VALUES (?,1,1,'original',?,'saved/id')").bind(runId,context).run();
+  await env.DB.prepare("INSERT INTO publication_cleanup_intents (publication_run_id,generation,notification_cycle,origin_workflow_id,context_json,doc_id) VALUES (?,1,1,'original',?,'saved/id')").bind(runId,context).run();
   const claim = await claimPublicationVerification(env.DB,{runId,generation:1,notificationCycle:1,groupId});
   if (claim.status !== 'claimed') throw new Error('missing claim');
   const fetchMock = vi.spyOn(globalThis,'fetch').mockImplementation(async (url,init) => {
