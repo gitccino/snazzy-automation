@@ -498,7 +498,7 @@ describe("handleDocsTrigger", () => {
     },
   );
 
-  it.each(["running", "unavailable", "missing", "unknown"])("reconciles a lost verifier create response with %s lookup", async (verifierStatus) => {
+  it.each(["running", "unavailable", "missing", "unknown", "complete", "paused"])("reconciles a lost verifier create response with %s lookup", async (verifierStatus) => {
     mockRun("Generating");
     const h = makeTriggerEnv("errored");
     const { captureOperationContext } = await import("../../src/settings/runtime");
@@ -522,6 +522,29 @@ describe("handleDocsTrigger", () => {
     expect(h.get).toHaveBeenLastCalledWith(saved!.verifier_id);
     expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, { ...context, replyGroupId: "other" })).toEqual({ status: "busy" });
     expect(h.create).toHaveBeenCalledTimes(1);
+    expect(h.restart).not.toHaveBeenCalled();
+    await h.env.DB.exec("DELETE FROM publication_verification_claims WHERE publication_run_id = 'rec-run-1'");
+  });
+
+  it.each(["errored", "terminated"])("renews a stopped verifier (%s) once and fences its late completion", async (stopped) => {
+    mockRun("Generating");
+    const h = makeTriggerEnv("errored");
+    const { captureOperationContext } = await import("../../src/settings/runtime");
+    const { savePublicationAttemptContext } = await import("../../src/db/execution-context-repository");
+    const { completePublicationVerification } = await import("../../src/db/publication-repository");
+    const context = { ...await captureOperationContext(h.env, null), replyGroupId: "owner" };
+    await acquireOrResumeJob(h.env.DB, clock, "rec-run-1", "publication-rec-run-1");
+    await savePublicationAttemptContext(h.env.DB, "rec-run-1", 1, context);
+    await handleDocsTrigger(h.env, "line", clock, undefined, fetch, context);
+    const oldId = h.create.mock.calls[0]![0].id;
+    h.get.mockImplementation(async (id: string) => ({ status: vi.fn().mockResolvedValue({ status: id === oldId ? stopped : id === "publication-rec-run-1" ? "errored" : "running" }) }));
+    const results = await Promise.all([1, 2].map(() => handleDocsTrigger(h.env, "line", clock, undefined, fetch, context)));
+    expect(results.some(result => result.status === "checking")).toBe(true);
+    expect(h.create).toHaveBeenCalledTimes(2);
+    const newId = h.create.mock.calls[1]![0].id;
+    expect(newId).not.toBe(oldId);
+    expect(h.create.mock.calls[1]![0].params).toMatchObject({ kind: "verification", verifierId: newId });
+    expect(await completePublicationVerification(h.env.DB, { runId: "rec-run-1", generation: 1, notificationCycle: 1, groupId: "owner" }, oldId)).toBe(false);
     expect(h.restart).not.toHaveBeenCalled();
     await h.env.DB.exec("DELETE FROM publication_verification_claims WHERE publication_run_id = 'rec-run-1'");
   });
