@@ -12,6 +12,7 @@ function triggerEnv() {
 
 describe("handleUploadTrigger", () => {
   beforeEach(async () => {
+    await testEnv().DB.prepare("DELETE FROM import_verification_claims WHERE import_run_id IN (SELECT id FROM import_runs WHERE source_album_id = ?)").bind("eaf00f6811d7e301eff601ca3dc1e8c72202e63e7ebc28df6270d639cb491058").run();
     await testEnv()
       .DB.prepare("DELETE FROM import_runs WHERE source_album_id = ?")
       .bind("eaf00f6811d7e301eff601ca3dc1e8c72202e63e7ebc28df6270d639cb491058")
@@ -152,12 +153,15 @@ describe("handleUploadTrigger", () => {
       const context = await captureOperationContext(env, "owner-group");
       const createBatch = vi.fn().mockResolvedValue([]);
       const get = vi.fn().mockResolvedValue({ status: async () => ({ status: state }) });
-      env.IMPORT_WORKFLOW = { createBatch, get } as unknown as typeof env.IMPORT_WORKFLOW;
+      const create = vi.fn().mockResolvedValue({});
+      env.IMPORT_WORKFLOW = { createBatch, get, create } as unknown as typeof env.IMPORT_WORKFLOW;
       await handleUploadTrigger(env, "line", "original", context, "event-original");
       const response = await handleUploadTrigger(env, "line", "fresh", context, "event-fresh");
       expect(await response.json()).toEqual(state === "running" ? { status: "already_running" } : { status: "owner_review", importRunId: "original" });
       expect(get).toHaveBeenCalledWith("import-original");
       expect(createBatch).toHaveBeenCalledTimes(1);
+      if (state === 'errored') expect(create).toHaveBeenCalledWith({id:'import-verification-original', params:{kind:'verification', importRunId:'original'}});
+      else expect(create).not.toHaveBeenCalled();
     },
   );
   it.each(["completed", "completed_with_failures"] as const)("observes %s finalization during workflow lookup", async (status) => {

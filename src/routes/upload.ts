@@ -3,7 +3,7 @@ import { saveImportContextIfAbsent, parseContext } from "../db/execution-context
 import type { OperationContext } from "../settings/schema";
 import { OperationalError } from "../shared/errors";
 import type { Env } from "../env";
-import { createImportRepository } from "../db/import-repository";
+import { createImportRepository, claimImportVerification } from "../db/import-repository";
 import { createSequenceRepository } from "../db/sequence-repository";
 import { deriveSourceAlbumId } from "../icloud/client";
 import type { ImportWorkflowParams } from "../import/types";
@@ -93,8 +93,10 @@ async function startImport(
           try { ownerGroup = parseContext(owner.settings_context_json)?.replyGroupId ?? null; } catch { /* Unreadable ownership is not evidence of ownership. */ }
           if (ownerGroup === context.replyGroupId) {
             let live = false;
+            let stopped = false;
             try {
               const status = (await (await env.IMPORT_WORKFLOW.get(importWorkflowId(owner.id))).status()).status;
+              stopped = ["complete", "errored", "terminated"].includes(status);
               live = status === "queued" || status === "running" || status === "waiting" || status === "waitingForPause";
             } catch { /* A failed lookup does not prove the job is live. */ }
             const terminal = await env.DB.prepare(`SELECT r.status FROM import_runs r
@@ -112,6 +114,15 @@ async function startImport(
               .bind(JSON.stringify(["import", owner.id, 1, 1, "terminal"]), context.replyGroupId, owner.id, sourceAlbumId, context.replyGroupId)
               .first<{ status: "completed" | "completed_with_failures" }>();
             if (terminal) return Response.json({ status: terminal.status === "completed" ? "completed" : "partial", importRunId: owner.id }, { status: 409 });
+            if (stopped && owner.settings_context_json) {
+              const workflowId = importWorkflowId(owner.id), verifierId = `import-verification-${owner.id}`;
+              const claimed = await claimImportVerification(env.DB, {runId:owner.id, albumId:sourceAlbumId, workflowId, groupId:context.replyGroupId, contextJson:owner.settings_context_json});
+              const pending = claimed || !!await env.DB.prepare(`SELECT 1 FROM import_verification_claims WHERE import_run_id=? AND source_album_id=? AND origin_workflow_id=? AND group_id=? AND context_json=? AND verifier_id=? AND completed IS NULL`)
+                .bind(owner.id, sourceAlbumId, workflowId, context.replyGroupId, owner.settings_context_json, verifierId).first();
+              if (pending) {
+                try { await env.IMPORT_WORKFLOW.create({id:verifierId, params:{kind:'verification', importRunId:owner.id}}); } catch { /* A later request retries the deterministic verifier ID. */ }
+              }
+            }
             if (!live) return Response.json({ status: "owner_review", importRunId: owner.id }, { status: 409 });
             return Response.json({ status: "already_running" }, { status: 409 });
           }

@@ -8,7 +8,7 @@ import {
 import { NonRetryableError } from "cloudflare:workflows";
 import { resolveImportContext } from "../settings/runtime";
 import { createAuditLog } from "../db/audit";
-import { createImportRepository, readImportVerificationEvidence } from "../db/import-repository";
+import { createImportRepository, readImportVerificationEvidence, completeImportVerification } from "../db/import-repository";
 import { createSequenceRepository } from "../db/sequence-repository";
 import type { Env } from "../env";
 import { createICloudClient } from "../icloud/client";
@@ -211,8 +211,13 @@ export class ImportWorkflow extends WorkflowEntrypoint<
         const claim = await this.env.DB.prepare("SELECT origin_workflow_id, group_id, source_album_id, context_json FROM import_verification_claims WHERE import_run_id=? AND verifier_id=?")
           .bind(runId, event.instanceId).first<{origin_workflow_id: string; group_id: string; source_album_id: string; context_json: string}>();
         if (!claim) return null;
+        const status = (await (await this.env.IMPORT_WORKFLOW.get(claim.origin_workflow_id)).status()).status;
+        if (!['complete', 'errored', 'terminated'].includes(status)) throw new Error('import_origin_not_stopped');
         const result = await readImportVerificationEvidence(this.env.DB, runId, claim.origin_workflow_id, claim.group_id);
-        return result && result.sourceAlbumId === claim.source_album_id && result.contextJson === claim.context_json ? result : null;
+        if (!result || result.sourceAlbumId !== claim.source_album_id || result.contextJson !== claim.context_json) return null;
+        await completeImportVerification(this.env.DB, {runId, albumId:claim.source_album_id, workflowId:claim.origin_workflow_id, groupId:claim.group_id, contextJson:claim.context_json}, event.instanceId,
+          {schemaVersion:1, kind:'import', runId, generation:1, notificationCycle:1, outcome:'unconfirmed', messages:[{type:'text', text:`⚠️ ยังยืนยันผลการนำเข้าไม่ได้ กรุณาตรวจสอบงานเดิมก่อนส่ง /upload ซ้ำ\n${runId}`}]});
+        return result;
       });
       return { kind: "verification", evidence };
     }
