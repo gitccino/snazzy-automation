@@ -449,3 +449,16 @@ export async function readImportVerificationEvidence(db: D1Database, runId: stri
   } catch { return null; }
   return { sourceAlbumId: row.source_album_id, contextJson: row.settings_context_json, scan, groups: { pending: row.pending, importing: row.importing, succeeded: row.succeeded, failed: row.failed } };
 }
+
+/** Admit one verifier only while the captured LINE run owns the album lock. */
+export async function claimImportVerification(db: D1Database, input: { runId: string; albumId: string; workflowId: string; groupId: string; contextJson: string }): Promise<boolean> {
+  const result = await db.prepare(`INSERT INTO import_verification_claims
+    (import_run_id, source_album_id, origin_workflow_id, group_id, context_json, verifier_id)
+    SELECT id, source_album_id, ?, ?, settings_context_json, ? FROM import_runs
+    WHERE id=? AND source_album_id=? AND trigger='line' AND status='running'
+      AND ? = 'import-' || id AND settings_context_json=?
+      AND json_valid(settings_context_json) AND json_extract(settings_context_json, '$.replyGroupId')=?
+    ON CONFLICT DO NOTHING`)
+    .bind(input.workflowId, input.groupId, `import-verification-${input.runId}`, input.runId, input.albumId, input.workflowId, input.contextJson, input.groupId).run();
+  return result.meta.changes === 1;
+}
