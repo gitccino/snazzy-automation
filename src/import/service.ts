@@ -455,6 +455,7 @@ export async function finalizeImportRun(
   hadFailures: boolean,
   orphanPhotoCount: number,
   checkpointPosition: number,
+  lineResult?: Parameters<ImportRepository["finalizeImportRun"]>[0]["lineResult"],
 ): Promise<void> {
   await repo.finalizeImportRun({
     id: importRunId,
@@ -462,5 +463,6 @@ export async function finalizeImportRun(
     status: hadFailures ? "completed_with_failures" : "completed",
     orphanPhotoCount,
     checkpointPosition,
+    lineResult,
   });
 }

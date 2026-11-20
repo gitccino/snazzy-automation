@@ -61,6 +61,8 @@ interface ImportWorkflowOperations {
     hadFailures: boolean,
     orphanPhotoCount: number,
     checkpointPosition: number,
+    result: ImportRunResult,
+    orphanRange: DownloadAndGroupOutcome["orphanRange"],
   ): Promise<void>;
   notify(
     result: ImportRunResult,
@@ -181,6 +183,8 @@ export async function runImportWorkflow(
       failedGroups.length > 0,
       orphanRange?.count ?? 0,
       checkpointPosition,
+      result,
+      orphanRange,
     ),
   );
   } catch(error) {
@@ -269,6 +273,11 @@ export class ImportWorkflow extends WorkflowEntrypoint<
       if(!context.replyGroupId)return;
       await outbox.enqueueResult({groupId:context.replyGroupId,resultKey:JSON.stringify(['import',event.payload.importRunId,1,1,'terminal']),result:{schemaVersion:1,kind:'import',runId:event.payload.importRunId,generation:1,notificationCycle:1,outcome,messages}});
     };
+    const resultKey = JSON.stringify(['import',event.payload.importRunId,1,1,'terminal']);
+    const summaryResult = (result: ImportRunResult, orphanRange: DownloadAndGroupOutcome['orphanRange']): import('../line/reply-types').TerminalResultV1 => {
+      const input = { result, orphanRange, nowThaiText: notificationDate };
+      return { schemaVersion: 1, kind: 'import', runId: event.payload.importRunId, generation: 1, notificationCycle: 1, outcome: result.failedGroups.length ? 'partial' : 'success', messages: [{ type: 'flex', altText: buildImportSummaryMessage(input).slice(0,1500).replace(/[\uD800-\uDBFF]$/, ''), contents: buildImportSummaryCard(input, config.publicBaseUrl) }] };
+    };
     return runImportWorkflow(
       deps,
       event.payload,
@@ -285,7 +294,7 @@ export class ImportWorkflow extends WorkflowEntrypoint<
           }),
         processGroupAttempt: processProductGroupAttempt,
         recordExhaustedFailure: recordExhaustedGroupFailure,
-        finalize: (hadFailures, orphanPhotoCount, checkpointPosition) =>
+        finalize: (hadFailures, orphanPhotoCount, checkpointPosition, result, orphanRange) =>
           finalizeImportRun(
             repo,
             event.payload.importRunId,
@@ -293,12 +302,18 @@ export class ImportWorkflow extends WorkflowEntrypoint<
             hadFailures,
             orphanPhotoCount,
             checkpointPosition,
+            context.replyGroupId ? { groupId: context.replyGroupId, result: summaryResult(result, orphanRange) } : undefined,
           ),
         notify: async (result, orphanRange) => {
-          const input={result,orphanRange,nowThaiText:notificationDate};
-          await enqueue(result.failedGroups.length?'partial':'success',[{type:'flex',altText:buildImportSummaryMessage(input).slice(0,1500).replace(/[\uD800-\uDBFF]$/,''),contents:buildImportSummaryCard(input,config.publicBaseUrl)}]);
+          if (!context.replyGroupId) return;
+          // Replays of the old finalization step still need to persist their summary.
+          const existing = await this.env.DB.prepare('SELECT 1 FROM line_result_outbox WHERE result_key=?').bind(resultKey).first();
+          if (!existing) await outbox.enqueueResult({ groupId: context.replyGroupId, resultKey, result: summaryResult(result, orphanRange) });
         },
-        notifyFailure: async outcome=>enqueue(outcome,[{type:'text',text:`⚠️ ยังยืนยันผลการนำเข้าสินค้าไม่ได้ กรุณาตรวจสอบก่อนส่ง /upload ซ้ำ\n${event.payload.importRunId}`}]),
+        notifyFailure: async outcome => {
+          const committed = await this.env.DB.prepare("SELECT 1 FROM import_runs WHERE id=? AND status IN ('completed','completed_with_failures')").bind(event.payload.importRunId).first();
+          if (!committed) await enqueue(outcome,[{type:'text',text:`⚠️ ยังยืนยันผลการนำเข้าสินค้าไม่ได้ กรุณาตรวจสอบก่อนส่ง /upload ซ้ำ\n${event.payload.importRunId}`}]);
+        },
       },
     );
   }

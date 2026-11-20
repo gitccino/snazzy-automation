@@ -302,7 +302,7 @@ describe("runImportWorkflow", () => {
       },
       attempts: 2,
     });
-    expect(finalize).toHaveBeenCalledWith(false, 2, 10);
+    expect(finalize).toHaveBeenCalledWith(false, 2, 10, result, expect.objectContaining({ count: 2 }));
     expect(notify).toHaveBeenCalledWith(result, {
       firstApplePhotoId: "orphan-1",
       lastApplePhotoId: "orphan-2",
@@ -409,7 +409,7 @@ describe("runImportWorkflow", () => {
       "notify",
     ]);
     expect(result).toEqual(expectedResult);
-    expect(finalize).toHaveBeenCalledWith(true, 0, 10);
+    expect(finalize).toHaveBeenCalledWith(true, 0, 10, expectedResult, null);
     expect(notify).toHaveBeenCalledWith(expectedResult, null);
   });
 
@@ -478,7 +478,7 @@ describe("ignore sections workflow outcomes", () => {
     expect(result.succeededProductIds).toEqual(mixed ? ["A-501"] : []);
     expect(result.failedGroups).toEqual(mixed ? [{ groupId: "row-incomplete", productId: null, errorCode: "insufficient_product_photos" }] : []);
     expect(result.ignoredGroupCount).toBe(2);
-    expect(finalize).toHaveBeenCalledWith(mixed, 0, 12);
+    expect(finalize).toHaveBeenCalledWith(mixed, 0, 12, result, null);
     expect(notify).toHaveBeenCalledWith(result, null);
     if (mixed) expect(step.calls.find(c => c.name === "process-group-row-incomplete")?.attempts).toBe(1);
     else expect(process).not.toHaveBeenCalled();
