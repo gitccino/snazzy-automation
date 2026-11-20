@@ -8,7 +8,7 @@ import {
 import { NonRetryableError } from "cloudflare:workflows";
 import { resolveImportContext } from "../settings/runtime";
 import { createAuditLog } from "../db/audit";
-import { createImportRepository, readImportVerificationEvidence, completeImportVerification } from "../db/import-repository";
+import { createImportRepository, readImportVerificationEvidence, readImportVerificationCandidates, completeImportVerification } from "../db/import-repository";
 import { createSequenceRepository } from "../db/sequence-repository";
 import type { Env } from "../env";
 import { createICloudClient } from "../icloud/client";
@@ -204,7 +204,7 @@ export class ImportWorkflow extends WorkflowEntrypoint<
   async run(
     event: WorkflowEvent<ImportWorkflowPayload>,
     step: WorkflowStep,
-  ): Promise<ImportRunResult | { kind: "verification"; evidence: Awaited<ReturnType<typeof readImportVerificationEvidence>> }> {
+  ): Promise<ImportRunResult | { kind: "verification"; evidence: (NonNullable<Awaited<ReturnType<typeof readImportVerificationEvidence>>> & { candidates: Awaited<ReturnType<typeof readImportVerificationCandidates>> }) | null }> {
     if ("kind" in event.payload) {
       const runId = event.payload.importRunId;
       const evidence = await step.do("read-import-verification-evidence", async () => {
@@ -215,9 +215,10 @@ export class ImportWorkflow extends WorkflowEntrypoint<
         if (!['complete', 'errored', 'terminated'].includes(status)) throw new Error('import_origin_not_stopped');
         const result = await readImportVerificationEvidence(this.env.DB, runId, claim.origin_workflow_id, claim.group_id);
         if (!result || result.sourceAlbumId !== claim.source_album_id || result.contextJson !== claim.context_json) return null;
+        const candidates = await readImportVerificationCandidates(this.env.DB, runId, event.instanceId);
         await completeImportVerification(this.env.DB, {runId, albumId:claim.source_album_id, workflowId:claim.origin_workflow_id, groupId:claim.group_id, contextJson:claim.context_json}, event.instanceId,
           {schemaVersion:1, kind:'import', runId, generation:1, notificationCycle:1, outcome:'unconfirmed', messages:[{type:'text', text:`⚠️ ยังยืนยันผลการนำเข้าไม่ได้ กรุณาตรวจสอบงานเดิมก่อนส่ง /upload ซ้ำ\n${runId}`}]});
-        return result;
+        return { ...result, candidates };
       });
       return { kind: "verification", evidence };
     }
