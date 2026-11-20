@@ -1,11 +1,12 @@
 import { expect, it } from 'vitest';
+import { importWorkflowId } from '../../src/shared/ids';
 import { testEnv } from '../helpers/env';
-import { readImportVerificationEvidence } from '../../src/db/import-repository';
+import { claimImportVerification, readImportVerificationEvidence } from '../../src/db/import-repository';
 
 it('reads only owned running import evidence and distinguishes incomplete from empty scans', async () => {
   const db = testEnv().DB, id = crypto.randomUUID(), album = crypto.randomUUID();
   await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json,scan_evidence_json) VALUES(?,?,'line','running','now',?,?)").bind(id,album,JSON.stringify({replyGroupId:'owner'}), '"incomplete"').run();
-  const read = (group = 'owner', workflow = id) => readImportVerificationEvidence(db, id, workflow, group);
+  const read = (group = 'owner', workflow = importWorkflowId(id)) => readImportVerificationEvidence(db, id, workflow, group);
   expect(await read()).toMatchObject({scan: 'incomplete', groups: {pending: 0, importing: 0, succeeded: 0, failed: 0}});
   expect(await read('foreign')).toBeNull();
   expect(await read('owner', 'other')).toBeNull();
@@ -16,5 +17,22 @@ it('reads only owned running import evidence and distinguishes incomplete from e
   await db.prepare("INSERT INTO product_groups(id,import_run_id,ordinal,group_hash,state,first_photo_id,last_photo_id,created_at,updated_at) VALUES(?,?,0,?,'failed','a','b','now','now')").bind(crypto.randomUUID(),id,crypto.randomUUID()).run();
   expect(await read()).toMatchObject({groups: {failed: 1}});
   await db.prepare("UPDATE import_runs SET status='start_failed' WHERE id=?").bind(id).run();
+  expect(await read()).toBeNull();
+});
+
+
+it('reads the persisted claim identity and rejects foreign or stale owners', async () => {
+  const db = testEnv().DB, runId = `import-${crypto.randomUUID()}`, albumId = crypto.randomUUID();
+  const contextJson = JSON.stringify({replyGroupId:'owner'});
+  await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json,scan_evidence_json) VALUES(?,?,'line','running','now',?,'[]')").bind(runId, albumId, contextJson).run();
+  expect(await claimImportVerification(db, {runId, albumId, workflowId:importWorkflowId(runId), groupId:'owner', contextJson})).toBe(true);
+  const claim = await db.prepare('SELECT import_run_id, origin_workflow_id, group_id FROM import_verification_claims WHERE import_run_id=?').bind(runId).first<{import_run_id:string; origin_workflow_id:string; group_id:string}>();
+  expect(claim).not.toBeNull();
+  const read = (workflowId = claim!.origin_workflow_id, groupId = claim!.group_id) => readImportVerificationEvidence(db, claim!.import_run_id, workflowId, groupId);
+  expect(await read()).toMatchObject({sourceAlbumId:albumId, scan:'complete'});
+  expect(await read(runId)).toBeNull();
+  expect(await read(importWorkflowId(crypto.randomUUID()))).toBeNull();
+  expect(await read(undefined, 'foreign')).toBeNull();
+  await db.prepare("UPDATE import_runs SET status='start_failed' WHERE id=?").bind(runId).run();
   expect(await read()).toBeNull();
 });

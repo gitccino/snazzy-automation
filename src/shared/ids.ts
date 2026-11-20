@@ -11,3 +11,5 @@ export async function sha256Hex(data: ArrayBuffer | Uint8Array): Promise<string>
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
 }
+
+export const importWorkflowId = (runId: string): string => `import-${runId}`;

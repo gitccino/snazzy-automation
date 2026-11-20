@@ -7,7 +7,7 @@ import { createImportRepository } from "../db/import-repository";
 import { createSequenceRepository } from "../db/sequence-repository";
 import { deriveSourceAlbumId } from "../icloud/client";
 import type { ImportWorkflowParams } from "../import/types";
-import { newCorrelationId } from "../shared/ids";
+import { importWorkflowId, newCorrelationId } from "../shared/ids";
 
 async function importWorkflowExists(env: Env, id: string): Promise<boolean> {
   try {
@@ -68,7 +68,7 @@ async function startImport(
   ) {
     return Response.json({ status: "started", importRunId }, { status: 202 });
   }
-  const workflowInstanceId = `import-${importRunId}`;
+  const workflowInstanceId = importWorkflowId(importRunId);
   if (existing?.status === "running" && await importWorkflowExists(env, workflowInstanceId)) {
     return Response.json({ status: "started", importRunId, workflowInstanceId }, { status: 202 });
   }
@@ -94,7 +94,7 @@ async function startImport(
           if (ownerGroup === context.replyGroupId) {
             let live = false;
             try {
-              const status = (await (await env.IMPORT_WORKFLOW.get(`import-${owner.id}`)).status()).status;
+              const status = (await (await env.IMPORT_WORKFLOW.get(importWorkflowId(owner.id))).status()).status;
               live = status === "queued" || status === "running" || status === "waiting" || status === "waitingForPause";
             } catch { /* A failed lookup does not prove the job is live. */ }
             const terminal = await env.DB.prepare(`SELECT r.status FROM import_runs r

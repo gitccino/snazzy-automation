@@ -1,3 +1,4 @@
+import { importWorkflowId } from "../shared/ids";
 import { validateReplyMessages } from "../line/client";
 import type { TerminalResultV1 } from "../line/reply-types";
 import { z } from "zod";
@@ -430,7 +431,7 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
 
 /** Read recorded evidence only while the original LINE run still owns its album. */
 export async function readImportVerificationEvidence(db: D1Database, runId: string, workflowId: string, groupId: string) {
-  if (!runId || !groupId || runId !== workflowId) return null;
+  if (!runId || !groupId || importWorkflowId(runId) !== workflowId) return null;
   const row = await db.prepare(`SELECT r.source_album_id, r.settings_context_json, r.scan_evidence_json,
     (SELECT count(*) FROM product_groups WHERE import_run_id=r.id AND state='pending') AS pending,
     (SELECT count(*) FROM product_groups WHERE import_run_id=r.id AND state='importing') AS importing,
@@ -452,13 +453,14 @@ export async function readImportVerificationEvidence(db: D1Database, runId: stri
 
 /** Admit one verifier only while the captured LINE run owns the album lock. */
 export async function claimImportVerification(db: D1Database, input: { runId: string; albumId: string; workflowId: string; groupId: string; contextJson: string }): Promise<boolean> {
+  if (!input.runId || input.workflowId !== importWorkflowId(input.runId)) return false;
   const result = await db.prepare(`INSERT INTO import_verification_claims
     (import_run_id, source_album_id, origin_workflow_id, group_id, context_json, verifier_id)
     SELECT id, source_album_id, ?, ?, settings_context_json, ? FROM import_runs
     WHERE id=? AND source_album_id=? AND trigger='line' AND status='running'
-      AND ? = 'import-' || id AND settings_context_json=?
+      AND settings_context_json=?
       AND json_valid(settings_context_json) AND json_extract(settings_context_json, '$.replyGroupId')=?
     ON CONFLICT DO NOTHING`)
-    .bind(input.workflowId, input.groupId, `import-verification-${input.runId}`, input.runId, input.albumId, input.workflowId, input.contextJson, input.groupId).run();
+    .bind(input.workflowId, input.groupId, `import-verification-${input.runId}`, input.runId, input.albumId, input.contextJson, input.groupId).run();
   return result.meta.changes === 1;
 }
