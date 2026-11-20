@@ -1,6 +1,6 @@
 import { NonRetryableError } from "cloudflare:workflows";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { testEnv } from "../helpers/env";
+import { createTestEnv, testEnv } from "../helpers/env";
 import { fixedClock, sequentialIdGenerator } from "../helpers/fakes";
 import {
   MutableBatchSource,
@@ -9,7 +9,7 @@ import {
   type BatchPhotoSpec,
 } from "../helpers/import-fixtures";
 import { createAuditLog } from "../../src/db/audit";
-import { createImportRepository } from "../../src/db/import-repository";
+import { claimImportVerification, createImportRepository } from "../../src/db/import-repository";
 import { createSequenceRepository } from "../../src/db/sequence-repository";
 import type {
   AirtableProductPayload,
@@ -25,7 +25,11 @@ import {
   type ProcessGroupDeps,
 } from "../../src/import/service";
 import type { ImportRunResult, ImportWorkflowParams } from "../../src/import/types";
-import { runImportWorkflow } from "../../src/import/workflow";
+import { ImportWorkflow, runImportWorkflow } from "../../src/import/workflow";
+import { handleUploadTrigger } from "../../src/routes/upload";
+import { deriveSourceAlbumId } from "../../src/icloud/client";
+import { importWorkflowId } from "../../src/shared/ids";
+import { captureOperationContext } from "../../src/settings/runtime";
 import { OperationalError } from "../../src/shared/errors";
 
 function retryingStep() {
@@ -74,6 +78,7 @@ interface Harness {
     runId: string,
     trigger: ImportWorkflowParams["trigger"],
   ): Promise<ImportRunResult>;
+  runPayload(payload: ImportWorkflowParams): Promise<ImportRunResult>;
   resumeRun(
     runId: string,
     trigger: ImportWorkflowParams["trigger"],
@@ -183,8 +188,9 @@ async function buildHarness(
   async function resumeRun(
     runId: string,
     trigger: ImportWorkflowParams["trigger"],
+    capturedPayload?: ImportWorkflowParams,
   ): Promise<ImportRunResult> {
-    const payload: ImportWorkflowParams = {
+    const payload: ImportWorkflowParams = capturedPayload ?? {
       importRunId: runId,
       sourceAlbumId,
       trigger,
@@ -234,6 +240,7 @@ async function buildHarness(
       return resumeRun(runId, trigger);
     },
     resumeRun,
+    runPayload: (payload) => resumeRun(payload.importRunId, payload.trigger, payload),
   };
 }
 
@@ -269,6 +276,7 @@ describe("import acceptance", () => {
   beforeEach(async () => {
     const db = testEnv().DB;
     await db.batch([
+      db.prepare("DELETE FROM import_verification_claims"),
       db.prepare("DELETE FROM audit_events"),
       db.prepare("DELETE FROM airtable_create_claims"),
       db.prepare("DELETE FROM product_group_image_members"),
@@ -378,6 +386,43 @@ describe("import acceptance", () => {
     expect([...harness.created.values()].map((row) => row.productId)).toEqual(["A-501"]);
     expect(harness.source.downloads).toHaveLength(10);
     expect(await harness.deps.repo.getCheckpoint(harness.source.sourceAlbumId)).toBe(10);
+  });
+
+  it("verifies an ignored run before admitting a fresh LINE upload", async () => {
+    const env = { ...testEnv(), ...createTestEnv() };
+    const album = await deriveSourceAlbumId(env.ICLOUD_SHARED_ALBUM_TOKEN);
+    const old = [{ id: "old-ignore", markerKind: "ignore_start" as const }, { id: "old-photo" }];
+    const harness = await buildHarness(album, old, { idPrefix: "verified-ignore" });
+    const db = env.DB, runId = crypto.randomUUID(), owner = "CtestGroup";
+    const context = await captureOperationContext(env, owner);
+    const contextJson = JSON.stringify(context);
+    const scan = old.map((photo, i) => ({ applePhotoId: photo.id, position: i + 1, captureAt: null, mediaType: "image/jpeg" }));
+    const facts = { version: 1, savedCheckpoint: null, firstImportCutoffDate: null, ignoredGroupCount: 1, orphanRange: null, checkpointPosition: 2 };
+    await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json,scan_evidence_json,grouping_evidence_json) VALUES(?,?,'line','running','now',?,?,?)").bind(runId, album, contextJson, JSON.stringify(scan), JSON.stringify(facts)).run();
+    for (const [i, photo] of old.entries()) await db.prepare("INSERT INTO photo_assets(id,source_album_id,apple_photo_id,content_hash,position,is_marker,marker_kind,import_run_id,created_at) VALUES(?,?,?,?,?,0,?,?,'now')").bind(crypto.randomUUID(), album, photo.id, crypto.randomUUID(), i + 1, i === 0 ? 'ignore_start' : 'none', runId).run();
+    expect(await claimImportVerification(db, { runId, albumId: album, workflowId: importWorkflowId(runId), groupId: owner, contextJson })).toBe(true);
+    let captured: ImportWorkflowParams | undefined;
+    env.IMPORT_WORKFLOW = { get: async () => ({ status: async () => ({ status: "errored" }) }), createBatch: async (batch: Array<{ params: ImportWorkflowParams }>) => { captured = batch[0]?.params; return []; } } as never;
+    const verify = () => ImportWorkflow.prototype.run.call({ env } as never, { instanceId: `import-verification-${runId}`, payload: { kind: "verification", importRunId: runId } } as never, retryingStep() as never);
+    await verify();
+    await verify();
+    const verified = await db.prepare("SELECT group_id,result_json FROM line_result_outbox WHERE group_id=?").bind(owner).all<{ group_id: string; result_json: string }>();
+    expect(verified.results).toHaveLength(1);
+    expect(JSON.parse(verified.results[0]!.result_json).messages[0].text).toContain("ข้ามสินค้าซ้ำ 1");
+    harness.source.setSpecs([...productGroupOf(9, 1), ...old]);
+    const response = await handleUploadTrigger(env, "line", "fresh-upload", context, "fresh-event");
+    expect(response.status).toBe(202);
+    expect(captured).toMatchObject({ importRunId: "fresh-upload", sourceAlbumId: album, replyGroupId: owner, trustedEventId: "fresh-event" });
+    const result = await harness.runPayload(captured!);
+    expect(result.succeededProductIds).toEqual(["A-501"]);
+    expect(result.ignoredGroupCount).toBe(1);
+    expect(result.failedGroups).toEqual([]);
+    expect([...harness.created.values()].map(row => row.productId)).toEqual(["A-501"]);
+    const group = await db.prepare("SELECT import_run_id,first_photo_id,last_photo_id FROM product_groups WHERE product_id=?").bind("A-501").first();
+    expect(group).toEqual({ import_run_id: "fresh-upload", first_photo_id: "g1-marker", last_photo_id: "g1-photo-8" });
+    await harness.runPayload(captured!);
+    expect(harness.created.size).toBe(1);
+    expect((await db.prepare("SELECT group_id FROM line_result_outbox WHERE group_id=?").bind(owner).all()).results).toHaveLength(1);
   });
 
   it("5. resumes the same durable run after interruption following download", async () => {
