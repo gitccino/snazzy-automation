@@ -261,6 +261,10 @@ export async function downloadAndGroupSnapshot(
     savedCheckpoint ?? -1,
   );
 
+  if (groups.length === 0 && evidence.length > 0) {
+    const saved = await deps.repo.recordGroupingEvidence(importRunId, evidence, { orphanRange, checkpointPosition, ignoredGroupCount });
+    return { pendingGroups, ...saved, heldGroups };
+  }
   return { pendingGroups, orphanRange, checkpointPosition, ignoredGroupCount, heldGroups };
 }
 

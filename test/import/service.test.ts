@@ -1709,6 +1709,16 @@ describe("ignore marker storage and minimum photos", () => {
     return { deps, runId, snapshot };
   }
 
+  it.each([
+    [["ignore", "extra"], { ignoredGroupCount: 1, orphanRange: null, checkpointPosition: 2 }],
+    [["extra"], { ignoredGroupCount: 0, orphanRange: { firstApplePhotoId: "extra", lastApplePhotoId: "extra", count: 1 }, checkpointPosition: 1 }],
+  ])("records no-group evidence for %s", async (ids, expected) => {
+    const { deps, runId } = await setup(ids as string[]);
+    await downloadAndGroupSnapshot(deps, runId);
+    const row = await testEnv().DB.prepare("SELECT grouping_evidence_json FROM import_runs WHERE id=?").bind(runId).first<{grouping_evidence_json:string}>();
+    expect(JSON.parse(row!.grouping_evidence_json)).toEqual(expected);
+  });
+
   it("counts nonempty new ignore groups once and excludes checkpointed groups", async () => {
     const { deps, runId, snapshot } = await setup(["ignore", "extra", "extra2"]);
     const first = await downloadAndGroupSnapshot(deps, runId);
