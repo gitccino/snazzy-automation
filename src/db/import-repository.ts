@@ -43,6 +43,7 @@ export interface ImportRepository {
   setAssetR2Key(sourceAlbumId: string, applePhotoId: string, r2Key: string): Promise<void>;
   recordPhotoAsset(input: Omit<PhotoAssetRow, "createdAt">): Promise<void>;
   findGroupByHash(groupHash: string): Promise<ProductGroupRow | null>;
+  findConfirmedOverlap(sourceAlbumId: string, groupHash: string, photoIds: string[]): Promise<boolean>;
   upsertPendingGroup(input: { id: string; importRunId: string; ordinal: number; groupHash: string; firstPhotoId: string; lastPhotoId: string; photos?: Array<{ applePhotoId: string; r2Key: string | null }> }): Promise<ProductGroupRow>;
   setGroupState(id: string, state: ProductGroupState, patch?: Partial<{ productId: string; airtableRecordId: string; failureReason: string | null; attemptCount: number }>): Promise<void>;
 }
@@ -295,6 +296,17 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
     async findGroupByHash(groupHash) {
       const row = await db.prepare(`SELECT * FROM product_groups WHERE group_hash = ? LIMIT 1`).bind(groupHash).first();
       return row === null ? null : toGroupRow(row as Record<string, unknown>);
+    },
+
+    async findConfirmedOverlap(sourceAlbumId, groupHash, photoIds) {
+      const row = await db.prepare(`SELECT 1 FROM product_groups g
+        JOIN import_runs r ON r.id = g.import_run_id
+        WHERE r.source_album_id = ? AND g.state = 'succeeded' AND g.group_hash <> ?
+          AND (g.first_photo_id IN (SELECT value FROM json_each(?)) OR g.last_photo_id IN (SELECT value FROM json_each(?)) OR EXISTS (
+            SELECT 1 FROM product_group_image_members m
+            WHERE m.group_id = g.id AND m.apple_photo_id IN (SELECT value FROM json_each(?))
+          )) LIMIT 1`).bind(sourceAlbumId, groupHash, JSON.stringify(photoIds), JSON.stringify(photoIds), JSON.stringify(photoIds)).first();
+      return row !== null;
     },
 
     async upsertPendingGroup(input) {

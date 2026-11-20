@@ -209,6 +209,7 @@ export async function downloadAndGroupSnapshot(
   const { groups, orphanPhotos } = groupByMarkers(groupingPhotos);
 
   const pendingGroups: PersistedGroup[] = [];
+  let membershipConflict = false;
   for (const group of groups) {
     const groupHash = await computeGroupHash(deps.sourceAlbumId, group.photos);
     const row = await deps.repo.upsertPendingGroup({
@@ -221,6 +222,11 @@ export async function downloadAndGroupSnapshot(
       photos: group.photos.map(photo => ({ applePhotoId: photo.applePhotoId, r2Key: photo.r2Key })),
     });
     if (row.state === "succeeded") {
+      continue;
+    }
+    if (await deps.repo.findConfirmedOverlap(deps.sourceAlbumId, groupHash, group.photos.map(photo => photo.applePhotoId))) {
+      await deps.repo.setGroupState(row.id, "failed", { failureReason: "confirmed_group_membership_changed" });
+      membershipConflict = true;
       continue;
     }
     pendingGroups.push({
@@ -237,6 +243,10 @@ export async function downloadAndGroupSnapshot(
           return { applePhotoId: photo.applePhotoId, r2Key: photo.r2Key };
         }),
     });
+  }
+
+  if (membershipConflict) {
+    throw new OperationalError("confirmed_group_membership_changed", `Confirmed group membership changed; owner review required for import ${importRunId}`, false);
   }
 
   const orphanRange: OrphanRange | null =

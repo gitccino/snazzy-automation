@@ -268,6 +268,7 @@ describe("import acceptance", () => {
     const db = testEnv().DB;
     await db.batch([
       db.prepare("DELETE FROM audit_events"),
+      db.prepare("DELETE FROM product_group_image_members"),
       db.prepare("DELETE FROM product_groups"),
       db.prepare("DELETE FROM photo_assets"),
       db.prepare("DELETE FROM import_checkpoints"),
@@ -378,6 +379,28 @@ describe("import acceptance", () => {
     expect(harness.source.downloads).toHaveLength(10);
     const run = await testEnv().DB.prepare("SELECT status FROM import_runs WHERE id = ?").bind("case-5-run-interrupted").first<{ status: string }>();
     expect(run).toEqual({ status: "completed" });
+  });
+
+  it("holds an inserted photo that changes a confirmed group's membership", async () => {
+    const original = productGroupOf(9, 1);
+    const sourceAlbumId = `album-${crypto.randomUUID()}`;
+    const harness = await buildHarness(sourceAlbumId, original, { idPrefix: "membership-insert" });
+    await harness.deps.repo.createImportRun({ id: "membership-original", sourceAlbumId, trigger: "cron" });
+    await downloadAndGroupSnapshot(harness.deps, "membership-original");
+    harness.source.setSpecs([...original.slice(0, 2), { id: "inserted-photo" }, ...original.slice(2), ...productGroupOf(9, 2)]);
+
+    await harness.resumeRun("membership-original", "cron");
+    expect(harness.created.size).toBe(1);
+    await expect(harness.startAndRun("membership-new", "line")).rejects.toThrow();
+    expect(harness.created.size).toBe(1);
+    expect(await harness.deps.repo.getCheckpoint(sourceAlbumId)).toBe(10);
+    expect(await groupStates("membership-new")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ product_id: null, state: "failed", failure_reason: "confirmed_group_membership_changed" }),
+      expect.objectContaining({ product_id: null, state: "pending" }),
+    ]));
+    harness.source.setSpecs([...original, ...productGroupOf(9, 2)]);
+    const resumed = await harness.startAndRun("membership-resolved", "line");
+    expect(resumed.succeededProductIds).toEqual(["A-502"]);
   });
 
   it("6. exhausted failure leaves successful sibling intact", async () => {
