@@ -48,7 +48,7 @@ export function groupByMarkers(photos: GroupingPhoto[]): GroupingResult {
 
 export async function computeGroupHash(
   sourceAlbumId: string,
-  photos: GroupingPhoto[],
+  photos: Pick<GroupingPhoto, 'applePhotoId'>[],
 ): Promise<string> {
   const payload = JSON.stringify([
     sourceAlbumId,

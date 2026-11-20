@@ -1,3 +1,4 @@
+import { computeGroupHash } from "../import/grouping";
 import { importWorkflowId } from "../shared/ids";
 import { validateReplyMessages } from "../line/client";
 import type { TerminalResultV1 } from "../line/reply-types";
@@ -449,6 +450,31 @@ export async function readImportVerificationEvidence(db: D1Database, runId: stri
     scan = parsed.data === 'incomplete' ? 'incomplete' : 'complete';
   } catch { return null; }
   return { sourceAlbumId: row.source_album_id, contextJson: row.settings_context_json, scan, groups: { pending: row.pending, importing: row.importing, succeeded: row.succeeded, failed: row.failed } };
+}
+
+/** Read only complete candidate identities belonging to the active verifier and captured target. */
+export async function readImportVerificationCandidates(db: D1Database, runId: string, verifierId: string) {
+  const rows = await db.prepare(`SELECT g.id, g.group_hash, g.product_id, g.airtable_record_id, r.source_album_id
+    FROM import_verification_claims v JOIN import_runs r ON r.id=v.import_run_id
+    JOIN product_groups g ON g.import_run_id=r.id
+    JOIN airtable_create_claims c ON c.group_id=g.id AND c.product_id=g.product_id
+      AND c.base_id=json_extract(v.context_json, '$.settings.config.airtableBaseId')
+      AND c.table_id=json_extract(v.context_json, '$.settings.config.airtableProductsTableId')
+    WHERE v.import_run_id=? AND v.verifier_id=? AND v.completed IS NULL
+      AND v.origin_workflow_id=? AND r.source_album_id=v.source_album_id AND r.status='running' AND r.trigger='line'
+      AND r.settings_context_json=v.context_json AND json_valid(v.context_json)
+      AND json_extract(v.context_json, '$.replyGroupId')=v.group_id
+      AND length(g.product_id)>0 AND length(g.airtable_record_id)>0`)
+    .bind(runId, verifierId, importWorkflowId(runId)).all<{id:string; group_hash:string; product_id:string; airtable_record_id:string; source_album_id:string}>();
+  const candidates = [];
+  for (const row of rows.results) {
+    const members = (await db.prepare(`SELECT ordinal, apple_photo_id, r2_key FROM product_group_image_members WHERE group_id=? ORDER BY ordinal`)
+      .bind(row.id).all<{ordinal:number; apple_photo_id:string; r2_key:string | null}>()).results;
+    if (!members.length || members.some((m, i) => m.ordinal !== i || !m.apple_photo_id || !m.r2_key)) continue;
+    if (await computeGroupHash(row.source_album_id, members.map(m => ({applePhotoId:m.apple_photo_id}))) !== row.group_hash) continue;
+    candidates.push({groupId:row.id, productId:row.product_id, recordId:row.airtable_record_id, members});
+  }
+  return candidates;
 }
 
 /** Admit one verifier only while the captured LINE run owns the album lock. */

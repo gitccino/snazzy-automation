@@ -36,3 +36,22 @@ it('reads the persisted claim identity and rejects foreign or stale owners', asy
   await db.prepare("UPDATE import_runs SET status='start_failed' WHERE id=?").bind(runId).run();
   expect(await read()).toBeNull();
 });
+
+it('admits only candidates with the original ordered membership and target', async () => {
+  const { readImportVerificationCandidates } = await import('../../src/db/import-repository');
+  const { computeGroupHash } = await import('../../src/import/grouping');
+  const db = testEnv().DB, runId = crypto.randomUUID(), album = crypto.randomUUID(), group = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:'owner', settings:{config:{airtableBaseId:'base', airtableProductsTableId:'table'}}});
+  await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json) VALUES(?,?,'line','running','now',?)").bind(runId,album,context).run();
+  await claimImportVerification(db, {runId, albumId:album, workflowId:importWorkflowId(runId), groupId:'owner', contextJson:context});
+  const verifier = `import-verification-${runId}`;
+  const hash = await computeGroupHash(album, [{applePhotoId:'a'}, {applePhotoId:'b'}]);
+  await db.prepare("INSERT INTO product_groups(id,import_run_id,ordinal,group_hash,state,product_id,airtable_record_id,first_photo_id,last_photo_id,created_at,updated_at) VALUES(?,?,0,?,'importing','A1','rec','a','b','now','now')").bind(group,runId,hash).run();
+  await db.prepare("INSERT INTO airtable_create_claims VALUES(?,'A1','base','table')").bind(group).run();
+  await db.prepare("INSERT INTO product_group_image_members VALUES(?,0,'a','key-a'),(?,1,'b','key-b')").bind(group,group).run();
+  expect(await readImportVerificationCandidates(db,runId,verifier)).toHaveLength(1);
+  expect(await readImportVerificationCandidates(db,runId,'foreign')).toHaveLength(0);
+  await db.prepare("DELETE FROM product_group_image_members WHERE group_id=?").bind(group).run();
+  await db.prepare("INSERT INTO product_group_image_members VALUES(?,0,'b','key-b'),(?,1,'a','key-a')").bind(group,group).run();
+  expect(await readImportVerificationCandidates(db,runId,verifier)).toHaveLength(0);
+});
