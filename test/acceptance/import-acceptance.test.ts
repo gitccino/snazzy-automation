@@ -391,16 +391,25 @@ describe("import acceptance", () => {
 
     await harness.resumeRun("membership-original", "cron");
     expect(harness.created.size).toBe(1);
-    await expect(harness.startAndRun("membership-new", "line")).rejects.toThrow();
-    expect(harness.created.size).toBe(1);
-    expect(await harness.deps.repo.getCheckpoint(sourceAlbumId)).toBe(10);
+    const result = await harness.startAndRun("membership-new", "line");
+    expect(result.succeededProductIds).toEqual(["A-502"]);
+    expect(result.failedGroups).toEqual([{ groupId: expect.any(String), productId: null, errorCode: "confirmed_group_membership_changed" }]);
+    expect(harness.created.size).toBe(2);
+    expect(await harness.deps.repo.getCheckpoint(sourceAlbumId)).toBe(21);
+    const summary = harness.push.mock.calls.at(-1)!;
+    expect(summary[1]).toContain(`อ้างอิง ${result.failedGroups[0]!.groupId}`);
+    expect(summary[1]).toContain("กรุณาให้เจ้าของตรวจสอบ");
+    expect(JSON.stringify(summary[2])).toContain(result.failedGroups[0]!.groupId);
     expect(await groupStates("membership-new")).toEqual(expect.arrayContaining([
       expect.objectContaining({ product_id: null, state: "failed", failure_reason: "confirmed_group_membership_changed" }),
-      expect.objectContaining({ product_id: null, state: "pending" }),
+      expect.objectContaining({ product_id: "A-502", state: "succeeded" }),
     ]));
-    harness.source.setSpecs([...original, ...productGroupOf(9, 2)]);
-    const resumed = await harness.startAndRun("membership-resolved", "line");
-    expect(resumed.succeededProductIds).toEqual(["A-502"]);
+    const replay = await harness.resumeRun("membership-new", "line");
+    expect(replay.failedGroups).toEqual(result.failedGroups);
+    expect(harness.created.size).toBe(2);
+    harness.source.setSpecs([...original, ...productGroupOf(9, 2), ...productGroupOf(9, 3)]);
+    const resolved = await harness.startAndRun("membership-resolved", "line");
+    expect(resolved.succeededProductIds).toEqual(["A-503"]);
   });
 
   it("6. exhausted failure leaves successful sibling intact", async () => {

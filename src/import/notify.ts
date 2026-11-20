@@ -8,6 +8,7 @@ export interface ImportSummaryInput {
 }
 
 function failureReason(errorCode: string): string {
+  if (errorCode === "confirmed_group_membership_changed") return "ภาพในกลุ่มที่ยืนยันแล้วเปลี่ยนไป กรุณาให้เจ้าของตรวจสอบ";
   if (errorCode === "airtable_rate_limited") return "Airtable จำกัดจำนวนคำขอชั่วคราว";
   if (errorCode === "airtable_verification_failed") return "ข้อมูลหรือภาพสินค้าใน Airtable ยังไม่ครบ";
   if (errorCode === "airtable_cleanup_failed") return "ต้องตรวจสอบข้อมูลที่บันทึกค้างไว้ใน Airtable";
@@ -31,10 +32,10 @@ export function buildImportSummaryMessage(input: ImportSummaryInput): string {
   if (result.failedGroups.length > 0) {
     lines.push(`ล้มเหลว ${result.failedGroups.length} รายการ`);
     for (const [index, failure] of result.failedGroups.entries()) {
-      const productLabel = failure.productId ?? `รายการที่ ${index + 1} (ยังไม่มีรหัสสินค้า)`;
+      const productLabel = failure.productId ?? (failure.errorCode === "confirmed_group_membership_changed" ? `อ้างอิง ${failure.groupId}` : `รายการที่ ${index + 1} (ยังไม่มีรหัสสินค้า)`);
       lines.push(`- ${productLabel}: ${failureReason(failure.errorCode)}`);
     }
-    lines.push("แก้ไขแล้วพิมพ์ /upload เพื่อลองใหม่");
+    if (result.failedGroups.some(failure => failure.errorCode !== "confirmed_group_membership_changed")) lines.push("แก้ไขแล้วพิมพ์ /upload เพื่อลองใหม่");
   }
 
   if (result.ignoredGroupCount) {
@@ -102,14 +103,14 @@ export function buildImportSummaryCard(input: ImportSummaryInput, publicBaseUrl:
         ...result.failedGroups.slice(0, 10).map((failure, index) => ({
           type: "box", layout: "vertical", spacing: "xs",
           contents: [
-            { ...text(failure.productId ?? `รายการที่ ${index + 1} (ยังไม่มีรหัสสินค้า)`), weight: "bold" },
+            { ...text(failure.productId ?? (failure.errorCode === "confirmed_group_membership_changed" ? `อ้างอิง ${failure.groupId}` : `รายการที่ ${index + 1} (ยังไม่มีรหัสสินค้า)`)), weight: "bold" },
             text(failureReason(failure.errorCode), "#949494", "xs"),
           ],
         })),
         ...(failed > 10 ? [text(`และอีก ${failed - 10} รายการที่ไม่สำเร็จ`, "#949494")] : []),
       ],
     });
-    contents.push({ ...text("ตรวจสอบรายการที่ไม่สำเร็จ แล้วพิมพ์ /upload เพื่อลองใหม่", "#949494", "xs"), margin: "xl" });
+    if (result.failedGroups.some(failure => failure.errorCode !== "confirmed_group_membership_changed")) contents.push({ ...text("ตรวจสอบรายการที่ไม่สำเร็จ แล้วพิมพ์ /upload เพื่อลองใหม่", "#949494", "xs"), margin: "xl" });
   }
   if (orphanRange) {
     contents.push({ ...text(`พบภาพ ${orphanRange.count} ภาพก่อนมาร์กเกอร์แรก\nเพิ่มมาร์กเกอร์ก่อนภาพสินค้า แล้วลอง /upload อีกครั้ง`, "#949494", "xs"), margin: "xl" });

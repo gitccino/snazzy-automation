@@ -39,6 +39,7 @@ export interface DownloadAndGroupOutcome {
   // Optional for workflow steps persisted before ignored counts were introduced.
   ignoredGroupCount?: number;
   pendingGroups: PersistedGroup[];
+  heldGroups?: Array<{ groupId: string; productId: null; errorCode: string }>;
   orphanRange: OrphanRange | null;
   checkpointPosition: number;
 }
@@ -209,7 +210,7 @@ export async function downloadAndGroupSnapshot(
   const { groups, orphanPhotos } = groupByMarkers(groupingPhotos);
 
   const pendingGroups: PersistedGroup[] = [];
-  let membershipConflict = false;
+  const heldGroups: NonNullable<DownloadAndGroupOutcome["heldGroups"]> = [];
   for (const group of groups) {
     const groupHash = await computeGroupHash(deps.sourceAlbumId, group.photos);
     const row = await deps.repo.upsertPendingGroup({
@@ -226,7 +227,7 @@ export async function downloadAndGroupSnapshot(
     }
     if (await deps.repo.findConfirmedOverlap(deps.sourceAlbumId, groupHash, group.photos.map(photo => photo.applePhotoId))) {
       await deps.repo.setGroupState(row.id, "failed", { failureReason: "confirmed_group_membership_changed" });
-      membershipConflict = true;
+      heldGroups.push({ groupId: row.id, productId: null, errorCode: "confirmed_group_membership_changed" });
       continue;
     }
     pendingGroups.push({
@@ -245,10 +246,6 @@ export async function downloadAndGroupSnapshot(
     });
   }
 
-  if (membershipConflict) {
-    throw new OperationalError("confirmed_group_membership_changed", `Confirmed group membership changed; owner review required for import ${importRunId}`, false);
-  }
-
   const orphanRange: OrphanRange | null =
     orphanPhotos.length === 0
       ? null
@@ -262,7 +259,7 @@ export async function downloadAndGroupSnapshot(
     savedCheckpoint ?? -1,
   );
 
-  return { pendingGroups, orphanRange, checkpointPosition, ignoredGroupCount };
+  return { pendingGroups, orphanRange, checkpointPosition, ignoredGroupCount, heldGroups };
 }
 
 export async function processProductGroupAttempt(

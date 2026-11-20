@@ -117,7 +117,7 @@ export async function runImportWorkflow(
   }
   const { pendingGroups, orphanRange, checkpointPosition } = downloadOutcome;
   const succeededProductIds: string[] = [];
-  const failedGroups: ImportRunResult["failedGroups"] = [];
+  const failedGroups: ImportRunResult["failedGroups"] = [...(downloadOutcome.heldGroups ?? [])];
 
   let result: ImportRunResult;
   try {
