@@ -110,6 +110,7 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
     loseFillResponse: false,
     batchFailureStatus: 0,
     publishFailure: false,
+    lookupFailure: "" as "" | "run" | "products",
     docUrl: null as string | null,
     generatedAt: null as string | null,
     errorSummary: null as string | null,
@@ -132,6 +133,7 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
       calls.push({ method: request.method, url: request.url, body });
       if (url.hostname === "api.airtable.com") {
         if (url.pathname.endsWith(`/tblRuns/${fixtureRunId}`)) {
+          if (request.method === "GET" && state.lookupFailure === "run") return new Response("unavailable", { status: 503 });
           if (request.method === "GET" && state.publishFailure && state.docUrl?.includes("temp-doc-2")) throw new Error("published state unavailable");
           if (request.method === "PATCH") {
             const fields = body.fields as { Status: PublicationRunStatus; "Error Summary"?: string | null; "Google Doc URL"?: string; "Generated At"?: string };
@@ -144,6 +146,7 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
           return Response.json(runRecord());
         }
         if (url.pathname.endsWith("/tblRuns")) return Response.json({ records: [runRecord()] });
+        if (url.pathname.endsWith("/tblProducts") && state.lookupFailure === "products") return new Response("unavailable", { status: 503 });
         if (url.pathname.endsWith("/tblProducts")) return Response.json({
           records: [...products].reverse().map(item => ({ id: item.airtableRecordId, fields: {
             "Product ID": item.productId,
@@ -317,6 +320,19 @@ describe("publication acceptance", () => {
     await expect(fixture.run(1)).rejects.toMatchObject({ name: "publication_generation_stale" });
     const rows = await env.DB.prepare("SELECT generation, successful_generation FROM publication_jobs WHERE publication_date='2026-09-02'").all();
     expect(rows.results).toEqual([{ generation: 3, successful_generation: 3 }]);
+  });
+
+  it.each(["run", "products"] as const)("reports an unavailable %s lookup as a provider failure, not missing fields", async lookup => {
+    const fixture = publicationFixture([{ ...product("A-1001"), description: "" }]);
+    fixture.state.lookupFailure = lookup;
+    await expect(fixture.run()).rejects.toThrow();
+    expect(await job()).toMatchObject({ state: "failed" });
+    expect(fixture.notify).toHaveBeenCalledOnce();
+    const [text, , outcome] = fixture.notify.mock.calls[0]!;
+    expect(outcome).toBe("failed");
+    expect(text).not.toContain("A-1001: Description");
+    expect(fixture.state.errorSummary).not.toContain("A-1001: Description");
+    expect(fixture.create).not.toHaveBeenCalled();
   });
 
   it("blocks the whole run for missing fields, restores Draft, and sends the complete Thai report", async () => {
