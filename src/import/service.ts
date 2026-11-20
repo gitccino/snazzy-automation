@@ -262,8 +262,8 @@ export async function downloadAndGroupSnapshot(
   );
 
   if (groups.length === 0 && evidence.length > 0) {
-    const saved = await deps.repo.recordGroupingEvidence(importRunId, evidence, { orphanRange, checkpointPosition, ignoredGroupCount });
-    return { pendingGroups, ...saved, heldGroups };
+    const saved = await deps.repo.recordGroupingEvidence(importRunId, evidence, { version: 1, savedCheckpoint, firstImportCutoffDate, orphanRange, checkpointPosition, ignoredGroupCount });
+    return { pendingGroups, orphanRange: saved.orphanRange, checkpointPosition: saved.checkpointPosition, ignoredGroupCount: saved.ignoredGroupCount, heldGroups };
   }
   return { pendingGroups, orphanRange, checkpointPosition, ignoredGroupCount, heldGroups };
 }

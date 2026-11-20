@@ -1716,7 +1716,25 @@ describe("ignore marker storage and minimum photos", () => {
     const { deps, runId } = await setup(ids as string[]);
     await downloadAndGroupSnapshot(deps, runId);
     const row = await testEnv().DB.prepare("SELECT grouping_evidence_json FROM import_runs WHERE id=?").bind(runId).first<{grouping_evidence_json:string}>();
-    expect(JSON.parse(row!.grouping_evidence_json)).toEqual(expected);
+    expect(JSON.parse(row!.grouping_evidence_json)).toEqual({ ...expected, version: 1, savedCheckpoint: null, firstImportCutoffDate: null });
+  });
+
+  it("records original inputs and full scan when cutoff filters photos, and keeps them on replay", async () => {
+    const { deps, runId, snapshot } = await setup(["extra", "extra2"]);
+    await testEnv().DB.prepare("INSERT INTO import_checkpoints (source_album_id, last_position, updated_at) VALUES (?, 1, ?)").bind(deps.sourceAlbumId, "now").run();
+    snapshot.photos[0]!.captureAt = "2026-01-01T00:00:00.000Z";
+    snapshot.photos[1]!.captureAt = "2026-10-01T00:00:00.000Z";
+    deps.firstImportCutoffDate = "2026-09-01T00:00:00.000Z";
+    const result = await downloadAndGroupSnapshot(deps, runId);
+    expect(result.orphanRange?.count).toBe(1);
+    expect(result).not.toHaveProperty("savedCheckpoint");
+    const read = async () => (await testEnv().DB.prepare("SELECT scan_evidence_json, grouping_evidence_json FROM import_runs WHERE id=?").bind(runId).first<{scan_evidence_json:string; grouping_evidence_json:string}>())!;
+    const first = await read();
+    expect(JSON.parse(first.scan_evidence_json)).toHaveLength(2);
+    expect(JSON.parse(first.grouping_evidence_json)).toMatchObject({version:1, savedCheckpoint:1, firstImportCutoffDate:deps.firstImportCutoffDate});
+    deps.firstImportCutoffDate = null;
+    await downloadAndGroupSnapshot(deps, runId);
+    expect((await read()).grouping_evidence_json).toBe(first.grouping_evidence_json);
   });
 
   it("counts nonempty new ignore groups once and excludes checkpointed groups", async () => {

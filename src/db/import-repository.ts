@@ -22,10 +22,11 @@ export interface ProductGroupRow {
 
 export type ScanPhoto = { applePhotoId: string; position: number; captureAt: string | null; mediaType: "image/jpeg" };
 
-export type GroupingEvidence = { ignoredGroupCount: number; orphanRange: OrphanRange | null; checkpointPosition: number };
+export type GroupingOutcome = { ignoredGroupCount: number; orphanRange: OrphanRange | null; checkpointPosition: number };
+export type GroupingEvidence = GroupingOutcome & ({ version: 1; savedCheckpoint: number | null; firstImportCutoffDate: string | null } | { version?: never });
 
 export interface ImportRepository {
-  recordGroupingEvidence(id: string, scan: ScanPhoto[], evidence: GroupingEvidence): Promise<GroupingEvidence>;
+  recordGroupingEvidence(id: string, scan: ScanPhoto[], evidence: GroupingOutcome & { version: 1; savedCheckpoint: number | null; firstImportCutoffDate: string | null }): Promise<GroupingEvidence>;
   claimImportScan(id: string): Promise<boolean>;
   getImportScan(id: string): Promise<ScanPhoto[] | "incomplete" | null>;
   completeImportScan(id: string, photos: ScanPhoto[]): Promise<void>;
