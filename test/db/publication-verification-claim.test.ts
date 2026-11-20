@@ -74,6 +74,20 @@ it('keeps absent recovery fenced to the owner and current attempt', async () => 
   expect(await completePublicationVerification(db, request, first.verifierId)).toBe(false);
 });
 
+it('holds renewal when the original workflow or captured context changes', async () => {
+  const runId = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:'owner', target:'original'});
+  await db.prepare("INSERT INTO publication_jobs (publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,'generating','workflow','x','x',2,3,?)").bind(runId, context).run();
+  const attempt = {runId, generation:2, notificationCycle:3, groupId:'owner'};
+  const claim = await claimPublicationVerification(db, attempt);
+  if (claim.status !== 'claimed') throw new Error('expected claim');
+  const observation = {verifierId:claim.verifierId, status:'interrupted'} as const;
+  await db.prepare('UPDATE publication_jobs SET correlation_id=? WHERE publication_run_id=?').bind('replacement', runId).run();
+  expect(await claimPublicationVerification(db, attempt, observation)).toEqual({status:'held'});
+  await db.prepare('UPDATE publication_jobs SET correlation_id=?, settings_context_json=? WHERE publication_run_id=?').bind('workflow', JSON.stringify({replyGroupId:'owner', target:'changed'}), runId).run();
+  expect(await claimPublicationVerification(db, attempt, observation)).toEqual({status:'held'});
+});
+
 it('queues the unconfirmed verification behind the original result for the next messages', async () => {
   const runId = crypto.randomUUID(), groupId = crypto.randomUUID();
   const context = JSON.stringify({replyGroupId:groupId});

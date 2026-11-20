@@ -570,7 +570,9 @@ export async function claimPublicationVerification(
     const row = await db.prepare(`UPDATE publication_verification_claims SET verifier_id=?
       WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND group_id=? AND verifier_id=? AND completed=0
         AND EXISTS (SELECT 1 FROM publication_jobs WHERE publication_run_id=? AND generation=? AND notification_cycle=?
-          AND json_extract(settings_context_json, '$.replyGroupId')=?)
+          AND json_extract(settings_context_json, '$.replyGroupId')=?
+          AND correlation_id=publication_verification_claims.origin_workflow_id
+          AND settings_context_json=publication_verification_claims.context_json)
       RETURNING origin_workflow_id, context_json`)
       .bind(verifierId, attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId, observation.verifierId,
         attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId)
