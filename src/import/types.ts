@@ -10,6 +10,8 @@ export interface ImportWorkflowParams {
   replyGroupId?: string;
 }
 
+export type ImportWorkflowPayload = ImportWorkflowParams | { kind: "verification"; importRunId: string };
+
 export type ProductGroupState =
   | "pending"
   | "importing"

@@ -16,7 +16,7 @@ export interface Env {
   LINE_MUTATION_FOLLOWUP_WORKFLOW: Workflow<
     import("./line/mutation-recovery").FollowupParams
   >;
-  IMPORT_WORKFLOW: Workflow<import("./import/types").ImportWorkflowParams>;
+  IMPORT_WORKFLOW: Workflow<import("./import/types").ImportWorkflowPayload>;
   PUBLICATION_WORKFLOW: Workflow<PublicationWorkflowParams>;
   AIRTABLE_TOKEN: string;
   GOOGLE_OAUTH_CLIENT_ID: string;

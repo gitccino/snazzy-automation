@@ -8,7 +8,7 @@ import {
 import { NonRetryableError } from "cloudflare:workflows";
 import { resolveImportContext } from "../settings/runtime";
 import { createAuditLog } from "../db/audit";
-import { createImportRepository } from "../db/import-repository";
+import { createImportRepository, readImportVerificationEvidence } from "../db/import-repository";
 import { createSequenceRepository } from "../db/sequence-repository";
 import type { Env } from "../env";
 import { createICloudClient } from "../icloud/client";
@@ -28,7 +28,7 @@ import {
   type PersistedGroup,
   type ProcessGroupDeps,
 } from "./service";
-import type { ImportRunResult, ImportWorkflowParams } from "./types";
+import type { ImportRunResult, ImportWorkflowParams, ImportWorkflowPayload } from "./types";
 
 interface WorkflowStepLike {
   do<T>(name: string, callback: () => Promise<T>): Promise<T>;
@@ -199,21 +199,33 @@ export async function runImportWorkflow(
 
 export class ImportWorkflow extends WorkflowEntrypoint<
   Env,
-  ImportWorkflowParams
+  ImportWorkflowPayload
 > {
   async run(
-    event: WorkflowEvent<ImportWorkflowParams>,
+    event: WorkflowEvent<ImportWorkflowPayload>,
     step: WorkflowStep,
-  ): Promise<ImportRunResult> {
+  ): Promise<ImportRunResult | { kind: "verification"; evidence: Awaited<ReturnType<typeof readImportVerificationEvidence>> }> {
+    if ("kind" in event.payload) {
+      const runId = event.payload.importRunId;
+      const evidence = await step.do("read-import-verification-evidence", async () => {
+        const claim = await this.env.DB.prepare("SELECT origin_workflow_id, group_id, source_album_id, context_json FROM import_verification_claims WHERE import_run_id=? AND verifier_id=?")
+          .bind(runId, event.instanceId).first<{origin_workflow_id: string; group_id: string; source_album_id: string; context_json: string}>();
+        if (!claim) return null;
+        const result = await readImportVerificationEvidence(this.env.DB, runId, claim.origin_workflow_id, claim.group_id);
+        return result && result.sourceAlbumId === claim.source_album_id && result.contextJson === claim.context_json ? result : null;
+      });
+      return { kind: "verification", evidence };
+    }
+    const payload = event.payload;
     let context;
     try {
       context = await step.do(
         "settings-context",
         { retries: { limit: 0, delay: "1 second" } },
-        () => resolveImportContext(this.env, event.payload),
+        () => resolveImportContext(this.env, payload),
       );
     } catch (error) {
-      const { trigger, trustedEventId, replyGroupId, importRunId } = event.payload;
+      const { trigger, trustedEventId, replyGroupId, importRunId } = payload;
       if (trigger === 'line' && trustedEventId && replyGroupId) {
         try {
           await step.do('setup-failure-notice', async () => {
@@ -252,7 +264,7 @@ export class ImportWorkflow extends WorkflowEntrypoint<
       ),
       clock,
       ids,
-      sourceAlbumId: event.payload.sourceAlbumId,
+      sourceAlbumId: payload.sourceAlbumId,
       firstImportCutoffDate: config.firstImportCutoffDate,
       sequences: createSequenceRepository(this.env.DB),
       audit: createAuditLog(this.env.DB, ids, clock),
@@ -271,25 +283,25 @@ export class ImportWorkflow extends WorkflowEntrypoint<
     const notificationDate=await step.do('terminal-display-date',()=>Promise.resolve(bangkokDateTimeThai(clock)));
     const enqueue=async(outcome:'success'|'partial'|'failed'|'unconfirmed',messages:import('../line/reply-types').LineReplyMessage[])=>{
       if(!context.replyGroupId)return;
-      await outbox.enqueueResult({groupId:context.replyGroupId,resultKey:JSON.stringify(['import',event.payload.importRunId,1,1,'terminal']),result:{schemaVersion:1,kind:'import',runId:event.payload.importRunId,generation:1,notificationCycle:1,outcome,messages}});
+      await outbox.enqueueResult({groupId:context.replyGroupId,resultKey:JSON.stringify(['import',payload.importRunId,1,1,'terminal']),result:{schemaVersion:1,kind:'import',runId:payload.importRunId,generation:1,notificationCycle:1,outcome,messages}});
     };
-    const resultKey = JSON.stringify(['import',event.payload.importRunId,1,1,'terminal']);
+    const resultKey = JSON.stringify(['import',payload.importRunId,1,1,'terminal']);
     const summaryResult = (result: ImportRunResult, orphanRange: DownloadAndGroupOutcome['orphanRange']): import('../line/reply-types').TerminalResultV1 => {
       const input = { result, orphanRange, nowThaiText: notificationDate };
-      return { schemaVersion: 1, kind: 'import', runId: event.payload.importRunId, generation: 1, notificationCycle: 1, outcome: result.failedGroups.length ? 'partial' : 'success', messages: [{ type: 'flex', altText: buildImportSummaryMessage(input).slice(0,1500).replace(/[\uD800-\uDBFF]$/, ''), contents: buildImportSummaryCard(input, config.publicBaseUrl) }] };
+      return { schemaVersion: 1, kind: 'import', runId: payload.importRunId, generation: 1, notificationCycle: 1, outcome: result.failedGroups.length ? 'partial' : 'success', messages: [{ type: 'flex', altText: buildImportSummaryMessage(input).slice(0,1500).replace(/[\uD800-\uDBFF]$/, ''), contents: buildImportSummaryCard(input, config.publicBaseUrl) }] };
     };
     return runImportWorkflow(
       deps,
-      event.payload,
+      payload,
       step as unknown as WorkflowStepLike,
       {
         retryLimit: config.importRetryLimit,
         downloadAndGroup: () =>
-          downloadAndGroupSnapshot(deps, event.payload.importRunId),
+          downloadAndGroupSnapshot(deps, payload.importRunId),
         recordRunFailure: (failureReason) =>
           repo.failImportRun({
-            id: event.payload.importRunId,
-            sourceAlbumId: event.payload.sourceAlbumId,
+            id: payload.importRunId,
+            sourceAlbumId: payload.sourceAlbumId,
             failureReason,
           }),
         processGroupAttempt: processProductGroupAttempt,
@@ -297,8 +309,8 @@ export class ImportWorkflow extends WorkflowEntrypoint<
         finalize: (hadFailures, orphanPhotoCount, checkpointPosition, result, orphanRange) =>
           finalizeImportRun(
             repo,
-            event.payload.importRunId,
-            event.payload.sourceAlbumId,
+            payload.importRunId,
+            payload.sourceAlbumId,
             hadFailures,
             orphanPhotoCount,
             checkpointPosition,
@@ -311,8 +323,8 @@ export class ImportWorkflow extends WorkflowEntrypoint<
           if (!existing) await outbox.enqueueResult({ groupId: context.replyGroupId, resultKey, result: summaryResult(result, orphanRange) });
         },
         notifyFailure: async outcome => {
-          const committed = await this.env.DB.prepare("SELECT 1 FROM import_runs WHERE id=? AND status IN ('completed','completed_with_failures')").bind(event.payload.importRunId).first();
-          if (!committed) await enqueue(outcome,[{type:'text',text:`⚠️ ยังยืนยันผลการนำเข้าสินค้าไม่ได้ กรุณาตรวจสอบก่อนส่ง /upload ซ้ำ\n${event.payload.importRunId}`}]);
+          const committed = await this.env.DB.prepare("SELECT 1 FROM import_runs WHERE id=? AND status IN ('completed','completed_with_failures')").bind(payload.importRunId).first();
+          if (!committed) await enqueue(outcome,[{type:'text',text:`⚠️ ยังยืนยันผลการนำเข้าสินค้าไม่ได้ กรุณาตรวจสอบก่อนส่ง /upload ซ้ำ\n${payload.importRunId}`}]);
         },
       },
     );
