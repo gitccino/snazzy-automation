@@ -55,3 +55,19 @@ it('admits only candidates with the original ordered membership and target', asy
   await db.prepare("INSERT INTO product_group_image_members VALUES(?,0,'b','key-b'),(?,1,'a','key-a')").bind(group,group).run();
   expect(await readImportVerificationCandidates(db,runId,verifier)).toHaveLength(0);
 });
+
+it('writes grouping evidence once only for the running run and its exact saved scan', async () => {
+  const { createImportRepository } = await import('../../src/db/import-repository');
+  const db = testEnv().DB, id = crypto.randomUUID();
+  const scan = [{applePhotoId:'a', position:0, captureAt:null, mediaType:'image/jpeg' as const}];
+  await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,scan_evidence_json) VALUES(?,'album','line','running','now',?)").bind(id,JSON.stringify(scan)).run();
+  const repo = createImportRepository(db, {next:()=>''}, {now:()=>new Date()});
+  const facts = {ignoredGroupCount:1, orphanRange:null, checkpointPosition:0};
+  await expect(repo.recordGroupingEvidence(id, [], facts)).rejects.toThrow();
+  await repo.recordGroupingEvidence(id, scan, facts);
+  await repo.recordGroupingEvidence(id, scan, {...facts, ignoredGroupCount:0});
+  const row = await db.prepare('SELECT grouping_evidence_json FROM import_runs WHERE id=?').bind(id).first<{grouping_evidence_json:string}>();
+  expect(JSON.parse(row!.grouping_evidence_json)).toEqual(facts);
+  await db.prepare("UPDATE import_runs SET status='completed' WHERE id=?").bind(id).run();
+  await expect(repo.recordGroupingEvidence(id, scan, facts)).rejects.toThrow();
+});

@@ -3,6 +3,7 @@ import { importWorkflowId } from "../shared/ids";
 import { validateReplyMessages } from "../line/client";
 import type { TerminalResultV1 } from "../line/reply-types";
 import { z } from "zod";
+import type { OrphanRange } from "../import/types";
 import type { MarkerKind } from "../import/marker";
 import type { Clock, IdGenerator } from "../env";
 
@@ -21,7 +22,10 @@ export interface ProductGroupRow {
 
 export type ScanPhoto = { applePhotoId: string; position: number; captureAt: string | null; mediaType: "image/jpeg" };
 
+export type GroupingEvidence = { ignoredGroupCount: number; orphanRange: OrphanRange | null; checkpointPosition: number };
+
 export interface ImportRepository {
+  recordGroupingEvidence(id: string, scan: ScanPhoto[], evidence: GroupingEvidence): Promise<GroupingEvidence>;
   claimImportScan(id: string): Promise<boolean>;
   getImportScan(id: string): Promise<ScanPhoto[] | "incomplete" | null>;
   completeImportScan(id: string, photos: ScanPhoto[]): Promise<void>;
@@ -120,6 +124,13 @@ function toGroupRow(input: unknown): ProductGroupRow {
 
 export function createImportRepository(db: D1Database, _ids: IdGenerator, clock: Clock): ImportRepository {
   return {
+    async recordGroupingEvidence(id, scan, evidence) {
+      const row = await db.prepare(`UPDATE import_runs SET grouping_evidence_json = COALESCE(grouping_evidence_json, ?)
+        WHERE id = ? AND status = 'running' AND scan_evidence_json = ? RETURNING grouping_evidence_json`)
+        .bind(JSON.stringify(evidence), id, JSON.stringify(scan)).first<{grouping_evidence_json: string}>();
+      if (!row) throw new Error("Import grouping evidence claim lost");
+      return JSON.parse(row.grouping_evidence_json) as GroupingEvidence;
+    },
     async claimImportScan(id) {
       const result = await db.prepare("UPDATE import_runs SET scan_evidence_json = ? WHERE id = ? AND scan_evidence_json IS NULL").bind('"incomplete"', id).run();
       return result.meta.changes === 1;
