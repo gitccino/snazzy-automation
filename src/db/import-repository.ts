@@ -464,3 +464,31 @@ export async function claimImportVerification(db: D1Database, input: { runId: st
     .bind(input.workflowId, input.groupId, `import-verification-${input.runId}`, input.runId, input.albumId, input.contextJson, input.groupId).run();
   return result.meta.changes === 1;
 }
+
+export async function completeImportVerification(
+  db: D1Database,
+  input: { runId: string; albumId: string; workflowId: string; groupId: string; contextJson: string },
+  verifierId: string,
+  result: TerminalResultV1,
+): Promise<boolean> {
+  validateReplyMessages(result.messages);
+  if (!input.runId || !input.groupId || input.workflowId !== importWorkflowId(input.runId) || !verifierId ||
+    result.schemaVersion !== 1 || result.kind !== 'import' || result.runId !== input.runId ||
+    result.generation !== 1 || result.notificationCycle !== 1 ||
+    !['success', 'partial', 'validation_failed', 'failed', 'unconfirmed'].includes(result.outcome)) throw new Error('verification_invalid_result');
+  const update = db.prepare(`UPDATE import_verification_claims SET completed=1, result_json=?
+    WHERE import_run_id=? AND source_album_id=? AND origin_workflow_id=? AND group_id=? AND context_json=? AND verifier_id=?
+      AND completed IS NULL AND result_json IS NULL
+      AND EXISTS (SELECT 1 FROM import_runs r WHERE r.id=import_verification_claims.import_run_id
+        AND r.source_album_id=import_verification_claims.source_album_id AND r.trigger='line' AND r.status='running'
+        AND r.settings_context_json=import_verification_claims.context_json AND json_valid(r.settings_context_json)
+        AND json_extract(r.settings_context_json,'$.replyGroupId')=import_verification_claims.group_id)`)
+    .bind(JSON.stringify(result), input.runId, input.albumId, input.workflowId, input.groupId, input.contextJson, verifierId);
+  const insert = db.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at)
+    SELECT ?, group_id, result_json, ? FROM import_verification_claims
+    WHERE import_run_id=? AND verifier_id=? AND changes()=1
+    ON CONFLICT(result_key) DO NOTHING`)
+    .bind(JSON.stringify(['import', input.runId, 1, 1, 'verification']), new Date().toISOString(), input.runId, verifierId);
+  const [updated] = await db.batch([update, insert]);
+  return updated!.meta.changes === 1;
+}
