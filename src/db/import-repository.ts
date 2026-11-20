@@ -501,7 +501,7 @@ export async function readImportVerificationGroupingCandidate(db: D1Database, ru
   const orphanRange = orphanPhotos.length ? {firstApplePhotoId:orphanPhotos[0]!.applePhotoId,lastApplePhotoId:orphanPhotos[orphanPhotos.length-1]!.applePhotoId,count:orphanPhotos.length} : null;
   const checkpointPosition = scan.reduce((max,p) => Math.max(max,p.position), facts.savedCheckpoint ?? -1);
   if (groups.length || ignoredGroupCount !== facts.ignoredGroupCount || checkpointPosition !== facts.checkpointPosition || JSON.stringify(orphanRange) !== JSON.stringify(facts.orphanRange)) return null;
-  return facts;
+  return {...facts, scanEvidenceJson:row.scan_evidence_json, groupingEvidenceJson:row.grouping_evidence_json, photos};
 }
 
 /** Read only complete candidate identities belonging to the active verifier and captured target. */
@@ -558,11 +558,12 @@ export async function completeImportVerification(
   verifierId: string,
   result: TerminalResultV1,
   empty = false,
+  grouping?: NonNullable<Awaited<ReturnType<typeof readImportVerificationGroupingCandidate>>>,
 ): Promise<boolean> {
   validateReplyMessages(result.messages);
   if (!input.runId || !input.groupId || input.workflowId !== importWorkflowId(input.runId) || !verifierId ||
     result.schemaVersion !== 1 || result.kind !== 'import' || result.runId !== input.runId ||
-    result.generation !== 1 || result.notificationCycle !== 1 || (empty && result.outcome !== 'success') ||
+    result.generation !== 1 || result.notificationCycle !== 1 || ((empty || grouping) && result.outcome !== 'success') ||
     !['success', 'partial', 'validation_failed', 'failed', 'unconfirmed'].includes(result.outcome)) throw new Error('verification_invalid_result');
   const update = db.prepare(`UPDATE import_verification_claims SET completed=1, result_json=?
     WHERE import_run_id=? AND source_album_id=? AND origin_workflow_id=? AND group_id=? AND context_json=? AND verifier_id=?
@@ -573,17 +574,25 @@ export async function completeImportVerification(
         AND json_extract(r.settings_context_json,'$.replyGroupId')=import_verification_claims.group_id
         ${empty ? `AND CASE WHEN json_valid(r.scan_evidence_json) THEN json_type(r.scan_evidence_json)='array' AND json_array_length(r.scan_evidence_json)=0 ELSE 0 END
         AND NOT EXISTS (SELECT 1 FROM product_groups g WHERE g.import_run_id=r.id)
-        AND NOT EXISTS (SELECT 1 FROM photo_assets a WHERE a.import_run_id=r.id)` : ''})`)
-    .bind(JSON.stringify(result), input.runId, input.albumId, input.workflowId, input.groupId, input.contextJson, verifierId);
+        AND NOT EXISTS (SELECT 1 FROM photo_assets a WHERE a.import_run_id=r.id)` : ''}
+        ${grouping ? `AND r.scan_evidence_json=? AND r.grouping_evidence_json=?
+        AND (SELECT last_position FROM import_checkpoints WHERE source_album_id=r.source_album_id) IS ?
+        AND NOT EXISTS (SELECT 1 FROM product_groups g WHERE g.import_run_id=r.id)
+        AND NOT EXISTS (SELECT 1 FROM product_groups g JOIN import_runs gr ON gr.id=g.import_run_id JOIN json_each(?) p ON g.first_photo_id=json_extract(p.value,'$.applePhotoId') OR g.last_photo_id=json_extract(p.value,'$.applePhotoId') OR EXISTS (SELECT 1 FROM product_group_image_members m WHERE m.group_id=g.id AND m.apple_photo_id=json_extract(p.value,'$.applePhotoId')) WHERE gr.source_album_id=r.source_album_id)
+        AND NOT EXISTS (SELECT 1 FROM json_each(?) p WHERE NOT EXISTS (SELECT 1 FROM photo_assets a
+          WHERE a.source_album_id=r.source_album_id AND a.apple_photo_id=json_extract(p.value,'$.applePhotoId')
+            AND a.marker_kind=json_extract(p.value,'$.markerKind') AND a.is_marker=json_extract(p.value,'$.isMarker')
+            AND a.r2_key IS json_extract(p.value,'$.r2Key'))) ` : ''})`)
+    .bind(JSON.stringify(result), input.runId, input.albumId, input.workflowId, input.groupId, input.contextJson, verifierId, ...(grouping ? [grouping.scanEvidenceJson, grouping.groupingEvidenceJson, grouping.savedCheckpoint, JSON.stringify(grouping.photos), JSON.stringify(grouping.photos)] : []));
   const insert = db.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at)
     SELECT ?, group_id, result_json, ? FROM import_verification_claims
     WHERE import_run_id=? AND verifier_id=? AND changes()=1
     ON CONFLICT(result_key) DO UPDATE SET group_id=CASE WHEN group_id=excluded.group_id AND result_json=excluded.result_json THEN group_id ELSE NULL END`)
     .bind(JSON.stringify(['import', input.runId, 1, 1, 'verification']), new Date().toISOString(), input.runId, verifierId);
-  const terminal = db.prepare(`UPDATE import_runs SET status='completed', finished_at=?, orphan_photo_count=0,
+  const terminal = db.prepare(`UPDATE import_runs SET status='completed', finished_at=?, orphan_photo_count=?,
     checkpoint_position=(SELECT last_position FROM import_checkpoints WHERE source_album_id=import_runs.source_album_id), failure_reason=NULL
-    WHERE id=? AND changes()=1`).bind(new Date().toISOString(), input.runId);
-  const [updated] = await db.batch(empty ? [update, terminal, insert] : [update, insert]);
+    WHERE id=? AND changes()=1`).bind(new Date().toISOString(), grouping?.orphanRange?.count ?? 0, input.runId);
+  const [updated] = await db.batch(empty || grouping ? [update, terminal, insert] : [update, insert]);
   return updated!.meta.changes === 1;
 }
 

@@ -8,7 +8,7 @@ import {
 import { NonRetryableError } from "cloudflare:workflows";
 import { resolveImportContext } from "../settings/runtime";
 import { createAuditLog } from "../db/audit";
-import { createImportRepository, readImportVerificationEvidence, readImportVerificationCandidates, completeImportVerification, completeEmptyImportVerification } from "../db/import-repository";
+import { createImportRepository, readImportVerificationEvidence, readImportVerificationCandidates, completeImportVerification, completeEmptyImportVerification, readImportVerificationGroupingCandidate } from "../db/import-repository";
 import { createSequenceRepository } from "../db/sequence-repository";
 import type { Env } from "../env";
 import { createICloudClient } from "../icloud/client";
@@ -219,6 +219,13 @@ export class ImportWorkflow extends WorkflowEntrypoint<
         if (await completeEmptyImportVerification(this.env.DB, input, event.instanceId,
           {schemaVersion:1, kind:'import', runId, generation:1, notificationCycle:1, outcome:'success', messages:[{type:'text', text:'ไม่มีรูปใหม่สำหรับนำเข้า สามารถส่ง /upload อีกครั้งเมื่อมีรูปใหม่'}]})) {
           return { ...result, candidates: [] };
+        }
+        const grouping = await readImportVerificationGroupingCandidate(this.env.DB, runId, event.instanceId);
+        if (grouping) {
+          const text = buildImportSummaryMessage({result:{importRunId:runId, succeededProductIds:[], failedGroups:[], ignoredGroupCount:grouping.ignoredGroupCount}, orphanRange:grouping.orphanRange, nowThaiText:bangkokDateTimeThai({now:()=>new Date()})}) + (grouping.orphanRange ? `\n${grouping.orphanRange.firstApplePhotoId} – ${grouping.orphanRange.lastApplePhotoId}` : '');
+          if (await completeImportVerification(this.env.DB, input, event.instanceId,
+            {schemaVersion:1, kind:'import', runId, generation:1, notificationCycle:1, outcome:'success', messages:[{type:'text', text}]}, false, grouping)) return {...result, candidates:[]};
+          return null;
         }
         const candidates = await readImportVerificationCandidates(this.env.DB, runId, event.instanceId);
         const config = JSON.parse(claim.context_json)?.settings?.config;
