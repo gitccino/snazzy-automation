@@ -105,3 +105,33 @@ it.each([
     expect(fetchMock).toHaveBeenCalledTimes(['repair','lost update','after'].includes(mode) ? 4 : ['manual','eligibility'].includes(mode) ? 2 : 1);
   } finally { fetchMock.mockRestore(); }
 });
+
+it.each(['match','conflict','unavailable','changed'])('verifies saved finalization evidence: %s', async mode => {
+  const env = {...testEnv(), AIRTABLE_TOKEN:'test-airtable-token', GOOGLE_OAUTH_CLIENT_ID:'client', GOOGLE_OAUTH_CLIENT_SECRET:'secret', GOOGLE_REFRESH_TOKEN:'refresh', PUBLICATION_WORKFLOW:{get:vi.fn(async()=>({status:async()=>({status:'terminated'})}))}} as any;
+  const runId = crypto.randomUUID(), groupId = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:groupId,settings:{config:{airtableBaseId:'original-base',airtablePublicationRunsTableId:'original-table',googleDriveFolderId:'folder',googleTemplateDocId:'template'}}});
+  const intent = {generation:1,publicationDate:'2026-11-20',thaiDate:'date',docId:'doc',docUrl:'https://docs.google.com/document/d/doc/edit',title:'title',productIds:['A-1'],generatedAt:'2026-11-20T00:00:00.000Z'};
+  await env.DB.prepare("INSERT INTO publication_jobs(publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json,finalization_json) VALUES (?,'generating','original','x','x',1,1,?,?)").bind(runId,context,JSON.stringify(intent)).run();
+  const claim = await claimPublicationVerification(env.DB,{runId,generation:1,notificationCycle:1,groupId});
+  if (claim.status !== 'claimed') throw new Error('missing claim');
+  const fetchMock = vi.spyOn(globalThis,'fetch').mockImplementation(async (url,init) => {
+    const u = String(url);
+    if (u.includes('oauth2.googleapis.com')) return Response.json({access_token:'token',expires_in:3600});
+    expect(init?.method ?? 'GET').toBe('GET');
+    if (u.includes('api.airtable.com')) { if (mode === 'unavailable') throw new Error('offline'); if (mode === 'changed') await env.DB.prepare('UPDATE publication_jobs SET finalization_json=? WHERE publication_run_id=?').bind(JSON.stringify({...intent,title:'changed'}),runId).run(); expect(u).toContain('/original-base/original-table/'); expect((init?.headers as any).Authorization).toBe('Bearer test-airtable-token'); return Response.json({id:runId,fields:{Status:'Generated','Google Doc URL':mode === 'conflict' ? 'https://example.com' : intent.docUrl,'Generated At':intent.generatedAt}}); }
+    if (u.includes('docs.googleapis.com')) return Response.json({body:{content:[{paragraph:{elements:[{textRun:{content:'Product ID: A-1\n'}}]}}]}});
+    if (u.includes('googleapis.com/drive')) return Response.json({id:'doc',name:'title',parents:['folder'],trashed:false});
+    throw new Error(`unexpected ${u}`);
+  });
+  try {
+    const payload = {kind:'verification',publicationRunId:runId,generation:1,notificationCycle:1,groupId,verifierId:claim.verifierId};
+    const run = () => PublicationWorkflow.prototype.run.call({env} as any,{payload,instanceId:claim.verifierId} as any,{do:async (_:string,cb:()=>Promise<unknown>)=>cb()} as any);
+    await run(); if (mode !== 'changed') await run();
+    const row = await env.DB.prepare('SELECT result_json FROM publication_verification_claims WHERE publication_run_id=?').bind(runId).first();
+    if (mode === 'changed') { expect(row.result_json).toBeNull(); return; }
+    expect(JSON.parse(row.result_json).outcome).toBe(mode === 'match' ? 'success' : 'unconfirmed');
+    const outbox = await env.DB.prepare('SELECT group_id,result_json FROM line_result_outbox WHERE group_id=?').bind(groupId).all();
+    expect(outbox.results).toHaveLength(1);
+    if (mode === 'match') expect(JSON.stringify(outbox.results)).toContain(intent.docUrl);
+  } finally { fetchMock.mockRestore(); }
+});

@@ -4,6 +4,8 @@ import {
 } from "./product-images";
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { createGoogleAuthClient } from "./google-auth";
+import { verifyDocumentContainsProducts } from "./google-docs";
 import {
   WorkflowEntrypoint,
   type WorkflowEvent,
@@ -15,7 +17,7 @@ import type { OperationContext } from "../settings/schema";
 import type { Env } from "../env";
 import { createAssetStore } from "../import/asset-store";
 import { createLineReplyRepository } from '../db/line-reply-repository';
-import { readPublicationJob, completePublicationVerification, readPreGoogleFailure } from '../db/publication-repository';
+import { readPublicationJob, completePublicationVerification, readPreGoogleFailure, readFinalizationCandidate } from '../db/publication-repository';
 import { createWorkflowFeedbackRepository } from '../db/workflow-feedback';
 import { docsUnconfirmedCard } from '../line/docs-summary-card';
 import type { TerminalResultV1 } from '../line/reply-types';
@@ -327,6 +329,25 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
         const status = (await (await this.env.PUBLICATION_WORKFLOW.get(claim.origin_workflow_id)).status()).status;
         if (!["complete", "errored", "terminated"].includes(status)) throw new Error("publication_origin_not_stopped");
         const attempt = {runId:payload.publicationRunId, generation:payload.generation, notificationCycle:payload.notificationCycle, groupId:payload.groupId};
+        const candidate = await readFinalizationCandidate(this.env.DB, attempt, payload.verifierId);
+        let confirmedSuccess = false;
+        if (candidate) {
+          try {
+            const config = (JSON.parse(candidate.context_json) as OperationContext).settings.config;
+            const intent = candidate.intent;
+            const fetcher = fetch.bind(globalThis);
+            const tokens = createGoogleAuthClient({clientId:this.env.GOOGLE_OAUTH_CLIENT_ID, clientSecret:this.env.GOOGLE_OAUTH_CLIENT_SECRET, refreshToken:this.env.GOOGLE_REFRESH_TOKEN}, {now:()=>new Date()}, fetcher);
+            const token = await tokens.getAccessToken();
+            const drive = await fetcher(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(intent.docId)}?fields=id,name,parents,trashed`, {headers:{Authorization:`Bearer ${token}`}});
+            if (!drive.ok) throw new Error('drive_read_failed');
+            const file = z.object({id:z.string(),name:z.string(),parents:z.array(z.string()),trashed:z.boolean()}).parse(await drive.json());
+            const document = await verifyDocumentContainsProducts(fetcher, tokens, intent.docId, intent.productIds);
+            const airtable = await fetcher(`https://api.airtable.com/v0/${encodeURIComponent(config.airtableBaseId)}/${encodeURIComponent(config.airtablePublicationRunsTableId)}/${encodeURIComponent(attempt.runId)}`, {headers:{Authorization:`Bearer ${this.env.AIRTABLE_TOKEN}`}});
+            if (!airtable.ok) throw new Error('airtable_read_failed');
+            const record = z.object({id:z.string(),fields:z.object({Status:z.string(), 'Google Doc URL':z.string(), 'Generated At':z.string()})}).parse(await airtable.json());
+            confirmedSuccess = intent.docUrl === `https://docs.google.com/document/d/${encodeURIComponent(intent.docId)}/edit` && file.id === intent.docId && file.name === intent.title && file.parents.includes(config.googleDriveFolderId) && !file.trashed && document.ok && record.id === attempt.runId && record.fields.Status === 'Generated' && record.fields['Google Doc URL'] === intent.docUrl && record.fields['Generated At'] === intent.generatedAt;
+          } catch { /* Unavailable or conflicting evidence remains unconfirmed. */ }
+        }
         const preGoogleFailure = await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId);
         let confirmedFailed = false;
         if (preGoogleFailure) {
@@ -354,8 +375,8 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
           } catch { /* An unavailable or inconsistent record cannot confirm the outcome. */ }
         }
         await completePublicationVerification(this.env.DB, attempt, payload.verifierId, {
-          originWorkflowId:claim.origin_workflow_id, contextJson:claim.context_json,
-          result:{schemaVersion:1, kind:'publication', runId:attempt.runId, generation:attempt.generation, notificationCycle:attempt.notificationCycle, outcome:confirmedFailed ? 'failed' : 'unconfirmed', messages:[{type:'text', text:confirmedFailed ? `ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed และไม่มีเอกสารที่บันทึกไว้\n${attempt.runId}` : preGoogleFailure ? `⚠️ กรุณาตรวจสอบสถานะงานเดิมใน Airtable ก่อนส่ง /docs ซ้ำ\n${attempt.runId}` : `⚠️ ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${attempt.runId}`}]},
+          originWorkflowId:claim.origin_workflow_id, contextJson:claim.context_json, candidate: candidate ?? undefined,
+          result:{schemaVersion:1, kind:'publication', runId:attempt.runId, generation:attempt.generation, notificationCycle:attempt.notificationCycle, outcome:confirmedSuccess ? 'success' : confirmedFailed ? 'failed' : 'unconfirmed', messages:[{type:'text', text:confirmedSuccess ? `ตรวจสอบแล้ว สร้างเอกสารสำเร็จ\n${candidate!.intent.docUrl}` : confirmedFailed ? `ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed และไม่มีเอกสารที่บันทึกไว้\n${attempt.runId}` : preGoogleFailure ? `⚠️ กรุณาตรวจสอบสถานะงานเดิมใน Airtable ก่อนส่ง /docs ซ้ำ\n${attempt.runId}` : `⚠️ ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${attempt.runId}`}]},
         });
       });
       return null;
