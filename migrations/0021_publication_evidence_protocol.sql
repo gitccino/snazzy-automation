@@ -1,0 +1,1 @@
+ALTER TABLE publication_google_write_evidence ADD COLUMN protocol_version INTEGER;

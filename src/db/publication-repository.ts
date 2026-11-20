@@ -159,8 +159,8 @@ export async function reopenSuccessfulJobForRegeneration(
           'successful_generation', successful_generation, 'notification_cycle', notification_cycle, 'finalization_json', finalization_json)
         FROM publication_jobs WHERE publication_run_id = ? AND changes() = 1`)
         .bind(trustedEventId, runId),
-      db.prepare(`INSERT INTO publication_google_write_evidence (publication_run_id, generation, notification_cycle, state)
-        SELECT publication_run_id, generation, notification_cycle, 'tracking'
+      db.prepare(`INSERT INTO publication_google_write_evidence (publication_run_id, generation, notification_cycle, state, protocol_version)
+        SELECT publication_run_id, generation, notification_cycle, 'tracking', 1
         FROM publication_regeneration_events WHERE event_id = ? AND changes() = 1`)
         .bind(trustedEventId),
     ]);
@@ -337,8 +337,8 @@ export async function reopenFailedJobForRestart(
         SELECT ?, j.publication_run_id, j.generation, j.notification_cycle, j.correlation_id, ?, '{}', i.group_id, i.operation
         FROM publication_jobs j JOIN line_command_ingress i ON i.event_id = ? WHERE j.publication_run_id = ? AND changes() = 1`)
         .bind(event.id, event.action, event.id, publicationRunId),
-      db.prepare(`INSERT INTO publication_google_write_evidence (publication_run_id, generation, notification_cycle, state)
-        SELECT publication_run_id, generation, notification_cycle, 'tracking'
+      db.prepare(`INSERT INTO publication_google_write_evidence (publication_run_id, generation, notification_cycle, state, protocol_version)
+        SELECT publication_run_id, generation, notification_cycle, 'tracking', 1
         FROM publication_regeneration_events WHERE event_id = ? AND changes() = 1`)
         .bind(event.id),
     ]);

@@ -442,7 +442,7 @@ describe("publication stages", () => {
 
   it("does not copy for a stale workflow owner", async () => {
     await seedJob();
-    await env.DB.prepare("INSERT OR REPLACE INTO publication_google_write_evidence VALUES ('rec-run-1', 1, 1, 'tracking')").run();
+    await env.DB.prepare("INSERT OR REPLACE INTO publication_google_write_evidence (publication_run_id, generation, notification_cycle, state) VALUES ('rec-run-1', 1, 1, 'tracking')").run();
     const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(token()).mockResolvedValueOnce(json({ files: [] }));
     await expect(ensureTemporaryDocument(baseDeps({ fetcher, copyOwner: { workflowId: "old", notificationCycle: 1 } }), prepared)).rejects.toMatchObject({ code: "publication_generation_stale" });
     expect(fetcher).toHaveBeenCalledTimes(2);
@@ -452,7 +452,7 @@ describe("publication stages", () => {
   it.each(["fill", "finalize", "recovery", "delete"].flatMap(stage => [true, false].map(tracked => ({ stage, tracked }))))("rejects stale owner before Google $stage (tracked=$tracked)", async ({ stage, tracked }) => {
     await seedJob("generating", "temp-doc");
     await env.DB.prepare("DELETE FROM publication_google_write_evidence").run();
-    if (tracked) await env.DB.prepare("INSERT INTO publication_google_write_evidence VALUES ('rec-run-1', 1, 1, 'tracking')").run();
+    if (tracked) await env.DB.prepare("INSERT INTO publication_google_write_evidence (publication_run_id, generation, notification_cycle, state) VALUES ('rec-run-1', 1, 1, 'tracking')").run();
     const intent = { generation: 1, publicationDate: "2026-09-02", thaiDate: "Today", docId: "temp-doc", docUrl: "https://docs.google.com/document/d/temp-doc/edit", title: "Publication", productIds: ["A-1001"], generatedAt: clock.now().toISOString() };
     if (stage === "finalize" || stage === "recovery") await env.DB.prepare("UPDATE publication_jobs SET finalization_json=?").bind(JSON.stringify(intent)).run();
     const fetcher = vi.fn<Fetcher>().mockImplementation(async (url) => String(url).includes("oauth2") ? token() : String(url).includes("docs.googleapis.com") ? document("{{PUBLICATION_DATE}}\n{{PRODUCTS}}suffix{{END_PRODUCTS}}\n") : json({ id: "ok" }));
@@ -465,7 +465,7 @@ describe("publication stages", () => {
 
   it("persists possible write before a lost copy response", async () => {
     await seedJob();
-    await env.DB.prepare("INSERT OR REPLACE INTO publication_google_write_evidence VALUES ('rec-run-1', 1, 1, 'tracking')").run();
+    await env.DB.prepare("INSERT OR REPLACE INTO publication_google_write_evidence (publication_run_id, generation, notification_cycle, state) VALUES ('rec-run-1', 1, 1, 'tracking')").run();
     const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(token()).mockResolvedValueOnce(json({ files: [] })).mockRejectedValue(new Error("response lost"));
     await expect(ensureTemporaryDocument(baseDeps({ fetcher }), prepared)).rejects.toThrow();
     expect(await env.DB.prepare("SELECT state FROM publication_google_write_evidence WHERE publication_run_id='rec-run-1'").first()).toEqual({ state: "may_have_written" });
@@ -473,7 +473,7 @@ describe("publication stages", () => {
 
   it.each([true, false])("signs, fills and verifies with captioning enabled=%s", async aiCaptionsEnabled => {
     await seedJob("generating", "temp-doc");
-    await env.DB.prepare("INSERT OR REPLACE INTO publication_google_write_evidence VALUES ('rec-run-1', 1, 1, 'tracking')").run();
+    await env.DB.prepare("INSERT OR REPLACE INTO publication_google_write_evidence (publication_run_id, generation, notification_cycle, state) VALUES ('rec-run-1', 1, 1, 'tracking')").run();
     const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(json({ id: product.airtableRecordId }))
       .mockResolvedValueOnce(token())
       .mockResolvedValueOnce(document("{{PUBLICATION_DATE}}\n{{PRODUCTS}}suffix{{END_PRODUCTS}}\n"))
