@@ -121,14 +121,17 @@ async function startImport(
               let verifierId: string | null = claimed ? `import-verification-${owner.id}` : null;
               const isActive = (status: string) => ["queued", "running", "waiting", "waitingForPause"].includes(status);
               if (!claimed) {
-                const saved = await env.DB.prepare(`SELECT verifier_id FROM import_verification_claims WHERE import_run_id=? AND source_album_id=? AND origin_workflow_id=? AND group_id=? AND context_json=? AND completed IS NULL`)
+                const saved = await env.DB.prepare(`SELECT verifier_id FROM import_verification_claims WHERE import_run_id=? AND source_album_id=? AND origin_workflow_id=? AND group_id=? AND context_json=? AND completed IS NULL
+                  AND EXISTS (SELECT 1 FROM import_runs r WHERE r.id=import_verification_claims.import_run_id AND r.source_album_id=import_verification_claims.source_album_id AND r.trigger='line' AND r.status='running' AND r.settings_context_json=import_verification_claims.context_json)`)
                   .bind(owner.id, sourceAlbumId, workflowId, context.replyGroupId, owner.settings_context_json).first<{verifier_id:string}>();
                 if (saved) {
                   try {
                     const status = (await (await env.IMPORT_WORKFLOW.get(saved.verifier_id)).status()).status;
                     if (isActive(status)) return Response.json({status:"checking", importRunId:owner.id}, {status:409});
                     if (["errored", "terminated"].includes(status)) verifierId = await renewImportVerification(env.DB, input, saved.verifier_id);
-                  } catch { /* Unavailable is not proof of interruption. */ }
+                  } catch (error) {
+                    if (error instanceof Error && error.message.includes("instance.not_found")) verifierId = saved.verifier_id;
+                  }
                 }
               }
               if (verifierId) {

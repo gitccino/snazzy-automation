@@ -124,12 +124,15 @@ export async function handleDocsTrigger(
           const attempt = { runId: run.airtableRunId, generation: job.generation, notificationCycle: job.notificationCycle, groupId: trustedGroupId! };
           let claim = await claimPublicationVerification(env.DB, attempt);
           if (claim.status === "held") {
-            const saved = await env.DB.prepare(`SELECT verifier_id FROM publication_verification_claims
-              WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND group_id=? AND completed=0 AND origin_workflow_id=?`)
-              .bind(run.airtableRunId, job.generation, job.notificationCycle, trustedGroupId, originalId).first<{ verifier_id: string }>();
+            const saved = await env.DB.prepare(`SELECT verifier_id, context_json FROM publication_verification_claims c
+              WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND group_id=? AND completed=0 AND origin_workflow_id=?
+                AND EXISTS (SELECT 1 FROM publication_jobs j WHERE j.publication_run_id=c.publication_run_id AND j.generation=c.generation AND j.notification_cycle=c.notification_cycle AND j.correlation_id=c.origin_workflow_id AND j.settings_context_json=c.context_json)`)
+              .bind(run.airtableRunId, job.generation, job.notificationCycle, trustedGroupId, originalId).first<{ verifier_id: string; context_json: string }>();
             const verifier = saved && await lookupWorkflow(env, saved.verifier_id);
             if (verifier && activeStatuses.includes(verifier.state.status))
               return { status: "checking", publicationRunId: run.airtableRunId };
+            if (saved && !verifier)
+              claim = { status: "claimed", verifierId: saved.verifier_id, originWorkflowId: originalId, contextJson: saved.context_json };
             if (saved && verifier && ["errored", "terminated"].includes(verifier.state.status))
               claim = await claimPublicationVerification(env.DB, attempt, { verifierId: saved.verifier_id, status: "interrupted" });
           }

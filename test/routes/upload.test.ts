@@ -164,6 +164,25 @@ describe("handleUploadTrigger", () => {
       else expect(create).not.toHaveBeenCalled();
     },
   );
+  it('dispatches a saved claim when its verifier was never created', async () => {
+    const { env } = triggerEnv();
+    await createSequenceRepository(env.DB).bootstrap("product_id", 1);
+    const { captureOperationContext } = await import("../../src/settings/runtime");
+    const { claimImportVerification } = await import("../../src/db/import-repository");
+    const context = await captureOperationContext(env, "owner-group");
+    const get = vi.fn().mockImplementation(async (id: string) => {
+      if (id === "import-original") return {status: async () => ({status:"errored"})};
+      throw new Error("instance.not_found");
+    });
+    const create = vi.fn().mockResolvedValue({});
+    env.IMPORT_WORKFLOW = {createBatch: vi.fn().mockResolvedValue([]), get, create} as unknown as typeof env.IMPORT_WORKFLOW;
+    await handleUploadTrigger(env, "line", "original", context, "event-original");
+    const row = await env.DB.prepare("SELECT source_album_id, settings_context_json FROM import_runs WHERE id=?").bind("original").first<{source_album_id:string; settings_context_json:string}>();
+    await claimImportVerification(env.DB, {runId:"original", albumId:row!.source_album_id, workflowId:"import-original", groupId:"owner-group", contextJson:row!.settings_context_json});
+    const response = await handleUploadTrigger(env, "line", "fresh", context, "event-fresh");
+    expect(await response.json()).toEqual({status:"checking", importRunId:"original"});
+    expect(create).toHaveBeenCalledWith({id:"import-verification-original", params:{kind:"verification", importRunId:"original"}});
+  });
   it('replays a lost verifier create response and renews only after interruption', async () => {
     const { env } = triggerEnv();
     await createSequenceRepository(env.DB).bootstrap("product_id", 1);

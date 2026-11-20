@@ -498,6 +498,25 @@ describe("handleDocsTrigger", () => {
     },
   );
 
+  it('dispatches a saved claim when its verifier was never created', async () => {
+    mockRun("Generating");
+    const h = makeTriggerEnv("errored");
+    const { captureOperationContext } = await import("../../src/settings/runtime");
+    const { savePublicationAttemptContext } = await import("../../src/db/execution-context-repository");
+    const { claimPublicationVerification } = await import("../../src/db/publication-repository");
+    const context = { ...await captureOperationContext(h.env, null), replyGroupId: "owner" };
+    await acquireOrResumeJob(h.env.DB, clock, "rec-run-1", "publication-rec-run-1");
+    await savePublicationAttemptContext(h.env.DB, "rec-run-1", 1, context);
+    const claim = await claimPublicationVerification(h.env.DB, {runId:"rec-run-1", generation:1, notificationCycle:1, groupId:"owner"});
+    if (claim.status !== "claimed") throw new Error("claim failed");
+    h.get.mockImplementation(async (id: string) => {
+      if (id === "publication-rec-run-1") return {status: vi.fn().mockResolvedValue({status:"errored"})};
+      throw new Error("instance.not_found");
+    });
+    expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, context)).toEqual({status:"checking", publicationRunId:"rec-run-1"});
+    expect(h.create).toHaveBeenCalledWith({id:claim.verifierId, params:{kind:"verification", publicationRunId:"rec-run-1", generation:1, notificationCycle:1, groupId:"owner", verifierId:claim.verifierId}});
+    await h.env.DB.exec("DELETE FROM publication_verification_claims WHERE publication_run_id = 'rec-run-1'");
+  });
   it.each(["running", "unavailable", "missing", "unknown", "complete", "paused"])("reconciles a lost verifier create response with %s lookup", async (verifierStatus) => {
     mockRun("Generating");
     const h = makeTriggerEnv("errored");
@@ -521,7 +540,7 @@ describe("handleDocsTrigger", () => {
     expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, context)).toEqual(expected);
     expect(h.get).toHaveBeenLastCalledWith(saved!.verifier_id);
     expect(await handleDocsTrigger(h.env, "line", clock, undefined, fetch, { ...context, replyGroupId: "other" })).toEqual({ status: "busy" });
-    expect(h.create).toHaveBeenCalledTimes(1);
+    expect(h.create).toHaveBeenCalledTimes(verifierStatus === "missing" ? 2 : 1);
     expect(h.restart).not.toHaveBeenCalled();
     await h.env.DB.exec("DELETE FROM publication_verification_claims WHERE publication_run_id = 'rec-run-1'");
   });
