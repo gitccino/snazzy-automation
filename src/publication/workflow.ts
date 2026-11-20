@@ -334,9 +334,22 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
             const context = JSON.parse(preGoogleFailure.context_json) as OperationContext;
             const config = context.settings.config;
             const url = `https://api.airtable.com/v0/${encodeURIComponent(config.airtableBaseId)}/${encodeURIComponent(config.airtablePublicationRunsTableId)}/${encodeURIComponent(attempt.runId)}`;
-            const response = await fetch(url, {headers:{Authorization:`Bearer ${this.env.AIRTABLE_TOKEN}`}});
-            if (!response.ok) throw new Error('airtable_read_failed');
-            const record = z.object({id:z.string(), fields:z.object({Status:z.string(), 'Google Doc URL':z.string().optional(), 'Generated At':z.string().optional()})}).parse(await response.json());
+            const headers = {Authorization:`Bearer ${this.env.AIRTABLE_TOKEN}`};
+            const read = async () => {
+              const response = await fetch(url, {headers});
+              if (!response.ok) throw new Error('airtable_read_failed');
+              return z.object({id:z.string(), fields:z.object({Status:z.string(), 'Google Doc URL':z.string().optional(), 'Generated At':z.string().optional()})}).parse(await response.json());
+            };
+            const eligibleRecord = (record: Awaited<ReturnType<typeof read>>, status: string) => record.id === attempt.runId && record.fields.Status === status && !record.fields['Google Doc URL'] && !record.fields['Generated At'];
+            let record = await read();
+            if (eligibleRecord(record, 'Generating') && await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId)) {
+              record = await read();
+              if (eligibleRecord(record, 'Generating') && await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId)) {
+                // Airtable has no conditional PATCH: a manual edit between this read and write can still be overwritten.
+                try { await fetch(url, {method:'PATCH', headers:{...headers, 'Content-Type':'application/json'}, body:JSON.stringify({fields:{Status:'Failed'}})}); } catch { /* The write may have succeeded despite a lost response. */ }
+                record = await read();
+              }
+            }
             confirmedFailed = record.id === attempt.runId && record.fields.Status === 'Failed' && !record.fields['Google Doc URL'] && !record.fields['Generated At'] && !!await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId);
           } catch { /* An unavailable or inconsistent record cannot confirm the outcome. */ }
         }
