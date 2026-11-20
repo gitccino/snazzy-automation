@@ -605,7 +605,7 @@ export async function completePublicationVerification(
       value.generation !== attempt.generation || value.notificationCycle !== attempt.notificationCycle ||
       !['success', 'partial', 'validation_failed', 'failed', 'unconfirmed'].includes(value.outcome)) throw new Error('verification_invalid_result');
   }
-  const result = await db.prepare(`UPDATE publication_verification_claims SET completed=1, result_json=?
+  const update = db.prepare(`UPDATE publication_verification_claims SET completed=1, result_json=?
     WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND group_id=? AND verifier_id=? AND completed=0
       AND EXISTS (SELECT 1 FROM publication_jobs WHERE publication_run_id=? AND generation=? AND notification_cycle=?
         AND json_extract(settings_context_json, '$.replyGroupId')=?
@@ -614,6 +614,12 @@ export async function completePublicationVerification(
     .bind(intent ? JSON.stringify(intent.result) : null, attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId, verifierId,
       attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId,
       intent?.originWorkflowId ?? null, intent?.originWorkflowId ?? null, intent?.contextJson ?? null,
-      intent?.originWorkflowId ?? null, intent?.originWorkflowId ?? null, intent?.contextJson ?? null).run();
-  return result.meta.changes === 1;
+      intent?.originWorkflowId ?? null, intent?.originWorkflowId ?? null, intent?.contextJson ?? null);
+  if (!intent) return (await update.run()).meta.changes === 1;
+  const key = JSON.stringify(['publication', attempt.runId, attempt.generation, attempt.notificationCycle, 'verification']);
+  const [result] = await db.batch([update, db.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at)
+    SELECT ?, group_id, result_json, ? FROM publication_verification_claims
+    WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND verifier_id=? AND changes()=1`)
+    .bind(key, new Date().toISOString(), attempt.runId, attempt.generation, attempt.notificationCycle, verifierId)]);
+  return result!.meta.changes === 1;
 }

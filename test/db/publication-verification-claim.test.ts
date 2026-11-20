@@ -1,5 +1,9 @@
 import { expect, it } from 'vitest';
 import { testEnv } from '../helpers/env';
+import { fixedClock } from '../helpers/fakes';
+import { createLineReplyRepository } from '../../src/db/line-reply-repository';
+import { createLineClient } from '../../src/line/client';
+import { deliverEventReply } from '../../src/line/reply-delivery';
 import { claimPublicationVerification, completePublicationVerification } from '../../src/db/publication-repository';
 
 const db = testEnv().DB;
@@ -68,4 +72,34 @@ it('keeps absent recovery fenced to the owner and current attempt', async () => 
   await db.prepare('UPDATE publication_jobs SET generation=3 WHERE publication_run_id=?').bind(runId).run();
   expect(await claimPublicationVerification(db, request, observation)).toEqual({status:'held'});
   expect(await completePublicationVerification(db, request, first.verifierId)).toBe(false);
+});
+
+it('queues the unconfirmed verification behind the original result for the next messages', async () => {
+  const runId = crypto.randomUUID(), groupId = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:groupId});
+  await db.prepare("INSERT INTO publication_jobs (publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,'generating','workflow','x','x',1,1,?)").bind(runId, context).run();
+  const attempt = {runId, generation:1, notificationCycle:1, groupId};
+  const claim = await claimPublicationVerification(db, attempt);
+  if (claim.status !== 'claimed') throw new Error('expected claim');
+  const clock = fixedClock('2026-11-19T08:00:00Z');
+  const repo = createLineReplyRepository(db, clock);
+  const original = {schemaVersion:1, kind:'publication', runId, generation:1, notificationCycle:1, outcome:'unconfirmed', messages:[{type:'text',text:'original'}]} as const;
+  const result = {...original, messages:[{type:'text' as const,text:'verification unconfirmed'}]};
+  await repo.enqueueResult({resultKey:JSON.stringify(['publication',runId,1,1,'terminal']), groupId, result:{...original, messages:[...original.messages]}});
+  const intent = {originWorkflowId:claim.originWorkflowId, contextJson:claim.contextJson, result};
+  expect(await completePublicationVerification(db, attempt, 'stale', intent)).toBe(false);
+  expect((await db.prepare('SELECT * FROM line_result_outbox WHERE group_id=?').bind(groupId).all()).results).toHaveLength(1);
+  expect(await completePublicationVerification(db, attempt, claim.verifierId, intent)).toBe(true);
+  expect(await completePublicationVerification(db, attempt, claim.verifierId, intent)).toBe(false);
+  const rows = (await db.prepare('SELECT result_key,result_json FROM line_result_outbox WHERE group_id=? ORDER BY sequence').bind(groupId).all<{result_key:string;result_json:string}>()).results;
+  expect(rows.map(row => JSON.parse(row.result_json))).toEqual([original, result]);
+  expect(rows[1]!.result_key).toBe(JSON.stringify(['publication',runId,1,1,'verification']));
+  const requests: any[] = [];
+  const line = createLineClient({channelAccessToken:'private',fetch:async (_url, init) => { requests.push(JSON.parse(String(init?.body))); return Response.json({}); }});
+  const input = {groupId, workflowId:'wf', receivedAt:clock.now().toISOString(), replyToken:'fresh', commandReply:null, drainQueue:true, publicBaseUrl:'https://app.test'};
+  const deps = {repo, line, clock, isGroupAllowed:async()=>true};
+  await deliverEventReply({...input,eventId:crypto.randomUUID()}, deps);
+  await deliverEventReply({...input,eventId:crypto.randomUUID()}, deps);
+  expect(requests.map(request => request.messages)).toEqual([original.messages, result.messages]);
+  expect(await repo.head(groupId)).toBeNull();
 });
