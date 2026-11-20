@@ -1,3 +1,4 @@
+import { FinalizationIntentSchema } from "../publication/finalization-intent";
 import { validateReplyMessages } from "../line/client";
 import type { TerminalResultV1 } from "../line/reply-types";
 import { sha256Hex } from "../shared/ids";
@@ -628,6 +629,31 @@ export async function readPreGoogleFailure(
       AND json_extract(r.outcome_json,'$.outcome')='unconfirmed'`)
     .bind(attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId, verifierId)
     .first<{ origin_workflow_id: string; context_json: string; stage: string; failure_code: string }>();
+}
+
+export async function readFinalizationCandidate(
+  db: D1Database,
+  attempt: { runId: string; generation: number; notificationCycle: number; groupId: string },
+  verifierId: string,
+): Promise<{ origin_workflow_id: string; context_json: string; intent: PublicationFinalizationIntent } | null> {
+  const row = await db.prepare(`SELECT c.origin_workflow_id, c.context_json, j.finalization_json, j.google_doc_id
+    FROM publication_verification_claims c
+    JOIN publication_jobs j ON j.publication_run_id=c.publication_run_id AND j.generation=c.generation
+      AND j.notification_cycle=c.notification_cycle AND j.correlation_id=c.origin_workflow_id AND j.settings_context_json=c.context_json
+    WHERE c.publication_run_id=? AND c.generation=? AND c.notification_cycle=? AND c.group_id=? AND c.verifier_id=? AND c.completed=0
+      AND json_extract(c.context_json,'$.replyGroupId')=c.group_id
+      AND length(json_extract(c.context_json,'$.settings.config.airtableBaseId'))>0
+      AND length(json_extract(c.context_json,'$.settings.config.airtablePublicationRunsTableId'))>0
+      AND length(json_extract(c.context_json,'$.settings.config.googleDriveFolderId'))>0
+      AND length(json_extract(c.context_json,'$.settings.config.googleTemplateDocId'))>0
+      AND j.finalization_json IS NOT NULL`)
+    .bind(attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId, verifierId)
+    .first<{origin_workflow_id:string; context_json:string; finalization_json:string; google_doc_id:string | null}>();
+  if (!row) return null;
+  try {
+    const intent = FinalizationIntentSchema.parse(JSON.parse(row.finalization_json));
+    return intent.generation === attempt.generation && intent.docId !== row.google_doc_id ? {origin_workflow_id:row.origin_workflow_id, context_json:row.context_json, intent} : null;
+  } catch { return null; }
 }
 
 export async function completePublicationVerification(
