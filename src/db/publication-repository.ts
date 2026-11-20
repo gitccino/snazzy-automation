@@ -1,3 +1,5 @@
+import { validateReplyMessages } from "../line/client";
+import type { TerminalResultV1 } from "../line/reply-types";
 import { sha256Hex } from "../shared/ids";
 import type { OperationContext } from "../settings/schema";
 import { serializeContext } from "./execution-context-repository";
@@ -593,12 +595,25 @@ export async function completePublicationVerification(
   db: D1Database,
   attempt: { runId: string; generation: number; notificationCycle: number; groupId: string },
   verifierId: string,
+  intent?: { originWorkflowId: string; contextJson: string; result: TerminalResultV1 },
 ): Promise<boolean> {
-  const result = await db.prepare(`UPDATE publication_verification_claims SET completed=1
+  if (intent) {
+    const value = intent.result;
+    validateReplyMessages(value.messages);
+    if (typeof intent.originWorkflowId !== 'string' || !intent.originWorkflowId.trim() || typeof intent.contextJson !== 'string' ||
+      value.schemaVersion !== 1 || value.kind !== 'publication' || value.runId !== attempt.runId ||
+      value.generation !== attempt.generation || value.notificationCycle !== attempt.notificationCycle ||
+      !['success', 'partial', 'validation_failed', 'failed', 'unconfirmed'].includes(value.outcome)) throw new Error('verification_invalid_result');
+  }
+  const result = await db.prepare(`UPDATE publication_verification_claims SET completed=1, result_json=?
     WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND group_id=? AND verifier_id=? AND completed=0
       AND EXISTS (SELECT 1 FROM publication_jobs WHERE publication_run_id=? AND generation=? AND notification_cycle=?
-        AND json_extract(settings_context_json, '$.replyGroupId')=?)`)
-    .bind(attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId, verifierId,
-      attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId).run();
+        AND json_extract(settings_context_json, '$.replyGroupId')=?
+        AND (? IS NULL OR (correlation_id=? AND settings_context_json=?)))
+      AND result_json IS NULL AND (? IS NULL OR (origin_workflow_id=? AND context_json=?))`)
+    .bind(intent ? JSON.stringify(intent.result) : null, attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId, verifierId,
+      attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId,
+      intent?.originWorkflowId ?? null, intent?.originWorkflowId ?? null, intent?.contextJson ?? null,
+      intent?.originWorkflowId ?? null, intent?.originWorkflowId ?? null, intent?.contextJson ?? null).run();
   return result.meta.changes === 1;
 }

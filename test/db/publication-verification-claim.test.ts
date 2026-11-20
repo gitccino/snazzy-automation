@@ -41,8 +41,18 @@ it('renews only a confirmed interrupted verifier and fences late completion', as
   expect(results.filter(r => r.status === 'claimed')).toHaveLength(1);
   if (!renewed || renewed.status !== 'claimed') throw new Error('expected renewal');
   expect(renewed.verifierId).not.toBe(first.verifierId);
-  expect(await completePublicationVerification(db, request, first.verifierId)).toBe(false);
-  expect(await completePublicationVerification(db, request, renewed.verifierId)).toBe(true);
+  const result = {schemaVersion:1, kind:'publication', runId, generation:2, notificationCycle:3, outcome:'success', messages:[{type:'text', text:'original'}]} as const;
+  const intent = {originWorkflowId:renewed.originWorkflowId, contextJson:renewed.contextJson, result: {...result, messages: [...result.messages]}};
+  expect(await completePublicationVerification(db, request, first.verifierId, intent)).toBe(false);
+  expect(await completePublicationVerification(db, request, renewed.verifierId, {...intent, contextJson:'{}'})).toBe(false);
+  await db.prepare('UPDATE publication_jobs SET settings_context_json=? WHERE publication_run_id=?').bind(JSON.stringify({replyGroupId:'owner', target:'changed'}), runId).run();
+  expect(await completePublicationVerification(db, request, renewed.verifierId, intent)).toBe(false);
+  await db.prepare('UPDATE publication_jobs SET settings_context_json=? WHERE publication_run_id=?').bind(renewed.contextJson, runId).run();
+  await expect(completePublicationVerification(db, request, renewed.verifierId, {...intent, result:{...intent.result, runId:'other'}})).rejects.toThrow('verification_invalid_result');
+  expect(await completePublicationVerification(db, request, renewed.verifierId, intent)).toBe(true);
+  expect(await completePublicationVerification(db, request, renewed.verifierId, {...intent, result:{...intent.result, messages:[{type:'text', text:'replacement'}]}})).toBe(false);
+  const saved = await db.prepare('SELECT result_json FROM publication_verification_claims WHERE publication_run_id=?').bind(runId).first<{result_json:string}>();
+  expect(JSON.parse(saved!.result_json)).toEqual(result);
   expect(await claimPublicationVerification(db, request, {verifierId:renewed.verifierId, status:'interrupted'})).toEqual({status:'held'});
 });
 
