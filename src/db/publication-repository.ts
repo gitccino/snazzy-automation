@@ -149,6 +149,7 @@ export async function reopenSuccessfulJobForRegeneration(
     const results = await db.batch([
       db.prepare(`UPDATE publication_jobs SET generation = generation + 1, notification_cycle = 1, state = 'locked', correlation_id = ?, temp_doc_id = NULL, validation_result_json = NULL, finalization_json = NULL, settings_context_json = NULL, attempt_count = 0, updated_at = ?
         WHERE publication_run_id = ? AND state = 'succeeded' AND generation = ? AND successful_generation = generation
+        AND NOT EXISTS (SELECT 1 FROM publication_verification_claims c WHERE c.publication_run_id = publication_jobs.publication_run_id AND c.generation = publication_jobs.generation AND c.notification_cycle = publication_jobs.notification_cycle AND c.completed = 0)
         AND NOT EXISTS (SELECT 1 FROM publication_regeneration_events WHERE event_id = ?)`)
         .bind(workflowId, clock.now().toISOString(), runId, expectedGeneration, trustedEventId),
       db.prepare(`INSERT INTO publication_regeneration_events (event_id, publication_run_id, generation, notification_cycle, workflow_id, action, job_json)
@@ -174,6 +175,7 @@ export async function reopenSuccessfulJobForRegeneration(
     SET generation = generation + 1, notification_cycle = 1, state = 'locked', correlation_id = ?, temp_doc_id = NULL,
         validation_result_json = NULL, finalization_json = NULL, settings_context_json = NULL, attempt_count = 0, updated_at = ?
     WHERE publication_run_id = ? AND state = 'succeeded' AND generation = ? AND successful_generation = generation
+        AND NOT EXISTS (SELECT 1 FROM publication_verification_claims c WHERE c.publication_run_id = publication_jobs.publication_run_id AND c.generation = publication_jobs.generation AND c.notification_cycle = publication_jobs.notification_cycle AND c.completed = 0)
     RETURNING *`,
     )
     .bind(
@@ -330,6 +332,7 @@ export async function reopenFailedJobForRestart(
     const results = await db.batch([
       db.prepare(`UPDATE publication_jobs SET settings_context_json = CASE WHEN temp_doc_id IS NULL AND finalization_json IS NULL THEN COALESCE(?, settings_context_json) ELSE settings_context_json END, notification_cycle = notification_cycle + 1, state = 'locked', correlation_id = ?, updated_at = ?
         WHERE publication_run_id = ? AND (state = 'failed' OR (state = 'validation_failed' AND ? = 1)) AND generation = ? AND notification_cycle = ?
+        AND NOT EXISTS (SELECT 1 FROM publication_verification_claims c WHERE c.publication_run_id = publication_jobs.publication_run_id AND c.generation = publication_jobs.generation AND c.notification_cycle = publication_jobs.notification_cycle AND c.completed = 0)
         AND NOT EXISTS (SELECT 1 FROM publication_regeneration_events WHERE event_id = ?)
         AND EXISTS (SELECT 1 FROM line_command_ingress WHERE event_id = ? AND group_id = ? AND json_extract(operation, '$.type') = 'docs' AND json_extract(operation, '$.publicationDate') IS ?)`)
         .bind(context ? serializeContext(context) : null, correlationId, clock.now().toISOString(), publicationRunId, context ? 1 : 0, generation, notificationCycle, event.id, event.id, event.groupId, event.publicationDate ?? null),
@@ -347,7 +350,8 @@ export async function reopenFailedJobForRestart(
   const result = await db
     .prepare(
       `UPDATE publication_jobs SET settings_context_json = CASE WHEN temp_doc_id IS NULL AND finalization_json IS NULL THEN COALESCE(?, settings_context_json) ELSE settings_context_json END, notification_cycle = notification_cycle + 1, state = 'locked', correlation_id = ?, updated_at = ?
-       WHERE publication_run_id = ? AND (state = 'failed' OR (state = 'validation_failed' AND ? = 1)) AND generation = ? AND notification_cycle = ?`,
+       WHERE publication_run_id = ? AND (state = 'failed' OR (state = 'validation_failed' AND ? = 1)) AND generation = ? AND notification_cycle = ?
+       AND NOT EXISTS (SELECT 1 FROM publication_verification_claims c WHERE c.publication_run_id = publication_jobs.publication_run_id AND c.generation = publication_jobs.generation AND c.notification_cycle = publication_jobs.notification_cycle AND c.completed = 0)`,
     )
     .bind(
       context ? serializeContext(context) : null,
@@ -540,9 +544,14 @@ export async function advanceUnconfirmedPublicationRestart(db:D1Database,clock:C
   const key=JSON.stringify(['publication',runId,generation,notificationCycle,'terminal']);
   const updated=await db.prepare(`UPDATE publication_jobs SET notification_cycle=notification_cycle+1,updated_at=?
     WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND state NOT IN ('succeeded','failed','validation_failed')
+      AND NOT EXISTS (SELECT 1 FROM publication_verification_claims c WHERE c.publication_run_id = publication_jobs.publication_run_id AND c.generation = publication_jobs.generation AND c.notification_cycle = publication_jobs.notification_cycle AND c.completed = 0)
       AND EXISTS(SELECT 1 FROM line_result_outbox WHERE result_key=? AND json_extract(result_json,'$.outcome')='unconfirmed')`)
     .bind(clock.now().toISOString(),runId,generation,notificationCycle,key).run();
   if(updated.meta.changes===1)return 'advanced';
+  const held=await db.prepare(`SELECT 1 FROM publication_verification_claims WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND completed=0`).bind(runId,generation,notificationCycle).first();
+  if(held)return 'contended';
+  const unconfirmed=await db.prepare("SELECT 1 FROM line_result_outbox WHERE result_key=? AND json_extract(result_json,'$.outcome')='unconfirmed'").bind(key).first();
+  if(unconfirmed)return 'contended';
   const current=await readPublicationJob(db,runId);
   return current?.generation===generation && current.notificationCycle===notificationCycle ? 'not_needed':'contended';
 }

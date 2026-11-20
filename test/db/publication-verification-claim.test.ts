@@ -4,7 +4,7 @@ import { fixedClock } from '../helpers/fakes';
 import { createLineReplyRepository } from '../../src/db/line-reply-repository';
 import { createLineClient } from '../../src/line/client';
 import { deliverEventReply } from '../../src/line/reply-delivery';
-import { claimPublicationVerification, completePublicationVerification } from '../../src/db/publication-repository';
+import { claimPublicationVerification, completePublicationVerification, reopenFailedJobForRestart, advanceUnconfirmedPublicationRestart, reopenSuccessfulJobForRegeneration } from '../../src/db/publication-repository';
 
 const db = testEnv().DB;
 
@@ -148,4 +148,26 @@ it('proves only the current tracked pre-document failure without conflicting fac
   }
   await db.prepare('UPDATE publication_google_write_evidence SET protocol_version=NULL WHERE publication_run_id=?').bind(runId).run();
   expect(await read()).toBeNull();
+});
+
+
+it('holds attempt advancement until the current verifier completes', async () => {
+  const runId = crypto.randomUUID(), clock = fixedClock('2026-11-19T08:00:00Z');
+  const context = JSON.stringify({replyGroupId:'owner'});
+  await db.prepare("INSERT INTO publication_jobs (publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,'failed','workflow','x','x',1,1,?)").bind(runId,context).run();
+  const attempt = {runId,generation:1,notificationCycle:1,groupId:'owner'};
+  const claim = await claimPublicationVerification(db,attempt);
+  if (claim.status !== 'claimed') throw new Error('expected claim');
+  expect(await reopenFailedJobForRestart(db,clock,runId,'workflow')).toBe(false);
+  const eventId = crypto.randomUUID();
+  await db.prepare("INSERT INTO line_command_ingress VALUES (?, 'owner', '{\"type\":\"docs\"}', 'command', 'now')").bind(eventId).run();
+  expect(await reopenFailedJobForRestart(db,clock,runId,'workflow',1,undefined,1,{id:eventId,groupId:'owner',action:'restart'})).toBe(false);
+  expect(await db.prepare('SELECT event_id FROM publication_regeneration_events WHERE event_id=?').bind(eventId).first()).toBeNull();
+  await db.prepare("UPDATE publication_jobs SET state='generating' WHERE publication_run_id=?").bind(runId).run();
+  expect(await advanceUnconfirmedPublicationRestart(db,clock,runId,1,1)).toBe('contended');
+  await db.prepare("UPDATE publication_jobs SET state='succeeded',successful_generation=1 WHERE publication_run_id=?").bind(runId).run();
+  expect(await reopenSuccessfulJobForRegeneration(db,clock,runId,1)).toBeNull();
+  await db.prepare("UPDATE publication_jobs SET state='failed' WHERE publication_run_id=?").bind(runId).run();
+  expect(await completePublicationVerification(db,attempt,claim.verifierId)).toBe(true);
+  expect(await reopenFailedJobForRestart(db,clock,runId,'workflow')).toBe(true);
 });
