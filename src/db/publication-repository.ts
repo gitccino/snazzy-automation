@@ -666,7 +666,14 @@ export async function completePublicationVerification(
   const key = JSON.stringify(['publication', attempt.runId, attempt.generation, attempt.notificationCycle, 'verification']);
   const [result] = await db.batch([update, db.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at)
     SELECT ?, group_id, result_json, ? FROM publication_verification_claims
-    WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND verifier_id=? AND changes()=1`)
+    WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND verifier_id=? AND changes()=1
+      AND NOT EXISTS (SELECT 1 FROM workflow_feedback_results f
+        WHERE f.kind='publication' AND f.run_id=publication_verification_claims.publication_run_id
+          AND f.generation=publication_verification_claims.generation AND f.notification_cycle=publication_verification_claims.notification_cycle
+          AND f.group_id=publication_verification_claims.group_id
+          AND f.revision=(SELECT MAX(revision) FROM workflow_feedback_results WHERE kind=f.kind AND run_id=f.run_id AND generation=f.generation AND notification_cycle=f.notification_cycle)
+          AND json_extract(f.outcome_json,'$.outcome')='unconfirmed' AND json_extract(f.outcome_json,'$.action')='verify'
+          AND json_extract(publication_verification_claims.result_json,'$.outcome')='unconfirmed')`)
     .bind(key, new Date().toISOString(), attempt.runId, attempt.generation, attempt.notificationCycle, verifierId)]);
   return result!.meta.changes === 1;
 }

@@ -118,6 +118,47 @@ it('queues the unconfirmed verification behind the original result for the next 
   expect(await repo.head(groupId)).toBeNull();
 });
 
+it.each(['pending materialization', 'queued', 'accepted', 'different action'] as const)('handles equivalent feedback with original %s', async state => {
+  const { createWorkflowFeedbackRepository } = await import('../../src/db/workflow-feedback');
+  const runId = crypto.randomUUID(), groupId = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:groupId});
+  await db.prepare("INSERT INTO publication_jobs (publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,'generating','workflow','x','x',1,1,?)").bind(runId,context).run();
+  const attempt = {runId,generation:1,notificationCycle:1,groupId};
+  const feedback = createWorkflowFeedbackRepository(db);
+  const key = JSON.stringify(['publication',runId,1,1,'terminal']);
+  expect(await feedback.commitOutcome({...attempt,kind:'publication'}, {stage:'prepare outputs',action:state === 'different action' ? 'retry' : 'verify',outcome:'unconfirmed',resultKey:key,references:{thaiDate:'19 พฤศจิกายน 2569',airtableRunUrl:`https://airtable.com/base/table/${runId}`,publicBaseUrl:'https://old.test'}})).toBe(true);
+  const original = await db.prepare('SELECT * FROM workflow_feedback_results WHERE result_key=?').bind(key).first();
+  const repo = createLineReplyRepository(db, fixedClock('2026-11-19T08:00:00Z'));
+  const result = {schemaVersion:1,kind:'publication',runId,generation:1,notificationCycle:1,outcome:'unconfirmed',messages:[{type:'text',text:'verification'}]} as const;
+  if (state === 'queued' || state === 'accepted') {
+    await repo.enqueueResult({resultKey:key,groupId,result:{...result,messages:[{type:'text',text:'original'}]}});
+    await feedback.markMaterialized(key,groupId);
+    if (state === 'accepted') await db.prepare("UPDATE line_result_outbox SET state='accepted' WHERE result_key=?").bind(key).run();
+  }
+  const before = (await db.prepare('SELECT * FROM line_result_outbox WHERE group_id=?').bind(groupId).all()).results;
+  const claim = await claimPublicationVerification(db,attempt);
+  if (claim.status !== 'claimed') throw new Error('expected claim');
+  const intent = {originWorkflowId:claim.originWorkflowId,contextJson:claim.contextJson,result:{...result,messages:[...result.messages]}};
+  expect(await completePublicationVerification(db,attempt,'stale',intent)).toBe(false);
+  expect(await completePublicationVerification(db,attempt,claim.verifierId,intent)).toBe(true);
+  expect(await db.prepare('SELECT completed,result_json FROM publication_verification_claims WHERE publication_run_id=?').bind(runId).first()).toEqual({completed:1,result_json:JSON.stringify(intent.result)});
+  const after = (await db.prepare('SELECT * FROM line_result_outbox WHERE group_id=? ORDER BY sequence').bind(groupId).all()).results;
+  expect(after.slice(0,before.length)).toEqual(before);
+  expect(after).toHaveLength(before.length + (state === 'different action' ? 1 : 0));
+  const saved = await db.prepare('SELECT * FROM workflow_feedback_results WHERE result_key=?').bind(key).first();
+  expect(saved).toEqual({...original,materialized:state === 'queued' || state === 'accepted' ? 1 : 0});
+  if (state === 'pending materialization') {
+    const clock = fixedClock('2026-11-19T08:00:00Z');
+    const requests: unknown[] = [];
+    const line = createLineClient({channelAccessToken:'x',fetch:async (_url,init) => { requests.push(JSON.parse(String(init?.body))); return Response.json({}); }});
+    await deliverEventReply({eventId:crypto.randomUUID(),groupId,workflowId:'wf',receivedAt:clock.now().toISOString(),replyToken:'fresh',commandReply:null,drainQueue:true,publicBaseUrl:'https://new.test'}, {repo,line,clock,isGroupAllowed:async()=>true,feedback});
+    expect(requests).toHaveLength(1);
+    expect(JSON.stringify(requests)).toContain('https://airtable.com/base/table/');
+    expect(await feedback.pendingByGroup(groupId,10)).toHaveLength(0);
+    expect((await db.prepare('SELECT result_key FROM line_result_outbox WHERE group_id=?').bind(groupId).all()).results).toEqual([{result_key:key}]);
+  }
+});
+
 it('proves only the current tracked pre-document failure without conflicting facts', async () => {
   const { readPreGoogleFailure } = await import('../../src/db/publication-repository');
   const runId = crypto.randomUUID();
