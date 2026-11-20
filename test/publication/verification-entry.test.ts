@@ -135,3 +135,27 @@ it.each(['match','conflict','unavailable','changed'])('verifies saved finalizati
     if (mode === 'match') expect(JSON.stringify(outbox.results)).toContain(intent.docUrl);
   } finally { fetchMock.mockRestore(); }
 });
+
+it('reads the saved cleanup ID using the captured folder and leaves the outcome uncertain', async () => {
+  const env = {...testEnv(), GOOGLE_OAUTH_CLIENT_ID:'client', GOOGLE_OAUTH_CLIENT_SECRET:'secret', GOOGLE_REFRESH_TOKEN:'refresh', PUBLICATION_WORKFLOW:{get:vi.fn(async()=>({status:async()=>({status:'terminated'})}))}} as any;
+  const runId = crypto.randomUUID(), groupId = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:groupId,settings:{config:{googleDriveFolderId:'folder'}}});
+  await env.DB.prepare("INSERT INTO publication_jobs(publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,'generating','original','x','x',1,1,?)").bind(runId,context).run();
+  await env.DB.prepare("INSERT INTO publication_cleanup_intents VALUES (?,1,1,'original',?,'saved/id')").bind(runId,context).run();
+  const claim = await claimPublicationVerification(env.DB,{runId,generation:1,notificationCycle:1,groupId});
+  if (claim.status !== 'claimed') throw new Error('missing claim');
+  const fetchMock = vi.spyOn(globalThis,'fetch').mockImplementation(async (url,init) => {
+    if (String(url).includes('oauth2.googleapis.com')) return Response.json({access_token:'token',expires_in:3600});
+    expect(String(url)).toContain('/files/saved%2Fid?fields=id,parents,trashed,appProperties');
+    expect((init?.headers as any).Authorization).toBe('Bearer token');
+    expect(init?.method ?? 'GET').toBe('GET');
+    return Response.json({id:'saved/id',parents:['folder'],trashed:false,appProperties:{publicationRunId:runId}});
+  });
+  try {
+    const payload = {kind:'verification',publicationRunId:runId,generation:1,notificationCycle:1,groupId,verifierId:claim.verifierId};
+    await PublicationWorkflow.prototype.run.call({env} as any,{payload,instanceId:claim.verifierId} as any,{do:async (_:string,cb:()=>Promise<unknown>)=>cb()} as any);
+    const row = await env.DB.prepare('SELECT result_json FROM publication_verification_claims WHERE publication_run_id=?').bind(runId).first();
+    expect(JSON.parse(row.result_json).outcome).toBe('unconfirmed');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  } finally { fetchMock.mockRestore(); }
+});

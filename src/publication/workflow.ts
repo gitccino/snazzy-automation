@@ -17,7 +17,7 @@ import type { OperationContext } from "../settings/schema";
 import type { Env } from "../env";
 import { createAssetStore } from "../import/asset-store";
 import { createLineReplyRepository } from '../db/line-reply-repository';
-import { readPublicationJob, completePublicationVerification, readPreGoogleFailure, readFinalizationCandidate } from '../db/publication-repository';
+import { readPublicationJob, completePublicationVerification, readPreGoogleFailure, readFinalizationCandidate, readPublicationCleanupCandidate } from '../db/publication-repository';
 import { createWorkflowFeedbackRepository } from '../db/workflow-feedback';
 import { docsUnconfirmedCard } from '../line/docs-summary-card';
 import type { TerminalResultV1 } from '../line/reply-types';
@@ -347,6 +347,19 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
             const record = z.object({id:z.string(),fields:z.object({Status:z.string(), 'Google Doc URL':z.string(), 'Generated At':z.string()})}).parse(await airtable.json());
             confirmedSuccess = intent.docUrl === `https://docs.google.com/document/d/${encodeURIComponent(intent.docId)}/edit` && file.id === intent.docId && file.name === intent.title && file.parents.includes(config.googleDriveFolderId) && !file.trashed && document.ok && record.id === attempt.runId && record.fields.Status === 'Generated' && record.fields['Google Doc URL'] === intent.docUrl && record.fields['Generated At'] === intent.generatedAt;
           } catch { /* Unavailable or conflicting evidence remains unconfirmed. */ }
+        }
+        // A metadata read alone cannot confirm whether a cleanup succeeded.
+        const cleanup = await readPublicationCleanupCandidate(this.env.DB, attempt, payload.verifierId);
+        if (cleanup) {
+          try {
+            const fetcher = fetch.bind(globalThis);
+            const tokens = createGoogleAuthClient({clientId:this.env.GOOGLE_OAUTH_CLIENT_ID, clientSecret:this.env.GOOGLE_OAUTH_CLIENT_SECRET, refreshToken:this.env.GOOGLE_REFRESH_TOKEN}, {now:()=>new Date()}, fetcher);
+            const token = await tokens.getAccessToken();
+            const response = await fetcher(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(cleanup.doc_id)}?fields=id,parents,trashed,appProperties`, {headers:{Authorization:`Bearer ${token}`}});
+            if (!response.ok) throw new Error('drive_read_failed');
+            const file = z.object({id:z.string(), parents:z.array(z.string()), trashed:z.boolean(), appProperties:z.object({publicationRunId:z.string()})}).parse(await response.json());
+            if (file.id !== cleanup.doc_id || !file.parents.includes(cleanup.folder_id) || file.trashed || file.appProperties.publicationRunId !== (attempt.generation === 1 ? attempt.runId : publicationWorkflowId(attempt.runId, attempt.generation))) throw new Error('drive_metadata_mismatch');
+          } catch { /* Missing or conflicting evidence remains unconfirmed. */ }
         }
         const preGoogleFailure = await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId);
         let confirmedFailed = false;
