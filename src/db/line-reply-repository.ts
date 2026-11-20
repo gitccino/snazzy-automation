@@ -14,9 +14,9 @@ export function createLineReplyRepository(db: D1Database, clock: Clock) {
   const now = () => clock.now().toISOString();
   async function transition(eventId: string, phase: string, state: string, disposition: string | null = null, evidence:ReplyProviderEvidence={status:null,requestId:null}) {
     await db.batch([
-      db.prepare(`UPDATE line_reply_dispatches SET phase=?, disposition=?, request_id=?, http_status=?, updated_at=?
+      db.prepare(`UPDATE line_reply_dispatches SET phase=?, disposition=?, request_id=?, http_status=?, rejection_proven=?, updated_at=?
         WHERE event_id=? AND phase IN ('dispatched','uncertain')`)
-        .bind(phase, disposition, evidence.requestId?.slice(0,200)??null, evidence.status, now(), eventId),
+        .bind(phase, disposition, evidence.requestId?.slice(0,200)??null, evidence.status, phase === 'rejected' && evidence.status !== null && evidence.status >= 300 && evidence.status < 500 ? 1 : 0, now(), eventId),
       db.prepare(`UPDATE line_result_outbox SET state=?, owner_event_id=CASE WHEN ?='pending' THEN NULL ELSE owner_event_id END
         WHERE owner_event_id=? AND NOT EXISTS(SELECT 1 FROM line_reply_owner_dispositions d WHERE d.sequence=line_result_outbox.sequence) AND EXISTS(SELECT 1 FROM line_reply_dispatches WHERE event_id=? AND phase=?)`)
         .bind(state, state, eventId, eventId, phase),

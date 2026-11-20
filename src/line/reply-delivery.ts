@@ -48,7 +48,9 @@ export async function deliverEventReply(input: {
           const facts=outcome.references;
           if(outcome.outcome==='unconfirmed' && facts?.thaiDate && facts.airtableRunUrl && facts.publicBaseUrl) {
             const card=docsUnconfirmedCard({thaiDate:facts.thaiDate,airtableRunUrl:facts.airtableRunUrl},facts.publicBaseUrl);
-            await deps.feedback.replaceUnsentHead(input.groupId,row.sequence,row.result_json,{schemaVersion:1,kind:'publication',runId:row.run_id,generation:row.generation,notificationCycle:row.notification_cycle,outcome:'unconfirmed',messages:[{type:'flex',altText:card.text,contents:card.contents}]});
+            const replacement={schemaVersion:1,kind:'publication',runId:row.run_id,generation:row.generation,notificationCycle:row.notification_cycle,outcome:'unconfirmed',messages:[{type:'flex',altText:card.text,contents:card.contents}]};
+            await deps.feedback.replaceUnsentHead(input.groupId,row.sequence,row.result_json,replacement);
+            await deps.feedback.replaceRejectedHead(input.groupId,row.sequence,row.result_json,replacement);
           }
         }
       }

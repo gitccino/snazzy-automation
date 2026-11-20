@@ -76,11 +76,23 @@ export function createWorkflowFeedbackRepository(db: D1Database) {
     return db.prepare(`SELECT o.sequence,o.result_json,f.run_id,f.generation,f.notification_cycle,f.result_key,f.outcome_json
       FROM line_result_outbox o JOIN workflow_feedback_results f ON f.result_key=o.result_key AND f.group_id=o.group_id
       WHERE o.group_id=? AND o.sequence=(SELECT MIN(sequence) FROM line_result_outbox WHERE group_id=? AND state!='accepted' AND NOT EXISTS(SELECT 1 FROM line_reply_owner_dispositions d WHERE d.sequence=line_result_outbox.sequence))
-      AND o.state='pending' AND o.owner_event_id IS NULL AND f.kind='publication' AND f.revision=0`).bind(groupId,groupId).first<{sequence:number;result_json:string;run_id:string;generation:number;notification_cycle:number;result_key:string;outcome_json:string}>();
+      AND o.state IN ('pending','blocked') AND f.kind='publication' AND f.revision=0`).bind(groupId,groupId).first<{sequence:number;result_json:string;run_id:string;generation:number;notification_cycle:number;result_key:string;outcome_json:string}>();
   }
   async function replaceUnsentHead(groupId: string, sequence: number, raw: string, result: unknown) {
     await db.prepare(`UPDATE line_result_outbox SET result_json=? WHERE group_id=? AND sequence=? AND result_json=? AND state='pending' AND owner_event_id IS NULL
-      AND NOT EXISTS(SELECT 1 FROM line_reply_dispatches WHERE candidate_sequence=line_result_outbox.sequence)`).bind(JSON.stringify(result),groupId,sequence,raw).run();
+      AND sequence=(SELECT MIN(sequence) FROM line_result_outbox WHERE group_id=? AND state!='accepted' AND NOT EXISTS(SELECT 1 FROM line_reply_owner_dispositions d WHERE d.sequence=line_result_outbox.sequence))
+      AND NOT EXISTS(SELECT 1 FROM line_reply_owner_dispositions WHERE sequence=line_result_outbox.sequence)
+      AND NOT EXISTS(SELECT 1 FROM line_reply_dispatches WHERE candidate_sequence=line_result_outbox.sequence)`).bind(JSON.stringify(result),groupId,sequence,raw,groupId).run();
+  }
+  async function replaceRejectedHead(groupId: string, sequence: number, raw: string, result: unknown) {
+    await db.prepare(`UPDATE line_result_outbox SET result_json=?, state='pending', owner_event_id=NULL
+      WHERE group_id=? AND sequence=? AND result_json=? AND state IN ('pending','blocked')
+      AND sequence=(SELECT MIN(sequence) FROM line_result_outbox WHERE group_id=? AND state!='accepted' AND NOT EXISTS(SELECT 1 FROM line_reply_owner_dispositions d WHERE d.sequence=line_result_outbox.sequence))
+      AND NOT EXISTS(SELECT 1 FROM line_reply_owner_dispositions WHERE sequence=line_result_outbox.sequence)
+      AND EXISTS(SELECT 1 FROM line_reply_dispatches WHERE candidate_sequence=line_result_outbox.sequence)
+      AND NOT EXISTS(SELECT 1 FROM line_reply_dispatches WHERE candidate_sequence=line_result_outbox.sequence AND (group_id!=line_result_outbox.group_id OR phase!='rejected' OR rejection_proven!=1 OR http_status IS NULL OR http_status<300 OR http_status>=500 OR disposition IS NULL OR disposition NOT IN ('retry_on_new_event','blocked_payload')))
+      AND ((state='pending' AND owner_event_id IS NULL) OR (state='blocked' AND EXISTS(SELECT 1 FROM line_reply_dispatches WHERE event_id=line_result_outbox.owner_event_id AND candidate_sequence=line_result_outbox.sequence AND group_id=line_result_outbox.group_id AND phase='rejected' AND disposition='blocked_payload')))`)
+      .bind(JSON.stringify(result),groupId,sequence,raw,groupId).run();
   }
   async function markMaterialized(resultKey: string, groupId: string) {
     await db.prepare(`UPDATE workflow_feedback_results SET materialized=1 WHERE result_key=? AND group_id=? AND EXISTS (SELECT 1 FROM line_result_outbox WHERE result_key=? AND group_id=?)`).bind(resultKey,groupId,resultKey,groupId).run();
@@ -88,5 +100,5 @@ export function createWorkflowFeedbackRepository(db: D1Database) {
   async function hasOutbox(resultKey: string, groupId: string) {
     return !!await db.prepare('SELECT 1 FROM line_result_outbox WHERE result_key=? AND group_id=?').bind(resultKey,groupId).first();
   }
-  return { publicationHead, replaceUnsentHead, markMaterialized, hasOutbox, lookupTrustedEarlyFailure, recordStage, commitOutcome, upsertEvidence, readEvidence, pendingByGroup };
+  return { publicationHead, replaceUnsentHead, replaceRejectedHead, markMaterialized, hasOutbox, lookupTrustedEarlyFailure, recordStage, commitOutcome, upsertEvidence, readEvidence, pendingByGroup };
 }
