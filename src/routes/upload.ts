@@ -3,7 +3,7 @@ import { saveImportContextIfAbsent, parseContext } from "../db/execution-context
 import type { OperationContext } from "../settings/schema";
 import { OperationalError } from "../shared/errors";
 import type { Env } from "../env";
-import { createImportRepository, claimImportVerification } from "../db/import-repository";
+import { createImportRepository, claimImportVerification, renewImportVerification } from "../db/import-repository";
 import { createSequenceRepository } from "../db/sequence-repository";
 import { deriveSourceAlbumId } from "../icloud/client";
 import type { ImportWorkflowParams } from "../import/types";
@@ -115,12 +115,32 @@ async function startImport(
               .first<{ status: "completed" | "completed_with_failures" }>();
             if (terminal) return Response.json({ status: terminal.status === "completed" ? "completed" : "partial", importRunId: owner.id }, { status: 409 });
             if (stopped && owner.settings_context_json) {
-              const workflowId = importWorkflowId(owner.id), verifierId = `import-verification-${owner.id}`;
-              const claimed = await claimImportVerification(env.DB, {runId:owner.id, albumId:sourceAlbumId, workflowId, groupId:context.replyGroupId, contextJson:owner.settings_context_json});
-              const pending = claimed || !!await env.DB.prepare(`SELECT 1 FROM import_verification_claims WHERE import_run_id=? AND source_album_id=? AND origin_workflow_id=? AND group_id=? AND context_json=? AND verifier_id=? AND completed IS NULL`)
-                .bind(owner.id, sourceAlbumId, workflowId, context.replyGroupId, owner.settings_context_json, verifierId).first();
-              if (pending) {
-                try { await env.IMPORT_WORKFLOW.create({id:verifierId, params:{kind:'verification', importRunId:owner.id}}); } catch { /* A later request retries the deterministic verifier ID. */ }
+              const workflowId = importWorkflowId(owner.id);
+              const input = {runId:owner.id, albumId:sourceAlbumId, workflowId, groupId:context.replyGroupId, contextJson:owner.settings_context_json};
+              const claimed = await claimImportVerification(env.DB, input);
+              let verifierId: string | null = claimed ? `import-verification-${owner.id}` : null;
+              const isActive = (status: string) => ["queued", "running", "waiting", "waitingForPause"].includes(status);
+              if (!claimed) {
+                const saved = await env.DB.prepare(`SELECT verifier_id FROM import_verification_claims WHERE import_run_id=? AND source_album_id=? AND origin_workflow_id=? AND group_id=? AND context_json=? AND completed IS NULL`)
+                  .bind(owner.id, sourceAlbumId, workflowId, context.replyGroupId, owner.settings_context_json).first<{verifier_id:string}>();
+                if (saved) {
+                  try {
+                    const status = (await (await env.IMPORT_WORKFLOW.get(saved.verifier_id)).status()).status;
+                    if (isActive(status)) return Response.json({status:"checking", importRunId:owner.id}, {status:409});
+                    if (["errored", "terminated"].includes(status)) verifierId = await renewImportVerification(env.DB, input, saved.verifier_id);
+                  } catch { /* Unavailable is not proof of interruption. */ }
+                }
+              }
+              if (verifierId) {
+                try {
+                  await env.IMPORT_WORKFLOW.create({id:verifierId, params:{kind:'verification', importRunId:owner.id}});
+                  return Response.json({status:"checking", importRunId:owner.id}, {status:409});
+                } catch {
+                  try {
+                    const status = (await (await env.IMPORT_WORKFLOW.get(verifierId)).status()).status;
+                    if (isActive(status)) return Response.json({status:"checking", importRunId:owner.id}, {status:409});
+                  } catch { /* Hold uncertain dispatch. */ }
+                }
               }
             }
             if (!live) return Response.json({ status: "owner_review", importRunId: owner.id }, { status: 409 });

@@ -38,6 +38,7 @@ const ImportTriggerResponseSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("already_running") }),
   z.object({ status: z.literal("busy") }),
   z.object({ status: z.literal("owner_review"), importRunId: z.string().min(1) }),
+  z.object({ status: z.literal("checking"), importRunId: z.string().min(1) }),
   z.object({ status: z.literal("completed"), importRunId: z.string().min(1) }),
   z.object({ status: z.literal("partial"), importRunId: z.string().min(1) }),
   z.object({ status: z.literal("sequence_not_bootstrapped") }),

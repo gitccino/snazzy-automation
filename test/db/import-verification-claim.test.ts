@@ -40,3 +40,19 @@ it('atomically completes and queues one result, rolling back on outbox failure',
   expect(await completeImportVerification(db, input, verifierId, result)).toBe(false);
   expect(await db.prepare('SELECT count(*) AS n FROM line_result_outbox WHERE result_key=?').bind(JSON.stringify(['import',runId,1,1,'verification'])).first('n')).toBe(1);
 });
+
+it('renews only once and fences stale completion', async () => {
+  const { renewImportVerification, completeImportVerification } = await import('../../src/db/import-repository');
+  const db = testEnv().DB, runId = crypto.randomUUID(), albumId = crypto.randomUUID();
+  const contextJson = JSON.stringify({replyGroupId:'owner', target:'original'});
+  const input = {runId, albumId, workflowId:`import-${runId}`, groupId:'owner', contextJson};
+  const oldId = `import-verification-${runId}`;
+  await db.prepare("INSERT INTO import_runs (id,source_album_id,trigger,status,started_at,settings_context_json) VALUES (?,?,'line','running','x',?)").bind(runId, albumId, contextJson).run();
+  expect(await claimImportVerification(db, input)).toBe(true);
+  const renewed = await Promise.all([renewImportVerification(db, input, oldId), renewImportVerification(db, input, oldId)]);
+  expect(renewed.filter(Boolean)).toHaveLength(1);
+  const result: TerminalResultV1 = {schemaVersion:1, kind:'import', runId, generation:1, notificationCycle:1, outcome:'unconfirmed', messages:[{type:'text', text:'check'}]};
+  expect(await completeImportVerification(db, input, oldId, result)).toBe(false);
+  expect(await completeImportVerification(db, input, renewed.find(Boolean)!, result)).toBe(true);
+  expect(await renewImportVerification(db, input, renewed.find(Boolean)!)).toBeNull();
+});

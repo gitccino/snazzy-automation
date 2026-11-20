@@ -157,13 +157,36 @@ describe("handleUploadTrigger", () => {
       env.IMPORT_WORKFLOW = { createBatch, get, create } as unknown as typeof env.IMPORT_WORKFLOW;
       await handleUploadTrigger(env, "line", "original", context, "event-original");
       const response = await handleUploadTrigger(env, "line", "fresh", context, "event-fresh");
-      expect(await response.json()).toEqual(state === "running" ? { status: "already_running" } : { status: "owner_review", importRunId: "original" });
+      expect(await response.json()).toEqual(state === "running" ? { status: "already_running" } : { status: state === "errored" ? "checking" : "owner_review", importRunId: "original" });
       expect(get).toHaveBeenCalledWith("import-original");
       expect(createBatch).toHaveBeenCalledTimes(1);
       if (state === 'errored') expect(create).toHaveBeenCalledWith({id:'import-verification-original', params:{kind:'verification', importRunId:'original'}});
       else expect(create).not.toHaveBeenCalled();
     },
   );
+  it('replays a lost verifier create response and renews only after interruption', async () => {
+    const { env } = triggerEnv();
+    await createSequenceRepository(env.DB).bootstrap("product_id", 1);
+    const { captureOperationContext } = await import("../../src/settings/runtime");
+    const context = await captureOperationContext(env, "owner-group");
+    let verifierStatus = "running";
+    const get = vi.fn().mockImplementation(async (id: string) => ({status: async () => ({status: id === "import-original" ? "errored" : verifierStatus})}));
+    const create = vi.fn().mockRejectedValueOnce(new Error("response lost")).mockResolvedValue({});
+    const createBatch = vi.fn().mockResolvedValue([]);
+    env.IMPORT_WORKFLOW = {createBatch, get, create} as unknown as typeof env.IMPORT_WORKFLOW;
+    await handleUploadTrigger(env, "line", "original", context, "event-original");
+    for (const event of ["one", "two"]) {
+      const response = await handleUploadTrigger(env, "line", event, context, `event-${event}`);
+      expect(await response.json()).toEqual({status:"checking", importRunId:"original"});
+    }
+    expect(create).toHaveBeenCalledTimes(1);
+    verifierStatus = "terminated";
+    const response = await handleUploadTrigger(env, "line", "three", context, "event-three");
+    expect(await response.json()).toEqual({status:"checking", importRunId:"original"});
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create.mock.calls[1]![0].id).not.toBe('import-verification-original');
+    expect(createBatch).toHaveBeenCalledTimes(1);
+  });
   it.each(["completed", "completed_with_failures"] as const)("observes %s finalization during workflow lookup", async (status) => {
     const { env } = triggerEnv();
     const runId = `original-${status}`, groupId = `owner-${status}`;

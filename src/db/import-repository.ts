@@ -465,6 +465,15 @@ export async function claimImportVerification(db: D1Database, input: { runId: st
   return result.meta.changes === 1;
 }
 
+export async function renewImportVerification(db: D1Database, input: { runId: string; albumId: string; workflowId: string; groupId: string; contextJson: string }, previousId: string): Promise<string | null> {
+  const verifierId = `import-verification-${crypto.randomUUID()}`;
+  const row = await db.prepare(`UPDATE import_verification_claims SET verifier_id=?
+    WHERE import_run_id=? AND source_album_id=? AND origin_workflow_id=? AND group_id=? AND context_json=? AND verifier_id=? AND completed IS NULL
+      AND EXISTS (SELECT 1 FROM import_runs r WHERE r.id=import_verification_claims.import_run_id AND r.source_album_id=import_verification_claims.source_album_id AND r.trigger='line' AND r.status='running' AND r.settings_context_json=import_verification_claims.context_json AND json_valid(r.settings_context_json) AND json_extract(r.settings_context_json,'$.replyGroupId')=import_verification_claims.group_id)
+    RETURNING verifier_id`).bind(verifierId, input.runId, input.albumId, input.workflowId, input.groupId, input.contextJson, previousId).first();
+  return row ? verifierId : null;
+}
+
 export async function completeImportVerification(
   db: D1Database,
   input: { runId: string; albumId: string; workflowId: string; groupId: string; contextJson: string },
