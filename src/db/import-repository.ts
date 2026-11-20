@@ -15,7 +15,12 @@ export interface ProductGroupRow {
   attemptCount: number; failureReason: string | null; createdAt: string; updatedAt: string;
 }
 
+export type ScanPhoto = { applePhotoId: string; position: number; captureAt: string | null; mediaType: "image/jpeg" };
+
 export interface ImportRepository {
+  claimImportScan(id: string): Promise<boolean>;
+  getImportScan(id: string): Promise<ScanPhoto[] | "incomplete" | null>;
+  completeImportScan(id: string, photos: ScanPhoto[]): Promise<void>;
   createImportRun(input: { id: string; sourceAlbumId: string; trigger: "cron" | "line" | "admin" }): Promise<void>;
   hasRunningImportRun(sourceAlbumId: string): Promise<boolean>;
   markImportRunStartFailed(id: string): Promise<void>;
@@ -108,6 +113,20 @@ function toGroupRow(input: unknown): ProductGroupRow {
 
 export function createImportRepository(db: D1Database, _ids: IdGenerator, clock: Clock): ImportRepository {
   return {
+    async claimImportScan(id) {
+      const result = await db.prepare("UPDATE import_runs SET scan_evidence_json = ? WHERE id = ? AND scan_evidence_json IS NULL").bind('"incomplete"', id).run();
+      return result.meta.changes === 1;
+    },
+    async getImportScan(id) {
+      const row = await db.prepare("SELECT scan_evidence_json FROM import_runs WHERE id = ?").bind(id).first<{ scan_evidence_json: string | null }>();
+      if (!row) throw new Error("Import run not found");
+      if (row.scan_evidence_json === null) return null;
+      return z.union([z.literal("incomplete"), z.array(z.object({ applePhotoId: z.string().min(1), position: z.number().int().nonnegative(), captureAt: z.string().nullable(), mediaType: z.literal("image/jpeg") }))]).parse(JSON.parse(row.scan_evidence_json));
+    },
+    async completeImportScan(id, photos) {
+      const result = await db.prepare("UPDATE import_runs SET scan_evidence_json = ? WHERE id = ? AND scan_evidence_json = ?").bind(JSON.stringify(photos), id, '"incomplete"').run();
+      if (result.meta.changes !== 1) throw new Error("Import scan claim lost");
+    },
     async createImportRun({ id, sourceAlbumId, trigger }) {
       await db
         .prepare(`INSERT INTO import_runs (id, source_album_id, trigger, status, started_at) VALUES (?, ?, ?, 'running', ?)`)

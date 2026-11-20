@@ -122,14 +122,32 @@ export async function downloadAndGroupSnapshot(
   deps: ImportServiceDeps,
   importRunId: string,
 ): Promise<DownloadAndGroupOutcome> {
-  const snapshot: AlbumSnapshot = await deps.imageSource.getSnapshot();
-  if (snapshot.sourceAlbumId !== deps.sourceAlbumId) {
-    throw new OperationalError(
-      "source_album_identity_mismatch",
-      "Snapshot album identity changed",
-      false,
-    );
+  let evidence = await deps.repo.getImportScan(importRunId);
+  if (evidence === "incomplete") {
+    throw new OperationalError("import_scan_incomplete", "Album scan was interrupted; owner review is required", false);
   }
+  const claimed = evidence === null && await deps.repo.claimImportScan(importRunId);
+  if (evidence === null && !claimed) {
+    throw new OperationalError("import_scan_incomplete", "Album scan is already in progress or interrupted", false);
+  }
+  const current: AlbumSnapshot = await deps.imageSource.getSnapshot();
+  if (current.sourceAlbumId !== deps.sourceAlbumId) {
+    throw new OperationalError("source_album_identity_mismatch", "Snapshot album identity changed", false);
+  }
+  if (claimed) {
+    evidence = current.photos.map(({ applePhotoId, position, captureAt, mediaType }) => ({ applePhotoId, position, captureAt, mediaType }));
+    await deps.repo.completeImportScan(importRunId, evidence);
+  }
+  if (!Array.isArray(evidence)) throw new Error("Import scan evidence unavailable");
+  const byId = new Map(current.photos.map(photo => [photo.applePhotoId, photo]));
+  const photos = evidence.map(original => {
+    const photo = byId.get(original.applePhotoId);
+    if (!photo || photo.captureAt !== original.captureAt || photo.mediaType !== original.mediaType) {
+      throw new OperationalError("import_snapshot_original_unavailable", "An original album photo is unavailable or changed; owner review is required", false);
+    }
+    return { ...photo, position: original.position };
+  });
+  const snapshot: AlbumSnapshot = { ...current, photos };
 
   const savedCheckpoint = await deps.repo.getCheckpoint(deps.sourceAlbumId);
   const firstImportCutoffDate = deps.firstImportCutoffDate;
