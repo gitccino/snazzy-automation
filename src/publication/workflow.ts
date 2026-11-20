@@ -14,7 +14,7 @@ import type { OperationContext } from "../settings/schema";
 import type { Env } from "../env";
 import { createAssetStore } from "../import/asset-store";
 import { createLineReplyRepository } from '../db/line-reply-repository';
-import { readPublicationJob } from '../db/publication-repository';
+import { readPublicationJob, completePublicationVerification } from '../db/publication-repository';
 import { createWorkflowFeedbackRepository } from '../db/workflow-feedback';
 import { docsUnconfirmedCard } from '../line/docs-summary-card';
 import type { TerminalResultV1 } from '../line/reply-types';
@@ -32,7 +32,7 @@ import {
   validatePublication,
   type PublicationServiceDeps,
 } from "./service";
-import type { PublicationResult, PublicationWorkflowParams } from "./types";
+import type { PublicationResult, PublicationWorkflowParams, PublicationBusinessParams } from "./types";
 import { publicationWorkflowId } from "./types";
 
 function depsFor(
@@ -139,7 +139,7 @@ function isContenderRejection(error: unknown): boolean {
 }
 
 export async function runPublicationWorkflow(
-  params: PublicationWorkflowParams,
+  params: PublicationBusinessParams,
   step: WorkflowStep,
   deps: PublicationServiceDeps,
   instanceId?: string,
@@ -313,7 +313,26 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
     event: WorkflowEvent<PublicationWorkflowParams>,
     step: WorkflowStep,
   ): Promise<PublicationResult | null> {
-    const generation = event.payload.generation ?? 1;
+    if (event.payload.kind === "verification") {
+      const payload = event.payload;
+      await step.do("verify-publication", async () => {
+        if (event.instanceId !== payload.verifierId) return;
+        const claim = await this.env.DB.prepare(`SELECT origin_workflow_id, context_json FROM publication_verification_claims
+          WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND group_id=? AND verifier_id=? AND completed=0`)
+          .bind(payload.publicationRunId, payload.generation, payload.notificationCycle, payload.groupId, payload.verifierId)
+          .first<{origin_workflow_id:string; context_json:string}>();
+        const job = await readPublicationJob(this.env.DB, payload.publicationRunId);
+        if (!claim || !job || job.generation !== payload.generation || job.notificationCycle !== payload.notificationCycle || job.correlationId !== claim.origin_workflow_id) return;
+        const attempt = {runId:payload.publicationRunId, generation:payload.generation, notificationCycle:payload.notificationCycle, groupId:payload.groupId};
+        await completePublicationVerification(this.env.DB, attempt, payload.verifierId, {
+          originWorkflowId:claim.origin_workflow_id, contextJson:claim.context_json,
+          result:{schemaVersion:1, kind:'publication', runId:attempt.runId, generation:attempt.generation, notificationCycle:attempt.notificationCycle, outcome:'unconfirmed', messages:[{type:'text', text:`⚠️ ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${attempt.runId}`}]},
+        });
+      });
+      return null;
+    }
+    const payload = event.payload;
+    const generation = payload.generation ?? 1;
     if (
       !Number.isSafeInteger(generation) ||
       generation < 1 ||
@@ -331,7 +350,7 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
       context = await step.do(
         "settings-context",
         { retries: { limit: 0, delay: "1 second" } },
-        () => resolvePublicationContext(this.env, event.payload),
+        () => resolvePublicationContext(this.env, payload),
       );
     } catch (error) {
       try {
