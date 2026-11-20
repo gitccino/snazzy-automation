@@ -715,14 +715,14 @@ export async function completePublicationVerification(
 }
 
 export async function admitPublicationCleanup(db: D1Database, runId: string, generation: number, notificationCycle: number, workflowId: string, docId: string): Promise<boolean> {
-  const row = await db.prepare(`INSERT INTO publication_cleanup_intents (publication_run_id, generation, notification_cycle, origin_workflow_id, context_json, doc_id)
-    SELECT publication_run_id, generation, notification_cycle, correlation_id, settings_context_json, ? FROM publication_jobs
+  const row = await db.prepare(`INSERT INTO publication_cleanup_intents (publication_run_id, generation, notification_cycle, origin_workflow_id, context_json, doc_id, saved_temp_doc)
+    SELECT publication_run_id, generation, notification_cycle, correlation_id, settings_context_json, ?, CASE WHEN temp_doc_id = ? THEN 1 ELSE NULL END FROM publication_jobs
     WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND correlation_id=?
       AND state NOT IN ('succeeded','failed','validation_failed') AND finalization_json IS NULL AND google_doc_id IS NOT ?
     ON CONFLICT(publication_run_id, generation, notification_cycle) DO UPDATE SET doc_id=excluded.doc_id
     WHERE publication_cleanup_intents.doc_id=excluded.doc_id AND publication_cleanup_intents.origin_workflow_id=excluded.origin_workflow_id
       AND publication_cleanup_intents.context_json IS excluded.context_json
-    RETURNING doc_id`).bind(docId, runId, generation, notificationCycle, workflowId, docId).first();
+    RETURNING doc_id`).bind(docId, docId, runId, generation, notificationCycle, workflowId, docId).first();
   return !!row;
 }
 
@@ -730,6 +730,7 @@ export async function readPublicationCleanupCandidate(
   db: D1Database,
   attempt: {runId: string; generation: number; notificationCycle: number; groupId: string},
   verifierId: string,
+  requireSavedTempDoc = true,
 ): Promise<{origin_workflow_id: string; context_json: string; doc_id: string; folder_id: string} | null> {
   return db.prepare(`SELECT c.origin_workflow_id, c.context_json, i.doc_id,
       json_extract(c.context_json,'$.settings.config.googleDriveFolderId') AS folder_id
@@ -742,7 +743,7 @@ export async function readPublicationCleanupCandidate(
       AND json_valid(c.context_json) AND json_extract(c.context_json,'$.replyGroupId')=c.group_id
       AND length(json_extract(c.context_json,'$.settings.config.googleDriveFolderId'))>0 AND length(i.doc_id)>0
       AND j.state IN ('locked','validating','generating','failed') AND j.finalization_json IS NULL
-      AND j.google_doc_id IS NOT i.doc_id AND j.successful_generation=0`)
-    .bind(attempt.runId,attempt.generation,attempt.notificationCycle,attempt.groupId,verifierId)
+      AND j.google_doc_id IS NOT i.doc_id AND j.successful_generation=0 AND (? = 0 OR i.saved_temp_doc = 1)`)
+    .bind(attempt.runId,attempt.generation,attempt.notificationCycle,attempt.groupId,verifierId,requireSavedTempDoc ? 1 : 0)
     .first<{origin_workflow_id:string; context_json:string; doc_id:string; folder_id:string}>();
 }

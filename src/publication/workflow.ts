@@ -349,7 +349,7 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
           } catch { /* Unavailable or conflicting evidence remains unconfirmed. */ }
         }
         // A metadata read alone cannot confirm whether a cleanup succeeded.
-        const cleanup = await readPublicationCleanupCandidate(this.env.DB, attempt, payload.verifierId);
+        const cleanup = await readPublicationCleanupCandidate(this.env.DB, attempt, payload.verifierId, false);
         if (cleanup) {
           try {
             const fetcher = fetch.bind(globalThis);
