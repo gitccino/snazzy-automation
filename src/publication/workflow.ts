@@ -17,7 +17,7 @@ import type { OperationContext } from "../settings/schema";
 import type { Env } from "../env";
 import { createAssetStore } from "../import/asset-store";
 import { createLineReplyRepository } from '../db/line-reply-repository';
-import { readPublicationJob, completePublicationVerification, readPreGoogleFailure, readFinalizationCandidate, readPublicationCleanupCandidate } from '../db/publication-repository';
+import { readPublicationJob, completePublicationVerification, readPreGoogleFailure, readFinalizationCandidate, readPublicationCleanupCandidate, claimPublicationCleanupDispatch, recordPublicationCleanupReceipt } from '../db/publication-repository';
 import { createWorkflowFeedbackRepository } from '../db/workflow-feedback';
 import { docsUnconfirmedCard } from '../line/docs-summary-card';
 import type { TerminalResultV1 } from '../line/reply-types';
@@ -359,6 +359,10 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
             if (!response.ok) throw new Error('drive_read_failed');
             const file = z.object({id:z.string(), parents:z.array(z.string()), trashed:z.boolean(), appProperties:z.object({publicationRunId:z.string()})}).parse(await response.json());
             if (file.id !== cleanup.doc_id || !file.parents.includes(cleanup.folder_id) || file.trashed || file.appProperties.publicationRunId !== (attempt.generation === 1 ? attempt.runId : publicationWorkflowId(attempt.runId, attempt.generation))) throw new Error('drive_metadata_mismatch');
+            if (await claimPublicationCleanupDispatch(this.env.DB, attempt, payload.verifierId, cleanup.doc_id)) {
+              const deletion = await fetcher(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(cleanup.doc_id)}`, {method:'DELETE', headers:{Authorization:`Bearer ${token}`}});
+              if (deletion.ok) await recordPublicationCleanupReceipt(this.env.DB, {...attempt, verifierId:payload.verifierId, docId:cleanup.doc_id, acknowledged:true});
+            }
           } catch { /* Missing or conflicting evidence remains unconfirmed. */ }
         }
         const preGoogleFailure = await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId);

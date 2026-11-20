@@ -159,3 +159,28 @@ it('reads the saved cleanup ID using the captured folder and leaves the outcome 
     expect(fetchMock).toHaveBeenCalledTimes(2);
   } finally { fetchMock.mockRestore(); }
 });
+
+it.each(['success','timeout','mismatch','missing'])('dispatches cleanup at most once: %s', async mode => {
+  const env = {...testEnv(), GOOGLE_OAUTH_CLIENT_ID:'client', GOOGLE_OAUTH_CLIENT_SECRET:'secret', GOOGLE_REFRESH_TOKEN:'refresh', PUBLICATION_WORKFLOW:{get:async()=>({status:async()=>({status:'terminated'})})}} as any;
+  const runId = crypto.randomUUID(), groupId = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:groupId,settings:{config:{googleDriveFolderId:'folder'}}});
+  await env.DB.prepare("INSERT INTO publication_jobs(publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,'generating','original','x','x',1,1,?)").bind(runId,context).run();
+  await env.DB.prepare("INSERT INTO publication_cleanup_intents (publication_run_id,generation,notification_cycle,origin_workflow_id,context_json,doc_id,saved_temp_doc) VALUES (?,1,1,'original',?,'doc',1)").bind(runId,context).run();
+  const claim = await claimPublicationVerification(env.DB,{runId,generation:1,notificationCycle:1,groupId});
+  if (claim.status !== 'claimed') throw new Error('missing claim');
+  let deletes = 0;
+  const mock = vi.spyOn(globalThis,'fetch').mockImplementation(async (url,init) => {
+    if (String(url).includes('oauth2.googleapis.com')) return Response.json({access_token:'token',expires_in:3600});
+    if (init?.method === 'DELETE') { deletes++; if (mode === 'timeout') throw new Error('timeout'); return new Response(null,{status:mode === 'missing' ? 404 : 204}); }
+    return Response.json({id:'doc',parents:[mode === 'mismatch' ? 'other' : 'folder'],trashed:false,appProperties:{publicationRunId:runId}});
+  });
+  try {
+    const payload = {kind:'verification',publicationRunId:runId,generation:1,notificationCycle:1,groupId,verifierId:claim.verifierId};
+    const run = () => PublicationWorkflow.prototype.run.call({env} as any,{payload,instanceId:claim.verifierId} as any,{do:async (_:string,cb:()=>Promise<unknown>)=>cb()} as any);
+    await run(); await run();
+    const row = await env.DB.prepare('SELECT dispatch_verifier_id,deletion_acknowledged FROM publication_cleanup_intents WHERE publication_run_id=?').bind(runId).first();
+    expect(deletes).toBe(mode === 'mismatch' ? 0 : 1);
+    expect(row.deletion_acknowledged).toBe(mode === 'success' ? 1 : null);
+    expect(row.dispatch_verifier_id).toBe(mode === 'mismatch' ? null : claim.verifierId);
+  } finally { mock.mockRestore(); }
+});
