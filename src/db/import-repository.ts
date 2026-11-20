@@ -427,3 +427,25 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
     },
   };
 }
+
+/** Read recorded evidence only while the original LINE run still owns its album. */
+export async function readImportVerificationEvidence(db: D1Database, runId: string, workflowId: string, groupId: string) {
+  if (!runId || !groupId || runId !== workflowId) return null;
+  const row = await db.prepare(`SELECT r.source_album_id, r.settings_context_json, r.scan_evidence_json,
+    (SELECT count(*) FROM product_groups WHERE import_run_id=r.id AND state='pending') AS pending,
+    (SELECT count(*) FROM product_groups WHERE import_run_id=r.id AND state='importing') AS importing,
+    (SELECT count(*) FROM product_groups WHERE import_run_id=r.id AND state='succeeded') AS succeeded,
+    (SELECT count(*) FROM product_groups WHERE import_run_id=r.id AND state='failed') AS failed
+    FROM import_runs r WHERE r.id=? AND r.trigger='line' AND r.status='running'
+      AND json_valid(r.settings_context_json) AND json_extract(r.settings_context_json, '$.replyGroupId')=?`)
+    .bind(runId, groupId).first<{source_album_id: string; settings_context_json: string; scan_evidence_json: string | null; pending: number; importing: number; succeeded: number; failed: number}>();
+  if (!row) return null;
+  let scan: 'incomplete' | 'complete';
+  try {
+    const value: unknown = row.scan_evidence_json === null ? null : JSON.parse(row.scan_evidence_json);
+    const parsed = z.union([z.literal('incomplete'), z.array(z.object({ applePhotoId: z.string().min(1), position: z.number().int().nonnegative(), captureAt: z.string().nullable(), mediaType: z.literal('image/jpeg') }))]).safeParse(value);
+    if (!parsed.success) return null;
+    scan = parsed.data === 'incomplete' ? 'incomplete' : 'complete';
+  } catch { return null; }
+  return { sourceAlbumId: row.source_album_id, contextJson: row.settings_context_json, scan, groups: { pending: row.pending, importing: row.importing, succeeded: row.succeeded, failed: row.failed } };
+}
