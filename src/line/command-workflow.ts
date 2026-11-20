@@ -18,6 +18,7 @@ import { createLineClient } from "./client";
 import type { CommandReply } from "./soldout";
 import type { LineIngressEvent } from "./types";
 import { prepareLineReply } from "./webhook";
+import { parseLineCommand } from "./parser";
 
 const attemptOptions = {
   retries: { limit: 0, delay: "1 second" },
@@ -129,6 +130,9 @@ export class LineCommandWorkflow extends WorkflowEntrypoint<Env,{event:LineIngre
     });
     const allowed=async(groupId:string)=>(await loadSettingsSnapshot(this.env)).config.lineAllowedGroupIds.includes(groupId);
     if(!await allowed(event.source.groupId))return {status:'ignored' as const};
+    const parsed = event.type === 'message' ? parseLineCommand(event.message.text) : null;
+    const provenance = parsed?.ok && (parsed.command.type === 'docs' || parsed.command.type === 'upload')
+      ? { groupId: event.source.groupId, operation: JSON.stringify(parsed.command), workflowId: input.instanceId, receivedAt } : undefined;
     const completed=await step.do('already-processed',()=>this.env.DB.prepare('SELECT event_id FROM line_events WHERE event_id=? UNION ALL SELECT event_id FROM line_event_replies WHERE event_id=? LIMIT 1').bind(event.webhookEventId,event.webhookEventId).first<{event_id:string}>());
     if(completed)return {status:'duplicate' as const};
     const deps=await createWebhookDeps(this.env,input.instanceId,context);
@@ -141,7 +145,7 @@ export class LineCommandWorkflow extends WorkflowEntrypoint<Env,{event:LineIngre
     if(event.type!=='queue-trigger' && isMessengerEvent(event) && deps.messenger && !await messengerAccessAllowed(event,deps.messenger))
       reply={kind:'text',text:'⚠️ สิทธิ์หรือการตั้งค่าเปลี่ยนแล้ว กรุณาขอรายการใหม่'};
     await step.do('record-command-completion',attemptOptions,async()=>{
-      if(reply)await deps.repo.saveEventReply(event.webhookEventId,reply);
+      if(reply)await deps.repo.saveEventReply(event.webhookEventId,reply,provenance);
       await deps.repo.claimEvent(event.webhookEventId,event.source.groupId);
     });
     const status=await step.do('reply-once',attemptOptions,()=>deliverEventReply({eventId:event.webhookEventId,groupId:event.source.groupId,workflowId:input.instanceId,receivedAt,replyToken:event.replyToken,commandReply:reply,drainQueue:event.type!=='postback',publicBaseUrl:deps.publicBaseUrl},{repo:createLineReplyRepository(this.env.DB,deps.clock),line:deps.line,clock:deps.clock,isGroupAllowed:allowed,feedback:createWorkflowFeedbackRepository(this.env.DB)}));
