@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import { testEnv } from '../helpers/env';
-import { acquireOrResumeJob, admitPublicationCleanup, claimPublicationVerification, readPublicationCleanupCandidate } from '../../src/db/publication-repository';
+import { acquireOrResumeJob, admitPublicationCleanup, claimPublicationVerification, claimPublicationCleanupDispatch, readPublicationCleanupCandidate } from '../../src/db/publication-repository';
 
 it('captures an owned cleanup once and fences conflicting attempts', async () => {
   const db = testEnv().DB, id = crypto.randomUUID();
@@ -70,4 +70,29 @@ it('requires saved ownership for delete retry and rejects conflicting job eviden
       await db.prepare('UPDATE publication_jobs SET finalization_json=NULL, google_doc_id=NULL, successful_generation=0 WHERE publication_run_id=?').bind(id).run();
     }
   }
+});
+
+it('atomically claims a saved cleanup once across verifier replacement', async () => {
+  const db = testEnv().DB, id = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:'group', settings:{config:{googleDriveFolderId:'folder'}}});
+  await acquireOrResumeJob(db, {now:()=>new Date()}, id, 'owner');
+  await db.prepare('UPDATE publication_jobs SET settings_context_json=?, temp_doc_id=? WHERE publication_run_id=?').bind(context,'doc',id).run();
+  await admitPublicationCleanup(db,id,1,1,'owner','doc');
+  const attempt = {runId:id,generation:1,notificationCycle:1,groupId:'group'};
+  const claim = await claimPublicationVerification(db,attempt);
+  if (claim.status !== 'claimed') throw new Error('expected claim');
+  expect(await claimPublicationCleanupDispatch(db,{...attempt,groupId:'foreign'},claim.verifierId)).toBe(false);
+  expect(await claimPublicationCleanupDispatch(db,attempt,'stale')).toBe(false);
+  for (const update of ["generation=2", "notification_cycle=2", "correlation_id='foreign'", "settings_context_json='{}'", "finalization_json='{}'", "google_doc_id='doc'", "successful_generation=1"]) {
+    await db.prepare(`UPDATE publication_jobs SET ${update} WHERE publication_run_id=?`).bind(id).run();
+    expect(await claimPublicationCleanupDispatch(db,attempt,claim.verifierId)).toBe(false);
+    await db.prepare("UPDATE publication_jobs SET generation=1, notification_cycle=1, correlation_id='owner', settings_context_json=?, finalization_json=NULL, google_doc_id=NULL, successful_generation=0 WHERE publication_run_id=?").bind(context,id).run();
+  }
+  await db.prepare('UPDATE publication_cleanup_intents SET saved_temp_doc=NULL WHERE publication_run_id=?').bind(id).run();
+  expect(await claimPublicationCleanupDispatch(db,attempt,claim.verifierId)).toBe(false);
+  await db.prepare('UPDATE publication_cleanup_intents SET saved_temp_doc=1 WHERE publication_run_id=?').bind(id).run();
+  const results = await Promise.all([claimPublicationCleanupDispatch(db,attempt,claim.verifierId),claimPublicationCleanupDispatch(db,attempt,claim.verifierId)]);
+  expect(results.filter(Boolean)).toHaveLength(1);
+  await db.prepare("UPDATE publication_verification_claims SET verifier_id='replacement' WHERE publication_run_id=?").bind(id).run();
+  expect(await claimPublicationCleanupDispatch(db,attempt,'replacement')).toBe(false);
 });

@@ -747,3 +747,25 @@ export async function readPublicationCleanupCandidate(
     .bind(attempt.runId,attempt.generation,attempt.notificationCycle,attempt.groupId,verifierId,requireSavedTempDoc ? 1 : 0)
     .first<{origin_workflow_id:string; context_json:string; doc_id:string; folder_id:string}>();
 }
+
+export async function claimPublicationCleanupDispatch(
+  db: D1Database,
+  attempt: {runId: string; generation: number; notificationCycle: number; groupId: string},
+  verifierId: string,
+): Promise<boolean> {
+  const row = await db.prepare(`UPDATE publication_cleanup_intents AS i SET dispatch_verifier_id=?
+    WHERE i.publication_run_id=? AND i.generation=? AND i.notification_cycle=?
+      AND i.dispatch_verifier_id IS NULL AND i.saved_temp_doc=1 AND length(i.doc_id)>0
+      AND EXISTS (SELECT 1 FROM publication_verification_claims c
+        JOIN publication_jobs j ON j.publication_run_id=c.publication_run_id AND j.generation=c.generation
+          AND j.notification_cycle=c.notification_cycle AND j.correlation_id=c.origin_workflow_id AND j.settings_context_json=c.context_json
+        WHERE c.publication_run_id=i.publication_run_id AND c.generation=i.generation AND c.notification_cycle=i.notification_cycle
+          AND c.origin_workflow_id=i.origin_workflow_id AND c.context_json=i.context_json
+          AND c.group_id=? AND c.verifier_id=? AND c.completed=0
+          AND json_valid(c.context_json) AND json_extract(c.context_json,'$.replyGroupId')=c.group_id
+          AND length(json_extract(c.context_json,'$.settings.config.googleDriveFolderId'))>0
+          AND j.state IN ('locked','validating','generating','failed') AND j.finalization_json IS NULL
+          AND j.google_doc_id IS NOT i.doc_id AND j.successful_generation=0)
+    RETURNING dispatch_verifier_id`).bind(verifierId,attempt.runId,attempt.generation,attempt.notificationCycle,attempt.groupId,verifierId).first();
+  return !!row;
+}
