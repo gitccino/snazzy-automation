@@ -259,7 +259,7 @@ it('reads only the current generation finalization intent under the active claim
   const claim = await claimPublicationVerification(db,attempt);
   if (claim.status !== 'claimed') throw new Error('expected claim');
   const read = () => readFinalizationCandidate(db,attempt,claim.verifierId);
-  expect(await read()).toEqual({origin_workflow_id:'workflow',context_json:context,intent});
+  expect(await read()).toEqual({origin_workflow_id:'workflow',context_json:context,intent,finalizationJson:JSON.stringify(intent),googleDocId:'old'});
   expect(await readFinalizationCandidate(db,attempt,'stale')).toBeNull();
   expect(await readFinalizationCandidate(db,{...attempt,groupId:'foreign'},claim.verifierId)).toBeNull();
   await db.prepare('UPDATE publication_jobs SET finalization_json=? WHERE publication_run_id=?').bind(JSON.stringify({...intent,generation:1,docId:'old'}),runId).run();
@@ -268,4 +268,26 @@ it('reads only the current generation finalization intent under the active claim
   expect(await read()).toBeNull();
   await db.prepare('UPDATE publication_jobs SET finalization_json=NULL WHERE publication_run_id=?').bind(runId).run();
   expect(await read()).toBeNull();
+});
+
+ it('fences completion to the exact finalization candidate read', async () => {
+  const { readFinalizationCandidate } = await import('../../src/db/publication-repository');
+  const runId = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:'owner',settings:{config:{airtableBaseId:'base',airtablePublicationRunsTableId:'table',googleDriveFolderId:'folder',googleTemplateDocId:'template'}}});
+  const finalization = {generation:1,publicationDate:'2026-11-20',thaiDate:'date',docId:'new',docUrl:'https://docs.google.com/document/d/new/edit',title:'title',productIds:['A-1'],generatedAt:'2026-11-20T00:00:00.000Z'};
+  await db.prepare("INSERT INTO publication_jobs (publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json,google_doc_id,successful_generation,finalization_json) VALUES (?,'generating','workflow','x','x',1,1,?,'old',1,?)").bind(runId,context,JSON.stringify(finalization)).run();
+  const attempt = {runId,generation:1,notificationCycle:1,groupId:'owner'};
+  const claim = await claimPublicationVerification(db,attempt);
+  if (claim.status !== 'claimed') throw new Error('expected claim');
+  const candidate = await readFinalizationCandidate(db,attempt,claim.verifierId);
+  if (!candidate) throw new Error('expected candidate');
+  const completion = {originWorkflowId:'workflow',contextJson:context,candidate,result:{schemaVersion:1 as const,kind:'publication' as const,runId,generation:1,notificationCycle:1,outcome:'success' as const,messages:[{type:'text' as const,text:'done'}]}};
+  await db.prepare('UPDATE publication_jobs SET finalization_json=? WHERE publication_run_id=?').bind(JSON.stringify({...finalization,title:'changed'}),runId).run();
+  expect(await completePublicationVerification(db,attempt,claim.verifierId,completion)).toBe(false);
+  expect(await db.prepare('SELECT result_json FROM publication_verification_claims WHERE publication_run_id=?').bind(runId).first()).toEqual({result_json:null});
+  expect(await db.prepare('SELECT count(*) AS n FROM line_result_outbox WHERE result_json LIKE ?').bind(`%${runId}%`).first()).toEqual({n:0});
+  await db.prepare('UPDATE publication_jobs SET finalization_json=? WHERE publication_run_id=?').bind(candidate.finalizationJson,runId).run();
+  expect(await completePublicationVerification(db,attempt,claim.verifierId,completion)).toBe(true);
+  expect(await completePublicationVerification(db,attempt,claim.verifierId,completion)).toBe(false);
+  expect(await db.prepare('SELECT count(*) AS n FROM line_result_outbox WHERE result_json LIKE ?').bind(`%${runId}%`).first()).toEqual({n:1});
 });
