@@ -97,10 +97,13 @@ export function createAirtableProductsClient(config: {
         "filterByFormula",
         `{System Group ID} = ${JSON.stringify(systemGroupId)}`,
       );
-      url.searchParams.set("maxRecords", "1");
+      url.searchParams.set("maxRecords", "2");
       const response = await config.fetch(url.toString(), { headers });
       if (!response.ok) await throwOnError(response, "find");
       const body = await parseAirtableJson(response, FindResponseSchema, "find");
+      if (body.records.length > 1) {
+        throw new OperationalError("airtable_group_ambiguous", "Multiple Airtable Products match this group; owner review is required", false);
+      }
       if (body.records.length === 0) return null;
       const record = body.records[0]!;
       return {

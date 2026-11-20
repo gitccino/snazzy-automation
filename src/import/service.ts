@@ -316,11 +316,14 @@ export async function processProductGroupAttempt(
 
     const existing = await deps.airtable.findBySystemGroupId(group.groupId);
     if (existing !== null) {
+      if (existing.productId !== productId) {
+        throw new OperationalError("airtable_product_id_conflict", "Airtable Product ID conflicts with the allocated ID; owner review is required", false);
+      }
       await verifyKnownAirtableProduct(
         deps.airtable,
         existing.recordId,
         {
-          productId: existing.productId,
+          productId,
           systemGroupId: group.groupId,
           uploadDate: intendedUploadDate,
           imageCount: group.attachablePhotos.length,
@@ -331,14 +334,14 @@ export async function processProductGroupAttempt(
         actor: "system:import",
         action: "product_group_succeeded",
         beforeValue: "importing",
-        afterValue: existing.productId,
+        afterValue: productId,
       });
       await deps.repo.setGroupState(group.groupRowId, "succeeded", {
-        productId: existing.productId,
+        productId,
         airtableRecordId: existing.recordId,
         failureReason: null,
       });
-      return { outcome: "succeeded", productId: existing.productId };
+      return { outcome: "succeeded", productId };
     }
     const productImages = await Promise.all(
       group.attachablePhotos.map(async (photo) => {

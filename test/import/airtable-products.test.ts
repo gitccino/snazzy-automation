@@ -52,7 +52,7 @@ describe("airtable-products client", () => {
     });
   });
 
-  it("findBySystemGroupId requests one record from the configured collection", async () => {
+  it("findBySystemGroupId requests two records from the configured collection", async () => {
     const fetchFake = fakeFetch([
       {
         match: (req) => {
@@ -61,7 +61,7 @@ describe("airtable-products client", () => {
             req.method === "GET" &&
             `${url.origin}${url.pathname}` ===
               `https://api.airtable.com/v0/${config.baseId}/${config.tableId}` &&
-            url.searchParams.get("maxRecords") === "1" &&
+            url.searchParams.get("maxRecords") === "2" &&
             url.searchParams.get("filterByFormula") ===
               '{System Group ID} = "grouphash-1"'
           );
@@ -116,6 +116,19 @@ describe("airtable-products client", () => {
     expect(await client.findBySystemGroupId("grouphash-1")).toEqual({
       recordId: "recEXISTING",
       productId: "A-500",
+    });
+  });
+
+  it("rejects multiple matching rows", async () => {
+    const client = createAirtableProductsClient({ ...config, fetch: fakeFetch([{
+      match: (req) => req.method === "GET",
+      respond: () => new Response(JSON.stringify({ records: [
+        { id: "rec1", fields: { "Product ID": "A-501" } },
+        { id: "rec2", fields: { "Product ID": "A-502" } },
+      ] }), { status: 200 }),
+    }]) });
+    await expect(client.findBySystemGroupId("group")).rejects.toMatchObject({
+      code: "airtable_group_ambiguous", retryable: false,
     });
   });
 

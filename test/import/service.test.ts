@@ -1250,7 +1250,7 @@ describe("processProductGroupAttempt", () => {
       {
         findBySystemGroupId: async () => ({
           recordId: "rec-existing",
-          productId: "A-777",
+          productId: "A-501",
         }),
         createProduct: async () => {
           throw new Error("recovery must not create another Airtable row");
@@ -1268,13 +1268,13 @@ describe("processProductGroupAttempt", () => {
 
     await expect(
       processProductGroupAttempt(deps, group, "run-recovery"),
-    ).resolves.toEqual({ outcome: "succeeded", productId: "A-777" });
+    ).resolves.toEqual({ outcome: "succeeded", productId: "A-501" });
 
     expect(verificationCalls).toEqual([
       {
         recordId: "rec-existing",
         expected: {
-          productId: "A-777",
+          productId: "A-501",
           systemGroupId: "task13-group-recovery",
           uploadDate: "2026-09-01",
           imageCount: 4,
@@ -1283,7 +1283,7 @@ describe("processProductGroupAttempt", () => {
     ]);
     expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
       state: "succeeded",
-      productId: "A-777",
+      productId: "A-501",
       airtableRecordId: "rec-existing",
       attemptCount: 1,
     });
@@ -1292,9 +1292,47 @@ describe("processProductGroupAttempt", () => {
         actor: "system:import",
         action: "product_group_succeeded",
         before_value: "importing",
-        after_value: "A-777",
+        after_value: "A-501",
       },
     ]);
+  });
+
+  it("holds a candidate with a different product ID without external mutations", async () => {
+    const create = vi.fn();
+    const remove = vi.fn();
+    const { deps, group } = await buildProcessDeps({
+      findBySystemGroupId: async () => ({ recordId: "rec-other", productId: "A-777" }),
+      createProduct: create,
+      deleteProduct: remove,
+    });
+    await deps.repo.setGroupState(group.groupRowId, "importing", { productId: "A-501" });
+    await expect(processProductGroupAttempt(deps, group, "run-conflict")).rejects.toMatchObject({
+      code: "airtable_product_id_conflict", retryable: false,
+    });
+    expect(create).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "importing", productId: "A-501", airtableRecordId: null,
+    });
+  });
+
+  it("holds ambiguous matches without external mutations", async () => {
+    const create = vi.fn();
+    const remove = vi.fn();
+    const { deps, group } = await buildProcessDeps({
+      findBySystemGroupId: async () => { throw new OperationalError("airtable_group_ambiguous", "Multiple matches", false); },
+      createProduct: create,
+      deleteProduct: remove,
+    });
+    await deps.repo.setGroupState(group.groupRowId, "importing", { productId: "A-501" });
+    await expect(processProductGroupAttempt(deps, group, "run-ambiguous")).rejects.toMatchObject({
+      code: "airtable_group_ambiguous", retryable: false,
+    });
+    expect(create).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "importing", productId: "A-501", airtableRecordId: null,
+    });
   });
 
   it("recovers a response-lost row after Bangkok midnight using its original persisted Upload Date", async () => {
