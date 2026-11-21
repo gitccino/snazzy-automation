@@ -35,7 +35,10 @@ import * as icloud from "../../src/icloud/client";
 import * as marker from "../../src/import/marker";
 import * as products from "../../src/import/airtable-products";
 import { deriveSourceAlbumId } from "../../src/icloud/client";
-import { importWorkflowId } from "../../src/shared/ids";
+import { importWorkflowId, sha256Hex } from "../../src/shared/ids";
+import { computeGroupHash } from "../../src/import/grouping";
+import { inspectImportGroup } from "../../src/db/import-owner-inspection";
+import { routeRequest } from "../../src/router";
 import { captureOperationContext } from "../../src/settings/runtime";
 import { OperationalError } from "../../src/shared/errors";
 
@@ -343,6 +346,81 @@ describe("import acceptance", () => {
     expect(await read("line", context("owner"), crypto.randomUUID())).toEqual([]);
     expect(await read("admin", context("owner"))).toEqual([]);
     expect(await read("line", null)).toEqual([]);
+  });
+
+  it("inspects and repairs a seeded historical group before a fresh signed upload and queued reply", async () => {
+    const id = crypto.randomUUID(), owner = `Cowner-${id}`, token = `token-${id}`;
+    const album = await deriveSourceAlbumId(token), runId = crypto.randomUUID(), groupId = crypto.randomUUID();
+    const photos = ["marker", "a", "b", "c", "d"], bytes = new Uint8Array([255, 216, 255, 4]);
+    const hash = await sha256Hex(bytes), groupHash = await computeGroupHash(album, photos.map(applePhotoId => ({ applePhotoId })));
+    const config = JSON.parse(createTestEnv().APP_CONFIG_JSON);
+    config.LINE_ALLOWED_GROUP_ID = owner;
+    const commands: any[] = [], business: any[] = [], replies: any[] = [];
+    const harness = await buildHarness(album, [], { idPrefix: id });
+    const local = { ...testEnv(), ...createTestEnv(), ICLOUD_SHARED_ALBUM_TOKEN: token, LINE_CHANNEL_SECRET: "secret", APP_CONFIG_JSON: JSON.stringify(config),
+      IMAGES_BUCKET: { get: async () => ({ arrayBuffer: async () => bytes.buffer }) },
+      IMAGES: { input: () => ({ transform: () => ({ output: async () => ({ response: () => new Response(bytes, { headers: { "content-type": "image/jpeg" } }) }) }) }) },
+      LINE_COMMAND_WORKFLOW: { createBatch: async (items: any[]) => { commands.push(...items); return []; }, get: async () => ({ status: async () => ({ status: "running" }) }) },
+      IMPORT_WORKFLOW: { createBatch: async (items: any[]) => { business.push(...items); return []; }, get: async () => ({ status: async () => ({ status: "running" }) }) },
+    } as unknown as Env;
+    const db = local.DB, context = JSON.stringify(await captureOperationContext(local, owner));
+    await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json) VALUES(?,?,'line','completed_with_failures','2026-09-01T09:00:00.000Z',?)").bind(runId, album, context).run();
+    await db.prepare("INSERT INTO product_groups(id,import_run_id,ordinal,group_hash,state,product_id,first_photo_id,last_photo_id,created_at,updated_at) VALUES(?,?,0,?,'failed','A-501','marker','d','now','now')").bind(groupId, runId, groupHash).run();
+    for (const [i, photo] of photos.entries()) {
+      await db.prepare("INSERT INTO product_group_image_members VALUES(?,?,?,?)").bind(groupId, i, photo, photo).run();
+      await db.prepare("INSERT INTO photo_assets(id,source_album_id,apple_photo_id,content_hash,r2_key,position,is_marker,import_run_id,created_at) VALUES(?,?,?,?,?,?,?,?,'now')").bind(crypto.randomUUID(), album, photo, hash, photo, i, i === 0 ? 1 : 0, runId).run();
+    }
+    await db.prepare("INSERT INTO audit_events VALUES(?,?,'system:import','product_id_allocated',NULL,'A-501','now')").bind(crypto.randomUUID(), runId).run();
+    await db.prepare("INSERT INTO airtable_create_claims VALUES(?,'A-501','appTest','tblProducts')").bind(groupId).run();
+    const probe = crypto.randomUUID();
+    await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json) VALUES(?,?,'line','completed','2026-09-01T09:00:00.000Z',?)").bind(probe, album, context).run();
+    const input = { runId, groupId, ownerGroupId: owner, baseId: "appTest", tableId: "tblProducts", recordId: "rec", actor: "operator", reason: "verified", apply: true };
+    const inspect = (group = owner, base = "appTest") => inspectImportGroup(db, runId, group, groupId, base, "tblProducts");
+    const resolve = (tokenValue: string) => routeRequest(new Request("https://worker/admin/import-owner-resolution", { method: "POST", headers: { authorization: `Bearer ${tokenValue}` }, body: JSON.stringify(input) }), local, {} as ExecutionContext);
+    vi.spyOn(icloud, "createICloudClient").mockReturnValue(harness.source);
+    vi.spyOn(marker, "createMarkerDetector").mockReturnValue(fakeMarkerDetector);
+    vi.spyOn(products, "createAirtableProductsClient").mockReturnValue(harness.deps.airtable);
+    const create = vi.spyOn(harness.deps.airtable, "createProduct");
+    const provider = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      expect(init?.method ?? "GET").toMatch(/^(GET|POST)$/);
+      if (String(url).startsWith("https://api.airtable.com/")) { expect(init?.method ?? "GET").toBe("GET"); return Response.json({ fields: { "Product ID": "A-501", "System Group ID": groupHash, "Product Images": photos.slice(1).map(photo => ({ id: photo, filename: "x.jpg", url: "https://v5.airtableusercontent.com/private" })) } }); }
+      if (String(url).startsWith("https://v5.airtableusercontent.com/")) { expect(init?.method ?? "GET").toBe("GET"); return new Response(bytes, { headers: { "content-type": "image/jpeg" } }); }
+      if (String(url).includes("/member/")) return Response.json({ userId: "U1", displayName: "Tester" });
+      if (!String(url).endsWith("/message/reply")) throw new Error(`unexpected fetch ${url}`);
+      replies.push(JSON.parse(String(init?.body))); return Response.json({});
+    });
+    const step = retryingStep() as unknown as WorkflowStep;
+    const admit = async (eventId: string, text: string) => {
+      const body = JSON.stringify({ events: [{ type: "message", webhookEventId: eventId, replyToken: `reply-${eventId}`, source: { type: "group", groupId: owner, userId: "U1" }, message: { type: "text", id: `m-${eventId}`, text } }] });
+      const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const signature = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)))));
+      expect((await handleLineRoute(new Request("https://app/line/webhook", { method: "POST", headers: { "x-line-signature": signature }, body }), local, {} as ExecutionContext)).status).toBe(200);
+      return LineCommandWorkflow.prototype.run.call({ env: local } as unknown as LineCommandWorkflow, { payload: commands.at(-1).params, instanceId: commands.at(-1).id } as any, step);
+    };
+    try {
+      expect(await inspect("foreign")).toBeNull(); expect(await inspect(owner, "foreign")).toBeNull();
+      expect(await inspect()).toMatchObject({ runId, group: { id: groupId, state: "failed", productId: "A-501" }, createClaim: { base_id: "appTest", table_id: "tblProducts" } });
+      expect((await harness.deps.repo.listHistoricalHolds(probe)).some(hold => hold.groupId === groupId)).toBe(true);
+      expect((await resolve("wrong")).status).toBe(401); expect(provider).not.toHaveBeenCalled();
+      expect((await resolve("test-admin-route-token")).status).toBe(200);
+      expect((await resolve("test-admin-route-token")).status).toBe(409);
+      expect(await inspect()).toMatchObject({ group: { state: "succeeded", airtableRecordId: "rec" } });
+      expect((await harness.deps.repo.listHistoricalHolds(probe)).some(hold => hold.groupId === groupId)).toBe(false);
+      expect(await db.prepare("SELECT actor, reason FROM import_owner_group_resolutions WHERE group_id=?").bind(groupId).first()).toEqual({ actor: "operator", reason: "verified" });
+      const event = crypto.randomUUID(); await admit(event, "/upload");
+      expect(business).toHaveLength(1);
+      const result = await ImportWorkflow.prototype.run.call({ env: local } as unknown as ImportWorkflow, { payload: business[0].params, instanceId: business[0].id } as any, step) as ImportRunResult;
+      expect(result.failedGroups).toEqual([]); expect(result.succeededProductIds).toEqual([]);
+      expect(create).not.toHaveBeenCalled();
+      expect(await db.prepare("SELECT state FROM line_result_outbox WHERE group_id=?").bind(owner).first()).toEqual({ state: "pending" });
+      await ImportWorkflow.prototype.run.call({ env: local } as unknown as ImportWorkflow, { payload: business[0].params, instanceId: business[0].id } as any, step);
+      expect(create).not.toHaveBeenCalled();
+      const fresh = crypto.randomUUID(); await admit(fresh, "hello");
+      expect(JSON.stringify(replies.at(-1).messages)).not.toContain(groupId);
+      expect(replies.at(-1).replyToken).toBe(`reply-${fresh}`);
+      expect(await db.prepare("SELECT state FROM line_result_outbox WHERE group_id=?").bind(owner).first()).toEqual({ state: "accepted" });
+      const count = replies.length; await admit(fresh, "hello"); expect(replies).toHaveLength(count); expect(business).toHaveLength(1); expect(create).not.toHaveBeenCalled();
+    } finally { vi.restoreAllMocks(); }
   });
 
   it("delivers the generated import once after lost creation and start responses", async () => {
