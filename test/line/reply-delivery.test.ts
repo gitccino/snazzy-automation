@@ -165,7 +165,7 @@ it('keeps a malformed queue head in place while sending the ordinary command', a
  expect(await testEnv().DB.prepare('SELECT state FROM line_result_outbox WHERE group_id=?').bind(h.groupId).first()).toEqual({state:'pending'});
 });
 
-it.each(['unsent','rejected'])('repairs a %s malformed publication head in place and does not duplicate on replay',async history=>{
+it.each(['unsent','rejected','abandoned','mixed'])('repairs a %s malformed publication head in place and does not duplicate on replay',async history=>{
  const db=testEnv().DB, groupId=crypto.randomUUID(), runId=crypto.randomUUID(), clock=fixedClock('2026-11-20T08:00:00Z');
  await db.prepare(`INSERT INTO publication_jobs(publication_run_id,publication_date,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,?,'generating',?,'x','x',2,1,?)`).bind(runId,runId,runId,JSON.stringify({replyGroupId:groupId})).run();
  const {createWorkflowFeedbackRepository}=await import('../../src/db/workflow-feedback');
@@ -178,8 +178,9 @@ it.each(['unsent','rejected'])('repairs a %s malformed publication head in place
  await db.prepare("INSERT INTO line_reply_dispatches(event_id,group_id,workflow_id,received_at,candidate_sequence,messages_json,phase,updated_at) VALUES (?,?,'wf','x',?,'[]','rejected','x')").bind(evidence,groupId,sequence).run();
  await feedback.replaceUnsentHead(groupId,sequence,'{',{bad:'replacement'});
  expect(await db.prepare('SELECT result_json FROM line_result_outbox WHERE sequence=?').bind(sequence).first('result_json')).toBe('{');
- if(history==='unsent') await db.prepare('DELETE FROM line_reply_dispatches WHERE event_id=?').bind(evidence).run();
+ if(history==='unsent' || history==='abandoned') await db.prepare('DELETE FROM line_reply_dispatches WHERE event_id=?').bind(evidence).run();
  else await db.prepare("UPDATE line_reply_dispatches SET rejection_proven=1,http_status=400,disposition='blocked_payload',request_id='original-receipt' WHERE event_id=?").bind(evidence).run();
+ if(history==='abandoned' || history==='mixed') await db.prepare("INSERT INTO line_reply_dispatches(event_id,group_id,workflow_id,received_at,candidate_sequence,messages_json,phase,updated_at) VALUES (?,?,'wf','x',?,'[]','abandoned','x')").bind(crypto.randomUUID(),groupId,sequence).run();
  const requests:LineReplyMessage[][]=[], repo=createLineReplyRepository(db,clock);
  const input={eventId:crypto.randomUUID(),groupId,workflowId:'wf',receivedAt:clock.now().toISOString(),replyToken:'fresh',commandReply:null,drainQueue:true,publicBaseUrl:'https://new.test'};
  const deps={repo,feedback,clock,isGroupAllowed:async()=>true,line:{sendReplyMessages:async (_token:string,messages:LineReplyMessage[])=>{requests.push(messages);return {requestId:null};}}};
@@ -208,6 +209,11 @@ it('repairs only a head with exclusively proven rejected dispatches', async () =
   expect(await db.prepare('SELECT result_json FROM line_result_outbox WHERE sequence=?').bind(sequence).first('result_json')).toBe('{');
   await db.prepare('DELETE FROM line_reply_dispatches WHERE event_id=?').bind(mixed).run();
  }
+ const contradictory=crypto.randomUUID();
+ await db.prepare("INSERT INTO line_reply_dispatches(event_id,group_id,workflow_id,received_at,candidate_sequence,messages_json,phase,updated_at,http_status) VALUES (?,?,'wf','x',?,'[]','abandoned','x',503)").bind(contradictory,groupId,sequence).run();
+ await feedback.replaceRejectedHead(groupId,sequence!,'{',{fixed:true});
+ expect(await db.prepare('SELECT result_json FROM line_result_outbox WHERE sequence=?').bind(sequence).first('result_json')).toBe('{');
+ await db.prepare('DELETE FROM line_reply_dispatches WHERE event_id=?').bind(contradictory).run();
  await db.prepare("INSERT INTO line_reply_owner_dispositions(event_id,sequence,group_id,decision,actor,reason,created_at) VALUES (?,?,?,'close_unverifiable','owner','reviewed','x')").bind(event,sequence,groupId).run();
  await feedback.replaceRejectedHead(groupId,sequence!,'{',{fixed:true});
  expect(await db.prepare('SELECT result_json FROM line_result_outbox WHERE sequence=?').bind(sequence).first('result_json')).toBe('{');

@@ -99,7 +99,7 @@ export function createWorkflowFeedbackRepository(db: D1Database) {
     await db.prepare(`UPDATE line_result_outbox SET result_json=? WHERE group_id=? AND sequence=? AND result_json=? AND state='pending' AND owner_event_id IS NULL
       AND sequence=(SELECT MIN(sequence) FROM line_result_outbox WHERE group_id=? AND state!='accepted' AND NOT EXISTS(SELECT 1 FROM line_reply_owner_dispositions d WHERE d.sequence=line_result_outbox.sequence))
       AND NOT EXISTS(SELECT 1 FROM line_reply_owner_dispositions WHERE sequence=line_result_outbox.sequence)
-      AND NOT EXISTS(SELECT 1 FROM line_reply_dispatches WHERE candidate_sequence=line_result_outbox.sequence)`).bind(JSON.stringify(result),groupId,sequence,raw,groupId).run();
+      AND NOT EXISTS(SELECT 1 FROM line_reply_dispatches WHERE candidate_sequence=line_result_outbox.sequence AND (group_id!=line_result_outbox.group_id OR phase!='abandoned' OR rejection_proven!=0 OR request_id IS NOT NULL OR http_status IS NOT NULL OR disposition IS NOT NULL))`).bind(JSON.stringify(result),groupId,sequence,raw,groupId).run();
   }
   async function replaceRejectedHead(groupId: string, sequence: number, raw: string, result: unknown) {
     await db.prepare(`UPDATE line_result_outbox SET result_json=?, state='pending', owner_event_id=NULL
@@ -107,7 +107,7 @@ export function createWorkflowFeedbackRepository(db: D1Database) {
       AND sequence=(SELECT MIN(sequence) FROM line_result_outbox WHERE group_id=? AND state!='accepted' AND NOT EXISTS(SELECT 1 FROM line_reply_owner_dispositions d WHERE d.sequence=line_result_outbox.sequence))
       AND NOT EXISTS(SELECT 1 FROM line_reply_owner_dispositions WHERE sequence=line_result_outbox.sequence)
       AND EXISTS(SELECT 1 FROM line_reply_dispatches WHERE candidate_sequence=line_result_outbox.sequence)
-      AND NOT EXISTS(SELECT 1 FROM line_reply_dispatches WHERE candidate_sequence=line_result_outbox.sequence AND (group_id!=line_result_outbox.group_id OR phase!='rejected' OR rejection_proven!=1 OR http_status IS NULL OR http_status<300 OR http_status>=500 OR disposition IS NULL OR disposition NOT IN ('retry_on_new_event','blocked_payload')))
+      AND NOT EXISTS(SELECT 1 FROM line_reply_dispatches WHERE candidate_sequence=line_result_outbox.sequence AND (group_id!=line_result_outbox.group_id OR COALESCE(((phase='abandoned' AND rejection_proven=0 AND request_id IS NULL AND http_status IS NULL AND disposition IS NULL) OR (phase='rejected' AND rejection_proven=1 AND http_status>=300 AND http_status<500 AND disposition IN ('retry_on_new_event','blocked_payload'))),0)=0))
       AND ((state='pending' AND owner_event_id IS NULL) OR (state='blocked' AND EXISTS(SELECT 1 FROM line_reply_dispatches WHERE event_id=line_result_outbox.owner_event_id AND candidate_sequence=line_result_outbox.sequence AND group_id=line_result_outbox.group_id AND phase='rejected' AND disposition='blocked_payload')))`)
       .bind(JSON.stringify(result),groupId,sequence,raw,groupId).run();
   }

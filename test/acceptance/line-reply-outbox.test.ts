@@ -177,3 +177,49 @@ it.each(['/upload', '/docs'])('reconciles a lost %s creation response through si
   expect(sends).toHaveLength(2); expect(sends[1].messages).toEqual([{type:'text',text:'final notice'}]);
  } finally {fetcher.mockRestore();}
 });
+
+it('fences an interrupted prepared sender and drains FIFO through fresh signed events', async () => {
+ const group='CtestGroup', old=crypto.randomUUID(), batches:any[]=[], sends:any[]=[];
+ const env={...testEnv(),...createTestEnv(),LINE_CHANNEL_SECRET:'secret',LINE_COMMAND_WORKFLOW:{createBatch:async(items:any[])=>{batches.push(...items);return [];}}} as unknown as Env;
+ const clock={now:()=>new Date()}, repo=createLineReplyRepository(env.DB,clock);
+ for(const text of ['first','second']) await repo.enqueueResult({groupId:group,resultKey:old+text,result:{schemaVersion:1,kind:'import',runId:old+text,generation:1,notificationCycle:1,outcome:'success',messages:[{type:'text',text}]}});
+ let reserved!:()=>void, wake!:()=>void;
+ const atReservation=new Promise<void>(resolve=>{reserved=resolve;}), resume=new Promise<void>(resolve=>{wake=resolve;});
+ const {deliverEventReply}=await import('../../src/line/reply-delivery');
+ const paused={...repo,prepareDispatch:async(input:Parameters<typeof repo.prepareDispatch>[0])=>{const result=await repo.prepareDispatch(input);reserved();await resume;return result;}};
+ const send=vi.spyOn(globalThis,'fetch').mockImplementation(async(url,init)=>{if(!String(url).endsWith('/message/reply'))throw new Error('unexpected fetch');sends.push(JSON.parse(String(init?.body)));return Response.json({});});
+ const step={do:async(_n:string,a:any,b?:any)=>(b??a)()} as unknown as WorkflowStep;
+ const event=async(text:string)=>{const id=crypto.randomUUID(), body=JSON.stringify({events:[{type:'message',webhookEventId:id,replyToken:'token-'+id,source:{type:'group',groupId:group,userId:'U1'},message:{type:'text',id:'m',text}}]});expect((await handleLineRoute(new Request('https://app/line/webhook',{method:'POST',headers:{'x-line-signature':await sign(body,'secret')},body}),env,{} as ExecutionContext)).status).toBe(200);const item=batches.at(-1);return LineCommandWorkflow.prototype.run.call({env} as unknown as LineCommandWorkflow,{payload:item.params,instanceId:item.id} as any,step);};
+ try {
+  const original=deliverEventReply({eventId:old,groupId:group,workflowId:old,receivedAt:clock.now().toISOString(),replyToken:'old',commandReply:null,drainQueue:true,publicBaseUrl:'https://app.test'},{repo:paused,clock,isGroupAllowed:async()=>true,line:{sendReplyMessages:async()=>{throw new Error('old sender dispatched');}}});
+  await atReservation;
+  expect((await repo.head(group))?.state).toBe('reserved');
+  await event('/help'); expect(sends).toHaveLength(1); expect(JSON.stringify(sends[0])).not.toContain('first');
+  await repo.abandonPrepared(old);
+  await event('hello'); await event('hello');
+  expect(sends.slice(1).map(x=>x.messages)).toEqual([[{type:'text',text:'first'}],[{type:'text',text:'second'}]]);
+  wake(); expect(await original).toBe('duplicate'); expect(sends).toHaveLength(3);
+  expect(await env.DB.prepare('SELECT phase FROM line_reply_dispatches WHERE event_id=?').bind(old).first()).toEqual({phase:'abandoned'});
+ } finally {wake?.();send.mockRestore();}
+});
+
+it.each(['rejected','uncertain'] as const)('respects %s dispatch evidence through signed eligible events', async phase => {
+ const group='CtestGroup', id=crypto.randomUUID(), batches:any[]=[], sends:any[]=[];
+ const env={...testEnv(),...createTestEnv(),LINE_CHANNEL_SECRET:'secret',LINE_COMMAND_WORKFLOW:{createBatch:async(items:any[])=>{batches.push(...items);return [];}}} as unknown as Env;
+ const clock={now:()=>new Date()}, repo=createLineReplyRepository(env.DB,clock);
+ for(const text of ['first','second']) await repo.enqueueResult({groupId:group,resultKey:id+text,result:{schemaVersion:1,kind:'import',runId:id+text,generation:1,notificationCycle:1,outcome:'success',messages:[{type:'text',text}]}});
+ const sequence=(await repo.head(group))!.sequence;
+ await repo.prepareDispatch({eventId:id,groupId:group,workflowId:id,receivedAt:clock.now().toISOString(),candidateSequence:sequence,messages:[{type:'text',text:'first'}]});
+ await repo.beginDispatch(id);
+ if(phase==='rejected') await repo.reject(id,'retry_on_new_event',{status:429,requestId:'rejected'}); else await repo.markUncertain(id);
+ await repo.abandonPrepared(id);
+ const send=vi.spyOn(globalThis,'fetch').mockImplementation(async(url,init)=>{if(!String(url).endsWith('/message/reply'))throw new Error('unexpected fetch');sends.push(JSON.parse(String(init?.body)));return Response.json({});});
+ const step={do:async(_n:string,a:any,b?:any)=>(b??a)()} as unknown as WorkflowStep;
+ const event=async(text:string)=>{const eventId=crypto.randomUUID(),body=JSON.stringify({events:[{type:'message',webhookEventId:eventId,replyToken:'token',source:{type:'group',groupId:group,userId:'U1'},message:{type:'text',id:'m',text}}]});expect((await handleLineRoute(new Request('https://app/line/webhook',{method:'POST',headers:{'x-line-signature':await sign(body,'secret')},body}),env,{} as ExecutionContext)).status).toBe(200);const item=batches.at(-1);await LineCommandWorkflow.prototype.run.call({env} as unknown as LineCommandWorkflow,{payload:item.params,instanceId:item.id} as any,step);};
+ try {
+  await event('/help'); await event('hello');
+  if(phase==='rejected') { expect(JSON.stringify(sends[0])).toContain('first');expect(sends[1].messages).toEqual([{type:'text',text:'second'}]);expect(await repo.head(group)).toBeNull(); }
+  else { expect(sends).toHaveLength(1);expect(JSON.stringify(sends[0])).not.toContain('first');expect(await repo.head(group)).toMatchObject({sequence,state:'uncertain'}); }
+  expect(await env.DB.prepare('SELECT phase FROM line_reply_dispatches WHERE event_id=?').bind(id).first()).toEqual({phase});
+ } finally {send.mockRestore();}
+});
