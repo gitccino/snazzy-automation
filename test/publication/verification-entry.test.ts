@@ -235,3 +235,44 @@ it.each(['success', 'lost response', 'manual conflict'])('repairs the original A
     }
   } finally { mock.mockRestore(); }
 });
+
+it('delivers the primary failure and one truthful cleanup correction only to the original group', async () => {
+  const env = {...testEnv(), PUBLICATION_WORKFLOW:{get:async()=>({status:async()=>({status:'terminated'})})}} as any;
+  const runId = crypto.randomUUID(), groupId = crypto.randomUUID(), otherGroup = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:groupId,settings:{config:{airtableBaseId:'original-base',airtablePublicationRunsTableId:'original-table'}}});
+  await env.DB.prepare("INSERT INTO publication_jobs(publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json,temp_doc_id) VALUES (?,'failed','original','x','x',1,1,?,'doc')").bind(runId,context).run();
+  const claim = await claimPublicationVerification(env.DB,{runId,generation:1,notificationCycle:1,groupId});
+  if (claim.status !== 'claimed') throw new Error('missing claim');
+  await env.DB.prepare("INSERT INTO publication_cleanup_intents (publication_run_id,generation,notification_cycle,origin_workflow_id,context_json,doc_id,saved_temp_doc,dispatch_verifier_id,deletion_acknowledged) VALUES (?,1,1,'original',?,'doc',1,?,1)").bind(runId,context,claim.verifierId).run();
+  await env.DB.prepare("INSERT INTO workflow_feedback(kind,run_id,generation,notification_cycle,group_id,context_json,stage,failure_code) VALUES ('publication',?,1,1,?,?,'prepare outputs','anthropic_failed')").bind(runId,groupId,context).run();
+  await env.DB.prepare("INSERT INTO workflow_feedback_results(kind,run_id,generation,notification_cycle,revision,result_key,outcome_json,group_id) VALUES ('publication',?,1,1,0,?,?,?)").bind(runId,runId,JSON.stringify({stage:'prepare outputs',failureCode:'anthropic_failed',action:'verify',outcome:'unconfirmed',references:{thaiDate:'19 พฤศจิกายน 2569',airtableRunUrl:`https://airtable.com/base/table/${runId}`,publicBaseUrl:'https://original.test'}}),groupId).run();
+  let status = 'Generating', patches = 0;
+  const mock = vi.spyOn(globalThis,'fetch').mockImplementation(async (url,init) => {
+    expect(String(url)).toBe(`https://api.airtable.com/v0/original-base/original-table/${runId}`);
+    if (init?.method === 'PATCH') { patches++; expect(JSON.parse(String(init.body))).toEqual({fields:{Status:'Failed'}}); status = 'Failed'; }
+    return Response.json({id:runId,fields:{Status:status}});
+  });
+  try {
+    const payload = {kind:'verification',publicationRunId:runId,generation:1,notificationCycle:1,groupId,verifierId:claim.verifierId};
+    const run = () => PublicationWorkflow.prototype.run.call({env} as any,{payload,instanceId:claim.verifierId} as any,{do:async (_:string,cb:()=>Promise<unknown>)=>cb()} as any);
+    await run();
+    const clock = fixedClock('2026-11-20T08:00:00Z'), requests: any[] = [];
+    const line = createLineClient({channelAccessToken:'test',fetch:async (_url,init)=>{requests.push(JSON.parse(String(init?.body)));return Response.json({}, {headers:{'x-line-request-id':'receipt'}});}});
+    const deps = {clock,repo:createLineReplyRepository(env.DB,clock),feedback:createWorkflowFeedbackRepository(env.DB),isGroupAllowed:async()=>true,line};
+    const deliver = (groupId: string) => deliverEventReply({groupId,workflowId:'eligible',receivedAt:clock.now().toISOString(),replyToken:'fresh',commandReply:null,drainQueue:true,publicBaseUrl:'https://new.test',eventId:crypto.randomUUID()},deps);
+    await deliver(otherGroup);
+    expect(requests).toHaveLength(0);
+    await deliver(groupId); await deliver(groupId);
+    expect(requests).toHaveLength(2);
+    expect(JSON.stringify(requests[0])).toContain(`https://airtable.com/base/table/${runId}`);
+    expect(JSON.stringify(requests[0])).toContain('19 พฤศจิกายน 2569');
+    expect(JSON.stringify(requests[0])).toContain('ยังยืนยันสถานะงานเอกสารไม่ได้');
+    expect(requests[1].messages[0]).toEqual({type:'text',text:'ผลการตรวจสอบเปลี่ยนจากข้อความก่อนหน้า'});
+    expect(JSON.stringify(requests[1])).toContain('ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed');
+    const calls = mock.mock.calls.length;
+    await run(); await deliver(groupId); await deliver(otherGroup);
+    expect(requests).toHaveLength(2);
+    expect(patches).toBe(1);
+    expect(mock).toHaveBeenCalledTimes(calls);
+  } finally { mock.mockRestore(); }
+});
