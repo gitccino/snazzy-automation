@@ -142,3 +142,38 @@ it('rotates pending imports and publication after repeated ordinary replies', as
   expect(workflow.create).not.toHaveBeenCalled();
  } finally {send.mockRestore();}
 });
+
+it.each(['/upload', '/docs'])('reconciles a lost %s creation response through signed LINE entry', async command => {
+ const group='CtestGroup', other='Cother-'+crypto.randomUUID(), id=crypto.randomUUID(), batches:any[]=[], sends:any[]=[], creations:any[]=[];
+ const config=JSON.parse(createTestEnv().APP_CONFIG_JSON); config.LINE_ALLOWED_GROUP_ID=group;
+ let created=false;
+ const business={
+  createBatch:async(items:any[])=>{creations.push(...items);created=true;throw new Error('creation response lost');},
+  create:async(item:any)=>{creations.push(item);created=true;throw new Error('creation response lost');},
+  get:async()=>{if(!created)throw new Error('instance.not_found');return {status:async()=>({status:'running'})};},
+ };
+ const env={...testEnv(),...createTestEnv(),APP_CONFIG_JSON:JSON.stringify(config),ICLOUD_SHARED_ALBUM_TOKEN:'token-'+id,LINE_CHANNEL_SECRET:'secret',LINE_COMMAND_WORKFLOW:{createBatch:async(items:any[])=>{batches.push(...items);return [];},get:async()=>({status:async()=>({status:'running'})})},IMPORT_WORKFLOW:business,PUBLICATION_WORKFLOW:business} as unknown as Env;
+ await env.DB.prepare("INSERT OR IGNORE INTO sequences (name,next_value,bootstrapped_at) VALUES ('product_id',1,'now')").run();
+ const step={do:async(_n:string,a:any,b?:any)=>(b??a)()} as unknown as WorkflowStep;
+ const fetcher=vi.spyOn(globalThis,'fetch').mockImplementation(async(url,init)=>{
+  const target=String(url);
+  if(target.includes('/member/'))return Response.json({userId:'U1',displayName:'Tester'});
+  if(target.includes('api.airtable.com'))return Response.json({records:[{id:'rec-'+id,fields:{'Publication Date':new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Bangkok'}),Status:'Ready',Products:[]}}]});
+  if(target.endsWith('/message/reply')){sends.push(JSON.parse(String(init?.body)));return Response.json({});}
+  throw new Error('unexpected fetch '+target);
+ });
+ const admit=async(eventId:string,text:string,groupId=group)=>{const body=JSON.stringify({events:[{type:'message',webhookEventId:eventId,replyToken:'token-'+eventId,source:{type:'group',groupId,userId:'U1'},message:{type:'text',id:'m-'+eventId,text}}]});expect((await handleLineRoute(new Request('https://app/line/webhook',{method:'POST',headers:{'x-line-signature':await sign(body,'secret')},body}),env,{} as ExecutionContext)).status).toBe(200);};
+ const run=async(item:any)=>LineCommandWorkflow.prototype.run.call({env} as unknown as LineCommandWorkflow,{payload:item.params,instanceId:item.id} as any,step);
+ try {
+  await admit(id,command); expect(await run(batches[0])).toEqual({status:'accepted'});
+  await admit(id,command); expect(await run(batches[1])).toEqual({status:'duplicate'});
+  expect(creations).toHaveLength(1); expect(sends).toHaveLength(1);
+  const repo=createLineReplyRepository(env.DB,{now:()=>new Date()});
+  await repo.enqueueResult({groupId:group,resultKey:id,result:{schemaVersion:1,kind:'import',runId:id,generation:1,notificationCycle:1,outcome:'success',messages:[{type:'text',text:'final notice'}]}});
+  config.LINE_ALLOWED_GROUP_ID=other; env.APP_CONFIG_JSON=JSON.stringify(config);
+  await admit(crypto.randomUUID(),'hello',other); await run(batches[2]); expect(sends).toHaveLength(1);
+  config.LINE_ALLOWED_GROUP_ID=group; env.APP_CONFIG_JSON=JSON.stringify(config);
+  await admit(crypto.randomUUID(),'hello'); expect(await run(batches[3])).toEqual({status:'accepted'});
+  expect(sends).toHaveLength(2); expect(sends[1].messages).toEqual([{type:'text',text:'final notice'}]);
+ } finally {fetcher.mockRestore();}
+});

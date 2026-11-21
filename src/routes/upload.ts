@@ -69,8 +69,10 @@ async function startImport(
     return Response.json({ status: "started", importRunId }, { status: 202 });
   }
   const workflowInstanceId = importWorkflowId(importRunId);
-  if (existing?.status === "running" && await importWorkflowExists(env, workflowInstanceId)) {
-    return Response.json({ status: "started", importRunId, workflowInstanceId }, { status: 202 });
+  if (existing?.status === "running") {
+    if (await importWorkflowExists(env, workflowInstanceId))
+      return Response.json({ status: "started", importRunId, workflowInstanceId }, { status: 202 });
+    throw new OperationalError("workflow_start_failed", "Import Workflow handoff unconfirmed", true);
   }
   // The partial unique index arbitrates concurrent triggers; a preflight read cannot.
   try {
@@ -185,8 +187,7 @@ async function startImport(
         if (await importWorkflowExists(env, workflowInstanceId)) {
           return Response.json({ status: "started", importRunId, workflowInstanceId }, { status: 202 });
         }
-        uncertainStart = false;
-        throw new Error("workflow_start_failed");
+        throw new OperationalError("workflow_start_failed", "Import Workflow handoff unconfirmed", true);
       }
     }
     return Response.json(

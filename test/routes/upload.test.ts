@@ -118,16 +118,26 @@ describe("handleUploadTrigger", () => {
       });
       env.IMPORT_WORKFLOW = { createBatch, get } as unknown as typeof env.IMPORT_WORKFLOW;
       await handleUploadTrigger(env, "line", "stable");
-      if (state === "unavailable" || state === "unknown") {
+      if (state === "unavailable" || state === "unknown" || state === "missing") {
         await expect(handleUploadTrigger(env, "line", "stable")).rejects.toMatchObject({ retryable: true });
       } else {
         expect((await handleUploadTrigger(env, "line", "stable")).status).toBe(202);
       }
       expect(get).toHaveBeenCalledWith("import-stable");
-      expect(createBatch).toHaveBeenCalledTimes(state === "missing" ? 2 : 1);
+      expect(createBatch).toHaveBeenCalledTimes(1);
       expect(await env.DB.prepare("SELECT status FROM import_runs WHERE id = ?").bind("stable").first("status")).toBe("running");
     },
   );
+  it("holds a lost creation response when lookup reports missing, including replay", async () => {
+    const { env } = triggerEnv();
+    await createSequenceRepository(env.DB).bootstrap("product_id", 1);
+    const createBatch = vi.fn().mockRejectedValue(new Error("response lost"));
+    env.IMPORT_WORKFLOW = { createBatch, get: vi.fn().mockRejectedValue(new Error("instance.not_found")) } as unknown as typeof env.IMPORT_WORKFLOW;
+    await expect(handleUploadTrigger(env, "line", "uncertain")).rejects.toThrow();
+    await expect(handleUploadTrigger(env, "line", "uncertain")).rejects.toThrow();
+    expect(createBatch).toHaveBeenCalledTimes(1);
+    expect(await env.DB.prepare("SELECT status FROM import_runs WHERE id = ?").bind("uncertain").first("status")).toBe("running");
+  });
   it.each(["found", "missing", "unavailable"] as const)(
     "reconciles a failed create response when workflow is %s", async (state) => {
       const { env } = triggerEnv();
@@ -142,7 +152,7 @@ describe("handleUploadTrigger", () => {
       if (state === "found") expect((await handleUploadTrigger(env, "line", "stable")).status).toBe(202);
       else await expect(handleUploadTrigger(env, "line", "stable")).rejects.toMatchObject({ retryable: true });
       expect(get).toHaveBeenCalledWith("import-stable");
-      expect(await env.DB.prepare("SELECT status FROM import_runs WHERE id = ?").bind("stable").first("status")).toBe(state === "missing" ? "start_failed" : "running");
+      expect(await env.DB.prepare("SELECT status FROM import_runs WHERE id = ?").bind("stable").first("status")).toBe("running");
     },
   );
   it.each(["running", "errored", "unknown"] as const)(
