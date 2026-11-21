@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import { testEnv } from '../helpers/env';
-import { acquireOrResumeJob, admitPublicationCleanup, claimPublicationVerification, claimPublicationCleanupDispatch, recordPublicationCleanupReceipt, readPublicationCleanupCandidate } from '../../src/db/publication-repository';
+import { acquireOrResumeJob, admitPublicationCleanup, claimPublicationVerification, claimPublicationCleanupDispatch, recordPublicationCleanupReceipt, readPublicationCleanupCandidate, readPublicationCleanupReceipt } from '../../src/db/publication-repository';
 
 it('captures an owned cleanup once and fences conflicting attempts', async () => {
   const db = testEnv().DB, id = crypto.randomUUID();
@@ -118,4 +118,30 @@ it('records only the original positive deletion receipt, including after a newer
   expect(await recordPublicationCleanupReceipt(db,receipt)).toBe(true);
   expect(await db.prepare('SELECT deletion_acknowledged FROM publication_cleanup_intents WHERE publication_run_id=?').bind(id).first()).toEqual({deletion_acknowledged:1});
   expect(await db.prepare('SELECT generation,temp_doc_id FROM publication_jobs WHERE publication_run_id=?').bind(id).first()).toEqual({generation:2,temp_doc_id:'new-doc'});
+});
+
+
+it('reads an acknowledged receipt only for the current owner and matching captured attempt', async () => {
+  const db = testEnv().DB, id = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:'group',settings:{config:{googleDriveFolderId:'folder'}}});
+  await acquireOrResumeJob(db,{now:()=>new Date()},id,'owner');
+  await db.prepare('UPDATE publication_jobs SET settings_context_json=?, temp_doc_id=? WHERE publication_run_id=?').bind(context,'doc',id).run();
+  await admitPublicationCleanup(db,id,1,1,'owner','doc');
+  const attempt = {runId:id,generation:1,notificationCycle:1,groupId:'group'};
+  const claim = await claimPublicationVerification(db,attempt);
+  if (claim.status !== 'claimed') throw new Error('expected claim');
+  await claimPublicationCleanupDispatch(db,attempt,claim.verifierId,'doc');
+  await recordPublicationCleanupReceipt(db,{...attempt,verifierId:claim.verifierId,docId:'doc',acknowledged:true});
+  expect(await readPublicationCleanupReceipt(db,attempt,claim.verifierId)).toEqual({origin_workflow_id:'owner',context_json:context,doc_id:'doc'});
+  expect(await readPublicationCleanupReceipt(db,attempt,'stale')).toBeNull();
+  expect(await readPublicationCleanupReceipt(db,{...attempt,groupId:'other'},claim.verifierId)).toBeNull();
+  for (const update of ["generation=2", "notification_cycle=2", "correlation_id='other'", "settings_context_json='{}'", "finalization_json='{}'", "google_doc_id='doc'", "successful_generation=1"]) {
+    await db.prepare(`UPDATE publication_jobs SET ${update} WHERE publication_run_id=?`).bind(id).run();
+    expect(await readPublicationCleanupReceipt(db,attempt,claim.verifierId)).toBeNull();
+    await db.prepare("UPDATE publication_jobs SET generation=1, notification_cycle=1, correlation_id='owner', settings_context_json=?, finalization_json=NULL, google_doc_id=NULL, successful_generation=0 WHERE publication_run_id=?").bind(context,id).run();
+  }
+  const replacement = crypto.randomUUID();
+  await db.prepare("UPDATE publication_verification_claims SET verifier_id=? WHERE publication_run_id=?").bind(replacement,id).run();
+  expect(await readPublicationCleanupReceipt(db,attempt,claim.verifierId)).toBeNull();
+  expect(await readPublicationCleanupReceipt(db,attempt,replacement)).not.toBeNull();
 });

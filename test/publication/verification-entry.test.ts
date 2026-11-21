@@ -184,3 +184,20 @@ it.each(['success','timeout','mismatch','missing'])('dispatches cleanup at most 
     expect(row.dispatch_verifier_id).toBe(mode === 'mismatch' ? null : claim.verifierId);
   } finally { mock.mockRestore(); }
 });
+
+it('does not access Drive when replaying an acknowledged cleanup receipt', async () => {
+  const env = {...testEnv(), PUBLICATION_WORKFLOW:{get:async()=>({status:async()=>({status:'terminated'})})}} as any;
+  const runId = crypto.randomUUID(), groupId = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:groupId,settings:{config:{googleDriveFolderId:'folder'}}});
+  await env.DB.prepare("INSERT INTO publication_jobs(publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,'failed','original','x','x',1,1,?)").bind(runId,context).run();
+  const claim = await claimPublicationVerification(env.DB,{runId,generation:1,notificationCycle:1,groupId});
+  if (claim.status !== 'claimed') throw new Error('missing claim');
+  await env.DB.prepare("INSERT INTO publication_cleanup_intents (publication_run_id,generation,notification_cycle,origin_workflow_id,context_json,doc_id,saved_temp_doc,dispatch_verifier_id,deletion_acknowledged) VALUES (?,1,1,'original',?,'doc',1,?,1)").bind(runId,context,claim.verifierId).run();
+  const mock = vi.spyOn(globalThis,'fetch').mockRejectedValue(new Error('unexpected fetch'));
+  try {
+    const payload = {kind:'verification',publicationRunId:runId,generation:1,notificationCycle:1,groupId,verifierId:claim.verifierId};
+    const run = () => PublicationWorkflow.prototype.run.call({env} as any,{payload,instanceId:claim.verifierId} as any,{do:async (_:string,cb:()=>Promise<unknown>)=>cb()} as any);
+    await run(); await run();
+    expect(mock).not.toHaveBeenCalled();
+  } finally { mock.mockRestore(); }
+});

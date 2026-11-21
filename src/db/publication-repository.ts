@@ -748,6 +748,26 @@ export async function readPublicationCleanupCandidate(
     .first<{origin_workflow_id:string; context_json:string; doc_id:string; folder_id:string}>();
 }
 
+export async function readPublicationCleanupReceipt(
+  db: D1Database,
+  attempt: {runId: string; generation: number; notificationCycle: number; groupId: string},
+  verifierId: string,
+): Promise<{origin_workflow_id: string; context_json: string; doc_id: string} | null> {
+  return db.prepare(`SELECT c.origin_workflow_id, c.context_json, i.doc_id
+    FROM publication_cleanup_intents i
+    JOIN publication_verification_claims c ON c.publication_run_id=i.publication_run_id AND c.generation=i.generation
+      AND c.notification_cycle=i.notification_cycle AND c.origin_workflow_id=i.origin_workflow_id AND c.context_json=i.context_json
+    JOIN publication_jobs j ON j.publication_run_id=c.publication_run_id AND j.generation=c.generation
+      AND j.notification_cycle=c.notification_cycle AND j.correlation_id=c.origin_workflow_id AND j.settings_context_json=c.context_json
+    WHERE c.publication_run_id=? AND c.generation=? AND c.notification_cycle=? AND c.group_id=? AND c.verifier_id=? AND c.completed=0
+      AND json_valid(c.context_json) AND json_extract(c.context_json,'$.replyGroupId')=c.group_id
+      AND length(i.doc_id)>0 AND i.saved_temp_doc=1 AND length(i.dispatch_verifier_id)>0 AND i.deletion_acknowledged=1
+      AND j.state IN ('locked','validating','generating','failed') AND j.finalization_json IS NULL
+      AND j.google_doc_id IS NOT i.doc_id AND j.successful_generation=0`)
+    .bind(attempt.runId,attempt.generation,attempt.notificationCycle,attempt.groupId,verifierId)
+    .first<{origin_workflow_id:string; context_json:string; doc_id:string}>();
+}
+
 export async function claimPublicationCleanupDispatch(
   db: D1Database,
   attempt: {runId: string; generation: number; notificationCycle: number; groupId: string},

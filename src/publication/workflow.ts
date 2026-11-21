@@ -17,7 +17,7 @@ import type { OperationContext } from "../settings/schema";
 import type { Env } from "../env";
 import { createAssetStore } from "../import/asset-store";
 import { createLineReplyRepository } from '../db/line-reply-repository';
-import { readPublicationJob, completePublicationVerification, readPreGoogleFailure, readFinalizationCandidate, readPublicationCleanupCandidate, claimPublicationCleanupDispatch, recordPublicationCleanupReceipt } from '../db/publication-repository';
+import { readPublicationJob, completePublicationVerification, readPreGoogleFailure, readFinalizationCandidate, readPublicationCleanupCandidate, readPublicationCleanupReceipt, claimPublicationCleanupDispatch, recordPublicationCleanupReceipt } from '../db/publication-repository';
 import { createWorkflowFeedbackRepository } from '../db/workflow-feedback';
 import { docsUnconfirmedCard } from '../line/docs-summary-card';
 import type { TerminalResultV1 } from '../line/reply-types';
@@ -329,7 +329,8 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
         const status = (await (await this.env.PUBLICATION_WORKFLOW.get(claim.origin_workflow_id)).status()).status;
         if (!["complete", "errored", "terminated"].includes(status)) throw new Error("publication_origin_not_stopped");
         const attempt = {runId:payload.publicationRunId, generation:payload.generation, notificationCycle:payload.notificationCycle, groupId:payload.groupId};
-        const candidate = await readFinalizationCandidate(this.env.DB, attempt, payload.verifierId);
+        const receipt = await readPublicationCleanupReceipt(this.env.DB, attempt, payload.verifierId);
+        const candidate = receipt ? null : await readFinalizationCandidate(this.env.DB, attempt, payload.verifierId);
         let confirmedSuccess = false;
         if (candidate) {
           try {
@@ -349,7 +350,7 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
           } catch { /* Unavailable or conflicting evidence remains unconfirmed. */ }
         }
         // A metadata read alone cannot confirm whether a cleanup succeeded.
-        const cleanup = await readPublicationCleanupCandidate(this.env.DB, attempt, payload.verifierId, false);
+        const cleanup = receipt ? null : await readPublicationCleanupCandidate(this.env.DB, attempt, payload.verifierId, false);
         if (cleanup) {
           try {
             const fetcher = fetch.bind(globalThis);
