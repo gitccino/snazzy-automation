@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import { testEnv } from '../helpers/env';
-import { acquireOrResumeJob, admitPublicationCleanup, claimPublicationVerification, claimPublicationCleanupDispatch, recordPublicationCleanupReceipt, readPublicationCleanupCandidate, readPublicationCleanupReceipt, readPublicationCleanupFailure } from '../../src/db/publication-repository';
+import { acquireOrResumeJob, admitPublicationCleanup, claimPublicationVerification, completePublicationVerification, claimPublicationCleanupDispatch, recordPublicationCleanupReceipt, readPublicationCleanupCandidate, readPublicationCleanupReceipt, readPublicationCleanupFailure } from '../../src/db/publication-repository';
 
 it('captures an owned cleanup once and fences conflicting attempts', async () => {
   const db = testEnv().DB, id = crypto.randomUUID();
@@ -164,6 +164,15 @@ it('joins a confirmed receipt to the matching saved primary failure', async () =
   expect(await readPublicationCleanupFailure(db,attempt,claim.verifierId)).toEqual({origin_workflow_id:'owner',context_json:context,doc_id:'doc',stage:'prepare outputs',failure_code:'claude_failed'});
   expect(await readPublicationCleanupFailure(db,attempt,'stale')).toBeNull();
   expect(await readPublicationCleanupFailure(db,{...attempt,groupId:'foreign'},claim.verifierId)).toBeNull();
-  await db.prepare("UPDATE publication_jobs SET correlation_id='foreign' WHERE publication_run_id=?").bind(id).run();
-  expect(await readPublicationCleanupFailure(db,attempt,claim.verifierId)).toBeNull();
+  const evidence = (await readPublicationCleanupFailure(db,attempt,claim.verifierId))!;
+  const intent = {originWorkflowId:'owner', contextJson:context, cleanupFailure:evidence, result:{schemaVersion:1 as const, kind:'publication' as const, runId:id, generation:1, notificationCycle:1, outcome:'failed' as const, messages:[{type:'text' as const, text:'failed'}]}};
+  for (const [table, column, value, original] of [['publication_cleanup_intents','doc_id','other','doc'], ['workflow_feedback','failure_code','other','claude_failed'], ['publication_jobs','correlation_id','foreign','owner']] as const) {
+    await db.prepare(`UPDATE ${table} SET ${column}=? WHERE ${table === 'workflow_feedback' ? 'run_id' : 'publication_run_id'}=?`).bind(value,id).run();
+    expect(await completePublicationVerification(db,attempt,claim.verifierId,intent)).toBe(false);
+    expect((await db.prepare('SELECT completed FROM publication_verification_claims WHERE publication_run_id=?').bind(id).first<{completed:number}>())?.completed).toBe(0);
+    expect((await db.prepare('SELECT count(*) AS n FROM workflow_feedback_results WHERE run_id=?').bind(id).first<{n:number}>())?.n).toBe(1);
+    await db.prepare(`UPDATE ${table} SET ${column}=? WHERE ${table === 'workflow_feedback' ? 'run_id' : 'publication_run_id'}=?`).bind(original,id).run();
+  }
+  expect(await completePublicationVerification(db,attempt,claim.verifierId,intent)).toBe(true);
+  expect(await completePublicationVerification(db,attempt,claim.verifierId,intent)).toBe(false);
 });

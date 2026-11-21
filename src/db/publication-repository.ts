@@ -660,7 +660,7 @@ export async function completePublicationVerification(
   db: D1Database,
   attempt: { runId: string; generation: number; notificationCycle: number; groupId: string },
   verifierId: string,
-  intent?: { originWorkflowId: string; contextJson: string; result: TerminalResultV1; candidate?: { finalizationJson: string; googleDocId: string | null } },
+  intent?: { originWorkflowId: string; contextJson: string; result: TerminalResultV1; candidate?: { finalizationJson: string; googleDocId: string | null }; cleanupFailure?: { doc_id: string; stage: string; failure_code: string } },
 ): Promise<boolean> {
   if (intent) {
     const value = intent.result;
@@ -679,19 +679,29 @@ export async function completePublicationVerification(
       AND (? IS NULL OR EXISTS (SELECT 1 FROM publication_jobs j WHERE j.publication_run_id=publication_verification_claims.publication_run_id
         AND j.generation=publication_verification_claims.generation AND j.notification_cycle=publication_verification_claims.notification_cycle
         AND j.finalization_json=? AND j.google_doc_id IS ?))
-      AND (COALESCE(?, '') != 'failed' OR EXISTS (SELECT 1 FROM publication_jobs j
+      AND (COALESCE(?, '') != 'failed' OR (? IS NOT NULL AND EXISTS (SELECT 1 FROM publication_cleanup_intents i
+        JOIN publication_jobs j ON j.publication_run_id=i.publication_run_id AND j.generation=i.generation AND j.notification_cycle=i.notification_cycle
+          AND j.correlation_id=i.origin_workflow_id AND j.settings_context_json=i.context_json
+        JOIN workflow_feedback f ON f.kind='publication' AND f.run_id=i.publication_run_id AND f.generation=i.generation AND f.notification_cycle=i.notification_cycle AND f.group_id=publication_verification_claims.group_id AND f.context_json=i.context_json
+        JOIN workflow_feedback_results r ON r.kind=f.kind AND r.run_id=f.run_id AND r.generation=f.generation AND r.notification_cycle=f.notification_cycle AND r.group_id=f.group_id AND r.revision=0
+        WHERE i.publication_run_id=publication_verification_claims.publication_run_id AND i.generation=publication_verification_claims.generation AND i.notification_cycle=publication_verification_claims.notification_cycle
+        AND i.origin_workflow_id=publication_verification_claims.origin_workflow_id AND i.context_json=publication_verification_claims.context_json
+        AND json_valid(i.context_json) AND json_extract(i.context_json,'$.replyGroupId')=publication_verification_claims.group_id
+        AND i.doc_id=? AND length(i.doc_id)>0 AND i.saved_temp_doc=1 AND length(i.dispatch_verifier_id)>0 AND i.deletion_acknowledged=1
+        AND j.state IN ('locked','validating','generating','failed') AND j.finalization_json IS NULL AND j.google_doc_id IS NOT i.doc_id AND j.successful_generation=0
+        AND f.stage=? AND f.failure_code=? AND length(f.failure_code)>0 AND json_extract(r.outcome_json,'$.stage')=f.stage AND json_extract(r.outcome_json,'$.failureCode')=f.failure_code AND json_extract(r.outcome_json,'$.outcome')='unconfirmed')) OR (? IS NULL AND EXISTS (SELECT 1 FROM publication_jobs j
         JOIN publication_google_write_evidence e ON e.publication_run_id=j.publication_run_id AND e.generation=j.generation AND e.notification_cycle=j.notification_cycle
         JOIN workflow_feedback f ON f.kind='publication' AND f.run_id=j.publication_run_id AND f.generation=j.generation AND f.notification_cycle=j.notification_cycle AND f.group_id=publication_verification_claims.group_id AND f.context_json=j.settings_context_json
         JOIN workflow_feedback_results r ON r.kind=f.kind AND r.run_id=f.run_id AND r.generation=f.generation AND r.notification_cycle=f.notification_cycle AND r.group_id=f.group_id AND r.revision=0
         WHERE j.publication_run_id=publication_verification_claims.publication_run_id AND j.generation=publication_verification_claims.generation AND j.notification_cycle=publication_verification_claims.notification_cycle
         AND j.state IN ('locked','validating','generating','failed') AND j.temp_doc_id IS NULL AND j.finalization_json IS NULL AND j.google_doc_id IS NULL AND j.google_doc_url IS NULL AND j.successful_generation=0
         AND e.protocol_version=1 AND e.state='tracking' AND f.stage IN ('prepare product images','prepare outputs') AND length(f.failure_code)>0
-        AND json_extract(r.outcome_json,'$.stage')=f.stage AND json_extract(r.outcome_json,'$.failureCode')=f.failure_code AND json_extract(r.outcome_json,'$.outcome')='unconfirmed'))`)
+        AND json_extract(r.outcome_json,'$.stage')=f.stage AND json_extract(r.outcome_json,'$.failureCode')=f.failure_code AND json_extract(r.outcome_json,'$.outcome')='unconfirmed')))`)
     .bind(intent ? JSON.stringify(intent.result) : null, attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId, verifierId,
       attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId,
       intent?.originWorkflowId ?? null, intent?.originWorkflowId ?? null, intent?.contextJson ?? null,
       intent?.originWorkflowId ?? null, intent?.originWorkflowId ?? null, intent?.contextJson ?? null,
-      intent?.candidate?.finalizationJson ?? null, intent?.candidate?.finalizationJson ?? null, intent?.candidate?.googleDocId ?? null, intent?.result.outcome ?? null);
+      intent?.candidate?.finalizationJson ?? null, intent?.candidate?.finalizationJson ?? null, intent?.candidate?.googleDocId ?? null, intent?.result.outcome ?? null, intent?.cleanupFailure?.doc_id ?? null, intent?.cleanupFailure?.doc_id ?? null, intent?.cleanupFailure?.stage ?? null, intent?.cleanupFailure?.failure_code ?? null, intent?.cleanupFailure?.doc_id ?? null);
   if (!intent) return (await update.run()).meta.changes === 1;
   const key = JSON.stringify(['publication', attempt.runId, attempt.generation, attempt.notificationCycle, 'verification']);
   const revision = db.prepare(`INSERT INTO workflow_feedback_results(kind,run_id,generation,notification_cycle,revision,result_key,outcome_json,group_id)
