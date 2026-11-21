@@ -16,10 +16,10 @@ interface Dependencies {
 /** Read-only evidence; callers must fence every saved value again when committing a disposition. */
 export async function verifyHistoricalImportEvidence(deps:Dependencies, input:Input) {
   const held = (reason:string) => ({status:'held' as const,reason});
-  const row = await deps.db.prepare(`SELECT r.source_album_id,r.status AS run_status,r.settings_context_json,g.state,g.group_hash,g.product_id,g.airtable_record_id,g.first_photo_id,g.last_photo_id,g.created_at,
+  const row = await deps.db.prepare(`SELECT r.source_album_id,r.status AS run_status,r.settings_context_json,g.state,g.group_hash,g.product_id,g.airtable_record_id,g.first_photo_id,g.last_photo_id,g.created_at,g.updated_at,g.attempt_count,g.failure_reason,
     c.product_id AS claim_product,c.base_id,c.table_id FROM import_runs r JOIN product_groups g ON g.import_run_id=r.id
     LEFT JOIN airtable_create_claims c ON c.group_id=g.id WHERE r.id=? AND r.trigger='line' AND g.id=?`)
-    .bind(input.runId,input.groupId).first<{source_album_id:string;run_status:string;settings_context_json:string;state:string;group_hash:string;product_id:string|null;airtable_record_id:string|null;first_photo_id:string;last_photo_id:string;created_at:string;claim_product:string|null;base_id:string|null;table_id:string|null}>();
+    .bind(input.runId,input.groupId).first<{source_album_id:string;run_status:string;settings_context_json:string;state:string;group_hash:string;product_id:string|null;airtable_record_id:string|null;first_photo_id:string;last_photo_id:string;created_at:string;updated_at:string;attempt_count:number;failure_reason:string|null;claim_product:string|null;base_id:string|null;table_id:string|null}>();
   let context:any;
   try { context = JSON.parse(row?.settings_context_json ?? ''); } catch { return held('owner_or_target_mismatch'); }
   if (!row || context?.replyGroupId !== input.ownerGroupId || context?.settings?.config?.airtableBaseId !== input.baseId || context?.settings?.config?.airtableProductsTableId !== input.tableId) return held('owner_or_target_mismatch');
@@ -48,6 +48,6 @@ export async function verifyHistoricalImportEvidence(deps:Dependencies, input:In
       if (hash !== await sha256Hex(attachment.bytes)) return held('attachment_mismatch');
       hashes.push(hash);
     }
-    return {status:'verified' as const,recordId:input.recordId, captured:{...row,members,previewHashes:hashes}};
+    return {status:'verified' as const,recordId:input.recordId, captured:{...row,members,candidate:record,previewHashes:hashes}};
   } catch { return held('provider_evidence_unavailable'); }
 }
