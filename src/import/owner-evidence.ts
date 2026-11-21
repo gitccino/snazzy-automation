@@ -48,6 +48,6 @@ export async function verifyHistoricalImportEvidence(deps:Dependencies, input:In
       if (hash !== await sha256Hex(attachment.bytes)) return held('attachment_mismatch');
       hashes.push(hash);
     }
-    return {status:'verified' as const,recordId:input.recordId, captured:{...row,members,candidate:record,previewHashes:hashes}};
+    return {status:'verified' as const,recordId:input.recordId, captured:{...row,members,candidate:{productId:record.productId,groupHash:record.groupHash,attachments:record.attachments.map(({id}) => ({id}))},previewHashes:hashes}};
   } catch { return held('provider_evidence_unavailable'); }
 }
