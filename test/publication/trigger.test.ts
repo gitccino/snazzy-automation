@@ -221,10 +221,11 @@ describe("handleDocsTrigger", () => {
   });
 
   it.each(["admin", "line", "cron"] as const)(
-    "creates only an unknown instance with its hyphenated ID and %s trigger",
+    "creates a confirmed missing instance with its hyphenated ID and %s trigger",
     async (trigger) => {
       const fetcher = mockRun();
       const fixture = makeTriggerEnv("unknown");
+      fixture.get.mockRejectedValue(new Error("instance.not_found"));
 
       await expect(
         handleDocsTrigger(fixture.env, trigger, clock),
@@ -236,7 +237,7 @@ describe("handleDocsTrigger", () => {
       expect(fixture.get).toHaveBeenCalledExactlyOnceWith(
         "publication-rec-run-1",
       );
-      expect(fixture.status).toHaveBeenCalledTimes(1);
+      expect(fixture.status).not.toHaveBeenCalled();
       expect(fixture.create).toHaveBeenCalledExactlyOnceWith({
         id: "publication-rec-run-1",
         params: {
@@ -324,11 +325,12 @@ describe("handleDocsTrigger", () => {
     ).toBe("failed");
   });
 
-  it.each(["errored", "terminated", "complete", "unknown"])(
+  it.each(["errored", "terminated", "complete", "missing"])(
     "reopens a failed job with its cached products before the %s Workflow is started again",
     async (statusValue) => {
       mockRun("Failed");
       const fixture = makeTriggerEnv(statusValue);
+      if (statusValue === "missing") fixture.get.mockRejectedValue(new Error("instance.not_found"));
       await acquireOrResumeJob(
         fixture.env.DB,
         clock,
@@ -366,7 +368,7 @@ describe("handleDocsTrigger", () => {
         return { status: statusValue };
       });
       const start =
-        statusValue === "unknown" ? fixture.create : fixture.restart;
+        statusValue === "missing" ? fixture.create : fixture.restart;
       start.mockImplementation(async () => {
         const { job } = await acquireOrResumeJob(
           fixture.env.DB,
@@ -391,12 +393,12 @@ describe("handleDocsTrigger", () => {
       await expect(
         handleDocsTrigger(fixture.env, "admin", clock),
       ).resolves.toEqual({
-        status: statusValue === "unknown" ? "started" : "restarted",
+        status: statusValue === "missing" ? "started" : "restarted",
         publicationRunId: "rec-run-1",
       });
       expect(start).toHaveBeenCalledTimes(1);
       expect(
-        statusValue === "unknown" ? fixture.restart : fixture.create,
+        statusValue === "missing" ? fixture.restart : fixture.create,
       ).not.toHaveBeenCalled();
     },
   );
@@ -771,7 +773,7 @@ describe("handleDocsTrigger", () => {
     async (statusValue) => {
       mockRun();
       const fixture = makeTriggerEnv(statusValue);
-      fixture.status.mockResolvedValueOnce({ status: "unknown" });
+      fixture.get.mockRejectedValueOnce(new Error("instance.not_found"));
       fixture.create.mockRejectedValueOnce(new Error("duplicate Workflow ID"));
 
       await expect(
@@ -787,6 +789,18 @@ describe("handleDocsTrigger", () => {
       expect(fixture.restart).not.toHaveBeenCalled();
     },
   );
+
+  it("holds a failed job when its Workflow reports unknown status", async () => {
+    mockRun("Failed");
+    const fixture = makeTriggerEnv("unknown");
+    await acquireOrResumeJob(fixture.env.DB, clock, "rec-run-1", "previous-owner");
+    await setJobState(fixture.env.DB, clock, "rec-run-1", "failed");
+
+    await expect(handleDocsTrigger(fixture.env, "admin", clock)).rejects.toThrow("publication_workflow_status_unavailable");
+    expect((await acquireOrResumeJob(fixture.env.DB, clock, "rec-run-1", "other")).job.state).toBe("failed");
+    expect(fixture.create).not.toHaveBeenCalled();
+    expect(fixture.restart).not.toHaveBeenCalled();
+  });
 
   it("leaves failed jobs closed when the Workflow status is unsupported", async () => {
     mockRun("Failed");

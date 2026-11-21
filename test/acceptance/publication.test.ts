@@ -282,10 +282,13 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
 }
 
 function workflowBinding() {
-  let status = "unknown";
+  let status = "missing";
   const restart = vi.fn(async () => { status = "running"; });
   const create = vi.fn(async (value: { id: string }) => { status = "running"; return { id: value.id }; });
-  const get = vi.fn(async (_id: string) => ({ status: async () => ({ status }), restart, resume: vi.fn() }));
+  const get = vi.fn(async (_id: string) => {
+    if (status === "missing") throw new Error("instance.not_found");
+    return { status: async () => ({ status }), restart, resume: vi.fn() };
+  });
   return { create, get, restart, setStatus: (value: string) => { status = value; } };
 }
 
@@ -802,7 +805,7 @@ describe("publication acceptance", () => {
     for (const call of queries) expect(new URL(call.url).searchParams.get("filterByFormula")).toBe("DATESTR({Publication Date})='2026-09-02'");
   });
 
-  it.each([[503, "errored", "restarted"], [429, "unknown", "started"]] as const)
+  it.each([[503, "errored", "restarted"], [429, "missing", "started"]] as const)
     ("exhausts six Google %s attempts before cleanup, then restarts a %s Workflow using cached products", async (httpStatus, workflowStatus, triggerStatus) => {
       const fixture = publicationFixture();
       fixture.state.batchFailureStatus = httpStatus;

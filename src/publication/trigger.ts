@@ -39,7 +39,9 @@ async function lookupWorkflow(
 } | null> {
   try {
     const instance = await env.PUBLICATION_WORKFLOW.get(id);
-    return { instance, state: await instance.status() };
+    const state = await instance.status();
+    if (state.status === "unknown") throw new Error("publication_workflow_status_unavailable");
+    return { instance, state };
   } catch (error) {
     // Missing and expired instances reject get() instead of returning a handle.
     if (error instanceof Error && error.message.includes("instance.not_found"))
