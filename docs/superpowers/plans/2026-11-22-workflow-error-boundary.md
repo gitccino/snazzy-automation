@@ -22,9 +22,14 @@ No new dependencies, provider calls, remote writes, schema expansion without nec
 
 ## Tasks and progress
 
-- [ ] Record baseline focused tests and bounded full-suite failures.
+- [x] Run focused baseline: `npx vitest run test/publication/workflow.test.ts test/publication/captions.test.ts test/import/workflow.test.ts test/db/workflow-feedback.test.ts` — 69 passed.
+- [ ] Complete bounded full-suite baseline: observed nine failures (2 LINE acceptance parser, 1 Airtable inventory, 6 soldout); runtime emitted Workflow startup/hang errors and the run was interrupted before completion.
 - [ ] Add real local Workflow runtime regression for serialized failure facts, retry counts, production feedback and rendered delivery; demonstrate failures before implementation.
 - [ ] Implement validated safe boundary encoding/decoding and native non-retryable errors in publication, image and affected import paths; map Claude errors before the boundary.
 - [ ] Preserve primary failures across identity and persistence faults and use fenced recovery, with one actionable Thai instruction.
 - [ ] Run regression, focused tests, typecheck, Node CLI, acceptance and bounded full suite; compare exact baseline failures.
 - [ ] Review entire diff, correct findings, update evidence and commit local changes.
+
+## Unresolved implementation detail
+
+Prove a recoverable intent exists after a primary outcome persistence failure, including when D1 is unavailable throughout the original attempt. Current feedback delivery repairs only already persisted records; it cannot reconstruct missing facts by itself. Do not infer a destination or claim automatic recovery until a fenced trigger and durable source are demonstrated.
