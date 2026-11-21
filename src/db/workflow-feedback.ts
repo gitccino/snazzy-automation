@@ -1,3 +1,4 @@
+import { publicationWorkflowId } from '../publication/types';
 import { lineCommandWorkflowId } from '../line/mutation-recovery';
 
 export type FeedbackAttempt = { kind: 'import' | 'publication'; runId: string; generation: number; notificationCycle: number; groupId: string };
@@ -25,21 +26,25 @@ export function createWorkflowFeedbackRepository(db: D1Database) {
     : db.prepare(`SELECT settings_context_json AS context FROM import_runs WHERE id=? AND ?=1 AND ?=1 AND json_extract(settings_context_json,'$.replyGroupId')=?`).bind(a.runId, a.generation, a.notificationCycle, a.groupId);
   const guard = `((?='publication' AND EXISTS (SELECT 1 FROM publication_jobs WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND json_extract(settings_context_json,'$.replyGroupId')=?)) OR (?='import' AND ?=1 AND ?=1 AND EXISTS (SELECT 1 FROM import_runs WHERE id=? AND json_extract(settings_context_json,'$.replyGroupId')=?)))`;
   const guardArgs = (a: FeedbackAttempt) => [a.kind,a.runId,a.generation,a.notificationCycle,a.groupId,a.kind,a.generation,a.notificationCycle,a.runId,a.groupId];
-  async function stageStatement(a: FeedbackAttempt, stage: FeedbackStage) {
+  async function stageStatement(a: FeedbackAttempt, stage: FeedbackStage, trustedEventId?: string) {
     const context = await owner(a).first<{context: string}>();
     if (!context) return null;
+    const trustedGuard = !trustedEventId ? '' : a.kind === 'import'
+      ? ` AND EXISTS (SELECT 1 FROM line_command_ingress i JOIN import_runs r ON r.id=i.workflow_id WHERE i.event_id=? AND i.group_id=? AND i.workflow_id=? AND r.id=? AND r.trigger='line' AND json_extract(i.operation,'$.type')='upload' AND json_extract(r.settings_context_json,'$.replyGroupId')=i.group_id)`
+      : ` AND EXISTS (SELECT 1 FROM line_command_ingress i JOIN publication_regeneration_events e ON e.event_id=i.event_id JOIN publication_jobs j ON j.publication_run_id=e.publication_run_id WHERE i.event_id=? AND i.group_id=? AND i.workflow_id=? AND j.publication_run_id=? AND e.generation=? AND e.notification_cycle=? AND j.generation=e.generation AND j.notification_cycle=e.notification_cycle AND j.correlation_id=e.workflow_id AND j.correlation_id=? AND e.group_id=i.group_id AND e.ingress_operation=i.operation AND json_extract(i.operation,'$.type')='docs' AND json_extract(j.settings_context_json,'$.replyGroupId')=i.group_id AND (SELECT count(*) FROM publication_regeneration_events WHERE publication_run_id=j.publication_run_id AND generation=j.generation AND notification_cycle=j.notification_cycle AND workflow_id=j.correlation_id)=1)`;
+    const trustedArgs = trustedEventId ? [trustedEventId,a.groupId,await lineCommandWorkflowId(trustedEventId),a.runId,...(a.kind === 'publication' ? [a.generation,a.notificationCycle,publicationWorkflowId(a.runId,a.generation)] : [])] : [];
     return db.prepare(`INSERT INTO workflow_feedback(kind,run_id,generation,notification_cycle,group_id,context_json,event_id,stage,failure_code,references_json,repair_json)
-      SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE ${guard}
+      SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE ${guard}${trustedGuard}
       ON CONFLICT(kind,run_id,generation,notification_cycle) DO UPDATE SET stage=excluded.stage, failure_code=COALESCE(workflow_feedback.failure_code,excluded.failure_code), references_json=excluded.references_json, repair_json=excluded.repair_json
       WHERE workflow_feedback.group_id=excluded.group_id AND workflow_feedback.context_json=excluded.context_json AND workflow_feedback.event_id IS excluded.event_id`)
-      .bind(a.kind,a.runId,a.generation,a.notificationCycle,a.groupId,context.context,stage.eventId ?? null,stage.stage,stage.failureCode ?? null,JSON.stringify(stage.references ?? {}),JSON.stringify(stage.repair ?? {}),...guardArgs(a));
+      .bind(a.kind,a.runId,a.generation,a.notificationCycle,a.groupId,context.context,stage.eventId ?? null,stage.stage,stage.failureCode ?? null,JSON.stringify(stage.references ?? {}),JSON.stringify(stage.repair ?? {}),...guardArgs(a),...trustedArgs);
   }
   async function recordStage(a: FeedbackAttempt, stage: FeedbackStage): Promise<boolean> {
     const statement = await stageStatement(a, stage);
     return statement ? ((await statement.run()).meta.changes ?? 0) > 0 : false;
   }
-  async function commitOutcome(a: FeedbackAttempt, outcome: FeedbackOutcome): Promise<boolean> {
-    const stage = await stageStatement(a, outcome);
+  async function commitOutcome(a: FeedbackAttempt, outcome: FeedbackOutcome, trustedEventId?: string): Promise<boolean> {
+    const stage = await stageStatement(a, outcome, trustedEventId);
     if (!stage) return false;
     const json = JSON.stringify(outcome);
     const notice = db.prepare(`INSERT INTO workflow_feedback_results(kind,run_id,generation,notification_cycle,revision,result_key,outcome_json,group_id)

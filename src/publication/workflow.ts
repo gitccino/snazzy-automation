@@ -1,3 +1,4 @@
+import { earlySetupResult } from '../line/early-setup-notice';
 import {
   preparePublicationImages,
   ProductImagePreparationFailure,
@@ -436,17 +437,10 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
           if (bindings.results.length !== 1 || !bindings.results[0]?.group_id) return;
           const binding = bindings.results[0];
           const attempt = {kind:'publication' as const, runId, generation, notificationCycle:job.notificationCycle, groupId:binding.group_id!};
-          if (!await createWorkflowFeedbackRepository(this.env.DB).lookupTrustedEarlyFailure(attempt, binding.event_id)) return;
-          const result = {schemaVersion:1,kind:'publication',runId,generation,notificationCycle:job.notificationCycle,outcome:'unconfirmed',messages:[{type:'text',text:`⚠️ ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${runId}`}]};
-          await this.env.DB.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at)
-            SELECT ?,?,?,? WHERE EXISTS (SELECT 1 FROM publication_jobs j JOIN publication_regeneration_events e ON e.publication_run_id=j.publication_run_id JOIN line_command_ingress i ON i.event_id=e.event_id
-              WHERE j.publication_run_id=? AND j.generation=? AND j.notification_cycle=? AND j.correlation_id=?
-              AND e.event_id=? AND e.generation=j.generation AND e.notification_cycle=j.notification_cycle AND e.workflow_id=j.correlation_id
-              AND e.group_id=? AND i.group_id=e.group_id AND e.ingress_operation=i.operation AND json_extract(i.operation,'$.type')='docs'
-              AND json_extract(j.settings_context_json,'$.replyGroupId')=i.group_id
-              AND (SELECT count(*) FROM publication_regeneration_events WHERE publication_run_id=j.publication_run_id AND generation=j.generation AND notification_cycle=j.notification_cycle AND workflow_id=j.correlation_id)=1)
-            ON CONFLICT(result_key) DO NOTHING`)
-            .bind(JSON.stringify(['publication',runId,generation,job.notificationCycle,'terminal']),attempt.groupId,JSON.stringify(result),new Date().toISOString(),runId,generation,job.notificationCycle,event.instanceId,binding.event_id,attempt.groupId).run();
+          const resultKey = JSON.stringify(['publication',runId,generation,job.notificationCycle,'terminal']);
+          const committed = await createWorkflowFeedbackRepository(this.env.DB).commitOutcome(attempt, {stage:'settings-context', failureCode:'setup_failed', action:'verify', outcome:'unconfirmed', resultKey, eventId:binding.event_id, references:{notice:'early_setup'}}, binding.event_id);
+          if (!committed) return;
+          await createLineReplyRepository(this.env.DB,{now:()=>new Date()}).enqueueResult({groupId:attempt.groupId,resultKey,result:earlySetupResult(attempt)});
         });
       } catch { /* Preserve the setup failure. */ }
       throw error;
