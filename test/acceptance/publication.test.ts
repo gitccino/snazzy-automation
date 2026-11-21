@@ -1,4 +1,5 @@
 import type { WorkflowStep } from "cloudflare:workers";
+import jpeg from "jpeg-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseConfig } from "../../src/config";
 import type { Env } from "../../src/env";
@@ -11,7 +12,7 @@ import type { GoogleDocsRequest } from "../../src/publication/google-docs";
 import {
   preparePublicationOutputs, type PublicationServiceDeps, type ValidatedPublication,
 } from "../../src/publication/service";
-import type { PublicationProduct, PublicationRunStatus } from "../../src/publication/types";
+import { publicationWorkflowId, type PublicationProduct, type PublicationRunStatus } from "../../src/publication/types";
 import { runPublicationWorkflow } from "../../src/publication/workflow";
 import { handleDocsTrigger } from "../../src/publication/trigger";
 import { handleDocsRoute } from "../../src/routes/docs";
@@ -69,17 +70,26 @@ async function seedCollages(products: PublicationProduct[]) {
 }
 
 function imageBoundary() {
+  const objects = new Map<string, ArrayBuffer>();
   const sources = new Map<ReadableStream<Uint8Array>, string>();
   const transformers = new Map<ImageTransformer, string>();
   const transforms: Array<{ key: string; options: Parameters<ImageTransformer["transform"]>[0] }> = [];
   const draws: Array<{ base: string; key: string; options: Parameters<ImageTransformer["draw"]>[1] }> = [];
   const get = vi.fn(async (key: string) => {
-    const body = new ReadableStream<Uint8Array>();
+    const bytes = objects.get(key);
+    if (!bytes && key !== "assets/collage-base-1080.jpg") return null;
+    const body = new ReadableStream<Uint8Array>({ start(controller) { if (bytes) controller.enqueue(new Uint8Array(bytes)); controller.close(); } });
     sources.set(body, key);
-    return { body };
+    return { body, size: bytes?.byteLength ?? 0 };
   });
-  const put = vi.fn().mockResolvedValue(null);
-  const output = vi.fn(async () => ({ response: () => new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/jpeg" } }) }));
+  const head = vi.fn(async (key: string) => objects.has(key) ? { size: objects.get(key)!.byteLength } : null);
+  const put = vi.fn(async (key: string, data: ArrayBuffer | Uint8Array, options?: { onlyIf?: unknown }) => {
+    if (options?.onlyIf && objects.has(key)) return null;
+    objects.set(key, data instanceof ArrayBuffer ? data.slice(0) : Uint8Array.from(data).buffer);
+    return {};
+  });
+  const preview = jpeg.encode({ data: Buffer.from([255, 0, 0, 255]), width: 1, height: 1 }, 80).data;
+  const output = vi.fn(async (options: { quality: number }) => ({ response: () => new Response(options.quality === 80 ? preview : new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/jpeg" } }) }));
   const input = vi.fn((stream: ReadableStream<Uint8Array>): ImageTransformer => {
     const key = sources.get(stream);
     if (!key) throw new Error("Images input was not an R2 body");
@@ -96,12 +106,18 @@ function imageBoundary() {
     transformers.set(transformer, key);
     return transformer;
   });
-  return { bucket: { get, put } as unknown as R2Bucket, get, put, images: { input }, transforms, draws, output };
+  return { bucket: { get, head, put } as unknown as R2Bucket, get, put, images: { input }, transforms, draws, output, preview };
 }
 
 // In-memory HTTP boundary: documents change only through the actual requests
 // emitted by production. Unexpected URLs fail instead of reaching the network.
 function publicationFixture(products = [product("A-1001")], fixtureRunId = runId) {
+  const image = imageBoundary();
+  const initialAttachments = (item: PublicationProduct) => item.orderedImageKeys.map((key, i) => ({
+    id: `${item.airtableRecordId}-attachment-${i}`, url: `https://fixtures.airtableusercontent.com/${item.airtableRecordId}/${i}`, filename: key.slice(7),
+  }));
+  const attachments = new Map(products.map(item => [item.airtableRecordId, initialAttachments(item)]));
+  let nextAttachment = 0;
   const state = {
     status: "Ready" as PublicationRunStatus,
     docs: new Map<string, { text: string; name: string; owner?: string }>(),
@@ -150,17 +166,30 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
         if (url.pathname.endsWith("/tblProducts")) return Response.json({
           records: [...products].reverse().map(item => ({ id: item.airtableRecordId, fields: {
             "Product ID": item.productId,
-            "Product Images": item.orderedImageKeys.map((key, i) => ({
-              id: `attachment-${i}`, url: `https://dl.airtable.com/${i}`, filename: key.slice(7),
-            })),
+            "Product Images": attachments.get(item.airtableRecordId) ?? initialAttachments(item),
             "Brand Name": item.brandName, "Model Name": item.modelName,
             "Condition Type": item.conditionType, Size: item.size, Description: item.description,
             "LINE Square Price": item.lineSquarePrice, "IG Price": item.igPrice,
           } })),
         });
-        if (request.method === "PATCH" && products.some(p => url.pathname.endsWith(`/tblProducts/${p.airtableRecordId}`))) {
-          return Response.json({ id: url.pathname.split("/").at(-1) });
+        const item = products.find(p => url.pathname.endsWith(`/tblProducts/${p.airtableRecordId}`));
+        if (item && !attachments.has(item.airtableRecordId)) attachments.set(item.airtableRecordId, initialAttachments(item));
+        if (item && request.method === "GET") return Response.json({ id: item.airtableRecordId, fields: {
+          "Product ID": item.productId, "Product Images": attachments.get(item.airtableRecordId),
+        } });
+        if (item && request.method === "PATCH") {
+          const images = (body.fields as { "Product Images"?: Array<{ id?: string; filename?: string }> })["Product Images"];
+          if (images) attachments.set(item.airtableRecordId, images.map(entry => {
+            if (entry.id) return attachments.get(item.airtableRecordId)!.find(existing => existing.id === entry.id)!;
+            return { id: `preview-${++nextAttachment}`, filename: entry.filename!, url: `https://fixtures.airtableusercontent.com/preview/${nextAttachment}`, size: image.preview.length, type: "image/jpeg" };
+          }));
+          return Response.json({ id: item.airtableRecordId });
         }
+      }
+      if (url.hostname === "fixtures.airtableusercontent.com" && request.method === "GET") {
+        if (![...attachments.values()].flat().some(attachment => attachment.url === request.url)) throw new Error(`Unexpected attachment: ${request.url}`);
+        const bytes = url.pathname.startsWith("/preview/") ? image.preview : jpeg.encode({ data: Buffer.from([url.pathname.length, url.pathname.charCodeAt(url.pathname.length - 1), 0, 255]), width: 1, height: 1 }, 80).data;
+        return new Response(bytes, { headers: { "content-type": "image/jpeg" } });
       }
       if (url.hostname === "oauth2.googleapis.com") return Response.json({ access_token: "google-token", expires_in: 3600 });
       if (url.pathname === "/drive/v3/files" && request.method === "GET") {
@@ -222,7 +251,6 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
       throw new Error(`Unexpected HTTP request: ${request.method} ${request.url}`);
     },
   }]);
-  const image = imageBoundary();
   const countTokens = vi.fn().mockResolvedValue({ input_tokens: 12_000 });
   const create = vi.fn().mockResolvedValue(toolResponse(products.map(p => ({ productId: p.productId, drafts: drafts(p.productId) }))));
   const notify = vi.fn().mockResolvedValue(undefined);
@@ -244,7 +272,7 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
     run: (generation = 1) => runPublicationWorkflow(
       { publicationRunId: fixtureRunId, trigger: "line", ...(generation > 1 ? { generation } : {}) },
       scheduler as unknown as WorkflowStep,
-      deps,
+      { ...deps, copyOwner: { workflowId: publicationWorkflowId(fixtureRunId, generation), notificationCycle: 1 } },
     ),
   };
 }
@@ -265,6 +293,8 @@ function docsRequest() {
 
 describe("publication acceptance", () => {
   beforeEach(async () => {
+    await env.DB.exec("DELETE FROM product_image_originals");
+    await env.DB.exec("DELETE FROM product_image_preparations");
     await env.DB.exec("DELETE FROM publication_product_cache");
     await env.DB.exec("DELETE FROM publication_cleanup_intents");
     await env.DB.exec("DELETE FROM publication_jobs");
@@ -367,6 +397,8 @@ describe("publication acceptance", () => {
     fixture.state.status = "Ready";
     await fixture.run();
     expect(fixture.state.status).toBe("Generated");
+    expect(fixture.calls.some(call => call.method === "GET" && call.url.endsWith("/tblProducts/rec-A-1001"))).toBe(true);
+    expect(fixture.calls.filter(call => call.method === "PATCH" && call.url.endsWith("/tblProducts/rec-A-1001") && "Product Images" in (call.body.fields as object))).toHaveLength(1);
     expect(fixture.state.errorSummary).toBeNull();
     expect(await env.DB.prepare("SELECT validation_result_json FROM publication_jobs WHERE publication_run_id = ?").bind(runId).first())
       .toEqual({ validation_result_json: null });
