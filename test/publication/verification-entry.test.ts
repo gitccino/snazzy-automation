@@ -145,7 +145,7 @@ it.each([
   } finally { fetchMock.mockRestore(); }
 });
 
-it.each(['match','conflict','unavailable','changed','generating'])('verifies saved finalization evidence: %s', async mode => {
+it.each(['match','conflict','unavailable','changed','generating','generating-conflict','generating-bad-document'])('verifies saved finalization evidence: %s', async mode => {
   const env = {...testEnv(), AIRTABLE_TOKEN:'test-airtable-token', GOOGLE_OAUTH_CLIENT_ID:'client', GOOGLE_OAUTH_CLIENT_SECRET:'secret', GOOGLE_REFRESH_TOKEN:'refresh', PUBLICATION_WORKFLOW:{get:vi.fn(async()=>({status:async()=>({status:'terminated'})}))}} as any;
   const runId = crypto.randomUUID(), groupId = crypto.randomUUID();
   const context = JSON.stringify({replyGroupId:groupId,settings:{config:{airtableBaseId:'original-base',airtablePublicationRunsTableId:'original-table',googleDriveFolderId:'folder',googleTemplateDocId:'template'}}});
@@ -153,13 +153,17 @@ it.each(['match','conflict','unavailable','changed','generating'])('verifies sav
   await env.DB.prepare("INSERT INTO publication_jobs(publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json,finalization_json) VALUES (?,'generating','original','x','x',1,1,?,?)").bind(runId,context,JSON.stringify(intent)).run();
   const claim = await claimPublicationVerification(env.DB,{runId,generation:1,notificationCycle:1,groupId});
   if (claim.status !== 'claimed') throw new Error('missing claim');
+  if (mode === 'generating') {
+    await env.DB.prepare("INSERT INTO workflow_feedback(kind,run_id,generation,notification_cycle,group_id,context_json,stage) VALUES ('publication',?,1,1,?,?,'finalize')").bind(runId,groupId,context).run();
+    await env.DB.prepare("INSERT INTO workflow_feedback_results VALUES ('publication',?,1,1,0,?,?,?,0)").bind(runId,runId,JSON.stringify({action:'verify',outcome:'unconfirmed',references:{thaiDate:'date',airtableRunUrl:`https://airtable.com/base/table/${runId}`,publicBaseUrl:'https://original.test'}}),groupId).run();
+  }
   const fetchMock = vi.spyOn(globalThis,'fetch').mockImplementation(async (url,init) => {
     const u = String(url);
     if (u.includes('oauth2.googleapis.com')) return Response.json({access_token:'token',expires_in:3600});
     expect(init?.method ?? 'GET').toBe('GET');
-    if (u.includes('api.airtable.com')) { if (mode === 'unavailable') throw new Error('offline'); if (mode === 'changed') await env.DB.prepare('UPDATE publication_jobs SET finalization_json=? WHERE publication_run_id=?').bind(JSON.stringify({...intent,title:'changed'}),runId).run(); expect(u).toContain('/original-base/original-table/'); expect((init?.headers as any).Authorization).toBe('Bearer test-airtable-token'); return Response.json({id:runId,fields:mode === 'generating' ? {Status:'Generating'} : {Status:'Generated','Google Doc URL':mode === 'conflict' ? 'https://example.com' : intent.docUrl,'Generated At':intent.generatedAt}}); }
+    if (u.includes('api.airtable.com')) { if (mode === 'unavailable') throw new Error('offline'); if (mode === 'changed') await env.DB.prepare('UPDATE publication_jobs SET finalization_json=? WHERE publication_run_id=?').bind(JSON.stringify({...intent,title:'changed'}),runId).run(); expect(u).toContain('/original-base/original-table/'); expect((init?.headers as any).Authorization).toBe('Bearer test-airtable-token'); return Response.json({id:runId,fields:mode.startsWith('generating') ? {Status:'Generating', ...(mode === 'generating-conflict' ? {'Google Doc URL':'https://example.com'} : {})} : {Status:'Generated','Google Doc URL':mode === 'conflict' ? 'https://example.com' : intent.docUrl,'Generated At':intent.generatedAt}}); }
     if (u.includes('docs.googleapis.com')) return Response.json({body:{content:[{paragraph:{elements:[{textRun:{content:'Product ID: A-1\n'}}]}}]}});
-    if (u.includes('googleapis.com/drive')) return Response.json({id:'doc',name:'title',parents:['folder'],trashed:false});
+    if (u.includes('googleapis.com/drive')) return Response.json({id:'doc',name:mode === 'generating-bad-document' ? 'other' : 'title',parents:['folder'],trashed:false});
     throw new Error(`unexpected ${u}`);
   });
   try {
@@ -169,9 +173,22 @@ it.each(['match','conflict','unavailable','changed','generating'])('verifies sav
     const row = await env.DB.prepare('SELECT result_json FROM publication_verification_claims WHERE publication_run_id=?').bind(runId).first();
     if (mode === 'changed') { expect(row.result_json).toBeNull(); return; }
     expect(JSON.parse(row.result_json).outcome).toBe(mode === 'match' ? 'success' : 'unconfirmed');
-    const outbox = await env.DB.prepare('SELECT group_id,result_json FROM line_result_outbox WHERE group_id=?').bind(groupId).all();
+    const outbox = mode === 'generating'
+      ? await env.DB.prepare('SELECT outcome_json FROM workflow_feedback_results WHERE run_id=? AND revision=1').bind(runId).all()
+      : await env.DB.prepare('SELECT group_id,result_json FROM line_result_outbox WHERE group_id=?').bind(groupId).all();
     expect(outbox.results).toHaveLength(1);
-    if (mode === 'match') expect(JSON.stringify(outbox.results)).toContain(intent.docUrl);
+    if (mode === 'match' || mode === 'generating') expect(JSON.stringify(outbox.results)).toContain(intent.docUrl);
+    else expect(JSON.stringify(outbox.results)).not.toContain(intent.docUrl);
+    if (mode === 'generating') expect(JSON.stringify(outbox.results)).toContain('ตรวจสอบก่อนส่ง /docs ซ้ำ');
+    if (mode === 'generating') {
+      const clock = fixedClock('2026-11-20T08:00:00Z'), requests: any[] = [];
+      const line = createLineClient({channelAccessToken:'test',fetch:async (_url,init)=>{requests.push(JSON.parse(String(init?.body)));return Response.json({}, {headers:{'x-line-request-id':'receipt'}});}});
+      const deps = {clock,repo:createLineReplyRepository(env.DB,clock),feedback:createWorkflowFeedbackRepository(env.DB),isGroupAllowed:async()=>true,line};
+      for (let i=0;i<3;i++) await deliverEventReply({groupId,workflowId:'eligible',eventId:crypto.randomUUID(),receivedAt:clock.now().toISOString(),replyToken:'fresh',commandReply:null,drainQueue:true,publicBaseUrl:'https://original.test'},deps);
+      expect(requests).toHaveLength(2);
+      expect(JSON.stringify(requests[0])).not.toContain(intent.docUrl);
+      expect(JSON.stringify(requests[1])).toContain(intent.docUrl);
+    }
   } finally { fetchMock.mockRestore(); }
 });
 

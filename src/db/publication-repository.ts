@@ -660,7 +660,7 @@ export async function completePublicationVerification(
   db: D1Database,
   attempt: { runId: string; generation: number; notificationCycle: number; groupId: string },
   verifierId: string,
-  intent?: { originWorkflowId: string; contextJson: string; result: TerminalResultV1; candidate?: { finalizationJson: string; googleDocId: string | null; googleDocUrl: string | null; successfulGeneration: number }; cleanupFailure?: { doc_id: string; stage: string; failure_code: string } },
+  intent?: { originWorkflowId: string; contextJson: string; result: TerminalResultV1; verifiedDocument?: boolean; candidate?: { finalizationJson: string; googleDocId: string | null; googleDocUrl: string | null; successfulGeneration: number }; cleanupFailure?: { doc_id: string; stage: string; failure_code: string } },
 ): Promise<boolean> {
   if (intent) {
     const value = intent.result;
@@ -670,6 +670,7 @@ export async function completePublicationVerification(
       value.generation !== attempt.generation || value.notificationCycle !== attempt.notificationCycle ||
       !['success', 'partial', 'validation_failed', 'failed', 'unconfirmed'].includes(value.outcome)) throw new Error('verification_invalid_result');
   }
+  if (intent?.verifiedDocument && (!intent.candidate || intent.result.outcome !== 'unconfirmed')) throw new Error('verification_invalid_result');
   const success = intent?.result.outcome === 'success' ? intent.candidate : undefined;
   const finalization = success ? FinalizationIntentSchema.parse(JSON.parse(success.finalizationJson)) : null;
   if (intent?.result.outcome === 'success' && (!success || !finalization || finalization.generation !== attempt.generation || finalization.docId === success.googleDocId)) throw new Error('verification_invalid_result');
@@ -715,9 +716,9 @@ export async function completePublicationVerification(
       AND f.generation=c.generation AND f.notification_cycle=c.notification_cycle AND f.group_id=c.group_id
     WHERE c.publication_run_id=? AND c.generation=? AND c.notification_cycle=? AND c.verifier_id=? AND changes()=1
       AND f.revision=(SELECT MAX(revision) FROM workflow_feedback_results WHERE kind=f.kind AND run_id=f.run_id AND generation=f.generation AND notification_cycle=f.notification_cycle)
-      AND NOT (json_extract(f.outcome_json,'$.outcome')='unconfirmed' AND json_extract(f.outcome_json,'$.action')='verify' AND json_extract(c.result_json,'$.outcome')='unconfirmed')
+      AND NOT (json_extract(f.outcome_json,'$.outcome')='unconfirmed' AND json_extract(f.outcome_json,'$.action')='verify' AND json_extract(c.result_json,'$.outcome')='unconfirmed' AND ?=0)
       `)
-    .bind(attempt.runId, attempt.generation, attempt.notificationCycle, verifierId);
+    .bind(attempt.runId, attempt.generation, attempt.notificationCycle, verifierId, intent.verifiedDocument ? 1 : 0);
   const repair = success && finalization ? [db.prepare(`UPDATE publication_jobs SET state='succeeded', successful_generation=generation,
     google_doc_id=?, google_doc_url=?, temp_doc_id=NULL, finalization_json=NULL, updated_at=?
     WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND correlation_id=? AND settings_context_json=?

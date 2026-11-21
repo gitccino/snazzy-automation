@@ -338,6 +338,7 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
         const receipt = await readPublicationCleanupReceipt(this.env.DB, attempt, payload.verifierId);
         const candidate = receipt ? null : await readFinalizationCandidate(this.env.DB, attempt, payload.verifierId);
         let confirmedSuccess = false;
+        let verifiedDocument = false;
         if (candidate) {
           try {
             const config = (JSON.parse(candidate.context_json) as OperationContext).settings.config;
@@ -351,8 +352,10 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
             const document = await verifyDocumentContainsProducts(fetcher, tokens, intent.docId, intent.productIds);
             const airtable = await fetcher(`https://api.airtable.com/v0/${encodeURIComponent(config.airtableBaseId)}/${encodeURIComponent(config.airtablePublicationRunsTableId)}/${encodeURIComponent(attempt.runId)}`, {headers:{Authorization:`Bearer ${this.env.AIRTABLE_TOKEN}`}});
             if (!airtable.ok) throw new Error('airtable_read_failed');
-            const record = z.object({id:z.string(),fields:z.object({Status:z.string(), 'Google Doc URL':z.string(), 'Generated At':z.string()})}).parse(await airtable.json());
-            confirmedSuccess = intent.docUrl === `https://docs.google.com/document/d/${encodeURIComponent(intent.docId)}/edit` && file.id === intent.docId && file.name === intent.title && file.parents.includes(config.googleDriveFolderId) && !file.trashed && document.ok && record.id === attempt.runId && record.fields.Status === 'Generated' && record.fields['Google Doc URL'] === intent.docUrl && record.fields['Generated At'] === intent.generatedAt;
+            const record = z.object({id:z.string(),fields:z.object({Status:z.string(), 'Google Doc URL':z.string().optional(), 'Generated At':z.string().optional()})}).parse(await airtable.json());
+            const documentMatches = intent.docUrl === `https://docs.google.com/document/d/${encodeURIComponent(intent.docId)}/edit` && file.id === intent.docId && file.name === intent.title && file.parents.includes(config.googleDriveFolderId) && !file.trashed && document.ok && record.id === attempt.runId;
+            verifiedDocument = documentMatches && record.fields.Status === 'Generating' && !record.fields['Google Doc URL'] && !record.fields['Generated At'];
+            confirmedSuccess = documentMatches && record.fields.Status === 'Generated' && record.fields['Google Doc URL'] === intent.docUrl && record.fields['Generated At'] === intent.generatedAt;
           } catch { /* Unavailable or conflicting evidence remains unconfirmed. */ }
         }
         // A metadata read alone cannot confirm whether a cleanup succeeded.
@@ -404,8 +407,8 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
           } catch { /* An unavailable or inconsistent record cannot confirm the outcome. */ }
         }
         await completePublicationVerification(this.env.DB, attempt, payload.verifierId, {
-          originWorkflowId:claim.origin_workflow_id, contextJson:claim.context_json, candidate: candidate ?? undefined, cleanupFailure: confirmedFailed && !preGoogleFailure ? cleanupFailure ?? undefined : undefined,
-          result:{schemaVersion:1, kind:'publication', runId:attempt.runId, generation:attempt.generation, notificationCycle:attempt.notificationCycle, outcome:confirmedSuccess ? 'success' : confirmedFailed ? 'failed' : 'unconfirmed', messages:[{type:'text', text:confirmedSuccess ? `ตรวจสอบแล้ว สร้างเอกสารสำเร็จ\n${candidate!.intent.docUrl}` : confirmedFailed ? `ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed และไม่มีเอกสารที่บันทึกไว้\n${attempt.runId}` : failure ? `⚠️ กรุณาตรวจสอบสถานะงานเดิมใน Airtable ก่อนส่ง /docs ซ้ำ\n${attempt.runId}` : `⚠️ ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${attempt.runId}`}]},
+          originWorkflowId:claim.origin_workflow_id, contextJson:claim.context_json, candidate: candidate ?? undefined, verifiedDocument, cleanupFailure: confirmedFailed && !preGoogleFailure ? cleanupFailure ?? undefined : undefined,
+          result:{schemaVersion:1, kind:'publication', runId:attempt.runId, generation:attempt.generation, notificationCycle:attempt.notificationCycle, outcome:confirmedSuccess ? 'success' : confirmedFailed ? 'failed' : 'unconfirmed', messages:[{type:'text', text:confirmedSuccess ? `ตรวจสอบแล้ว สร้างเอกสารสำเร็จ\n${candidate!.intent.docUrl}` : confirmedFailed ? `ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed และไม่มีเอกสารที่บันทึกไว้\n${attempt.runId}` : verifiedDocument ? `ตรวจสอบเอกสารแล้ว แต่สถานะ Airtable ยังไม่ยืนยัน กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${candidate!.intent.docUrl}\n${attempt.runId}` : failure ? `⚠️ กรุณาตรวจสอบสถานะงานเดิมใน Airtable ก่อนส่ง /docs ซ้ำ\n${attempt.runId}` : `⚠️ ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${attempt.runId}`}]},
         });
       });
       return null;
