@@ -69,7 +69,7 @@ Escalate sustained caption costs to the developer to review the prompt or a Batc
 
 ## Failed publication and escalation
 
-The LINE validation message names missing fields per Product ID and links to Airtable. Fill the fields, set the run back to `Ready`, send `/docs`, and confirm the new document link. For a workflow failure, check the `Failed` run, Cloudflare Workflow logs, and Airtable, Google, and Anthropic availability; then send `/docs` to restart or resume eligible work. Do not create a second run to mask a failed one.
+The LINE validation message names missing fields per Product ID and links to Airtable. Fill the fields, set the run back to `Ready`, send `/docs`, and confirm the new document link. For a workflow failure, check the `Failed` run, Cloudflare Workflow logs, and Airtable, Google, and Anthropic availability; then send `/docs` to restart or resume eligible work. Do not create a second run to mask a failed one. A missing-looking or unavailable Workflow lookup is not proof it stopped: hold the attempt for owner review and independently establish its state and effects before any restart. For a stale Airtable status that could overwrite a manual edit, coordinate with writers and editors, inspect the captured attempt and verified output, then resolve it as owner; a read immediately before a write cannot prevent a concurrent edit. Existing evidence-guarded repairs remain available. See [owner recovery](import-group-owner.md).
 
 If repeated retries fail or `/health` is not healthy, run authenticated `/setup` and inspect its failed checks:
 
