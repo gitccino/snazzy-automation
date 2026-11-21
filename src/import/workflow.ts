@@ -312,7 +312,7 @@ export class ImportWorkflow extends WorkflowEntrypoint<
     const notificationDate=await step.do('terminal-display-date',()=>Promise.resolve(bangkokDateTimeThai(clock)));
     const enqueue=async(outcome:'success'|'partial'|'failed'|'unconfirmed',messages:import('../line/reply-types').LineReplyMessage[])=>{
       if(!context.replyGroupId)return;
-      await outbox.enqueueResult({groupId:context.replyGroupId,resultKey:JSON.stringify(['import',payload.importRunId,1,1,'terminal']),result:{schemaVersion:1,kind:'import',runId:payload.importRunId,generation:1,notificationCycle:1,outcome,messages}});
+      await outbox.enqueueResult({groupId:context.replyGroupId,resultKey:JSON.stringify(['import',payload.importRunId,1,1,'interrupted']),result:{schemaVersion:1,kind:'import',runId:payload.importRunId,generation:1,notificationCycle:1,outcome,messages}});
     };
     const resultKey = JSON.stringify(['import',payload.importRunId,1,1,'terminal']);
     const summaryResult = (result: ImportRunResult, orphanRange: DownloadAndGroupOutcome['orphanRange']): import('../line/reply-types').TerminalResultV1 => {
