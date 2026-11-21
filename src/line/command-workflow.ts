@@ -155,10 +155,8 @@ export class LineCommandWorkflow extends WorkflowEntrypoint<Env,{event:LineIngre
           SELECT ?,?,?,? WHERE EXISTS (SELECT 1 FROM line_event_replies WHERE event_id=? AND provenance='prepared' AND reply_json=?) ON CONFLICT(result_key) DO NOTHING`)
           .bind(resultKey,provenance.groupId,JSON.stringify(result),clock.now().toISOString(),event.webhookEventId,JSON.stringify(reply)),
       ]);
-      else {
-        const saved=await this.env.DB.prepare("SELECT 1 FROM line_event_replies WHERE event_id=? AND provenance='prepared' AND reply_json=?").bind(event.webhookEventId,JSON.stringify(reply)).first();
-        if (!saved) throw new Error('publication_start_reply_mismatch');
-      }
+      const saved=await this.env.DB.prepare("SELECT 1 FROM line_event_replies WHERE event_id=? AND provenance='prepared' AND reply_json=?").bind(event.webhookEventId,JSON.stringify(reply)).first();
+      if (!saved) throw new Error('publication_start_reply_mismatch');
       await createLineReplyRepository(this.env.DB,clock).enqueueResult({resultKey,groupId:provenance.groupId,result});
       return true;
     };

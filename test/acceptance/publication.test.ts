@@ -7,6 +7,7 @@ import {
   acquireOrResumeJob, getProductCache, putProductCollage,
 } from "../../src/db/publication-repository";
 import { createAssetStore, verifyAssetToken } from "../../src/import/asset-store";
+import { createLineReplyRepository } from "../../src/db/line-reply-repository";
 import { collageInputFingerprint, type ImageTransformer } from "../../src/publication/collage";
 import type { GoogleDocsRequest } from "../../src/publication/google-docs";
 import {
@@ -305,7 +306,7 @@ describe("publication acceptance", () => {
   });
   afterEach(() => vi.restoreAllMocks());
 
-  it("holds an invalid external run ID before dispatch and recovers a rejected reply in its original group", async () => {
+  it.each(["accepted", "rejected", "uncertain"] as const)("holds an invalid external run ID and handles a %s reply", async (delivery) => {
     const invalidId = `bad:${crypto.randomUUID()}`;
     const fixture = publicationFixture([product("A-1001")], invalidId);
     const eventId = crypto.randomUUID(), group = "CtestGroup";
@@ -321,28 +322,41 @@ describe("publication acceptance", () => {
       if (url.pathname.includes("/member/")) return Response.json({ userId: "U1", displayName: "Tester" });
       if (url.pathname.endsWith("/message/reply")) {
         replies.push(await request.json());
-        return replies.length === 1 ? new Response("rate limited", { status: 429 }) : Response.json({});
+        if (replies.length === 1 && delivery === "uncertain") throw new Error("network timeout");
+        return replies.length === 1 && delivery === "rejected" ? new Response("rate limited", { status: 429 }) : Response.json({});
       }
       return fixture.deps.fetcher(request);
     });
-    const admit = async (id: string, text: string) => {
-      const body = JSON.stringify({ events: [{ type: "message", webhookEventId: id, replyToken: `token-${id}`, source: { type: "group", groupId: group, userId: "U1" }, message: { type: "text", id: `m-${id}`, text } }] });
+    const admit = async (id: string, text: string, target = group) => {
+      const body = JSON.stringify({ events: [{ type: "message", webhookEventId: id, replyToken: `token-${id}`, source: { type: "group", groupId: target, userId: "U1" }, message: { type: "text", id: `m-${id}`, text } }] });
       const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
       const signature = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)))));
       expect((await handleLineRoute(new Request("https://app/line/webhook", { method: "POST", headers: { "x-line-signature": signature }, body }), local, {} as ExecutionContext)).status).toBe(200);
     };
     const run = (item: any) => LineCommandWorkflow.prototype.run.call({ env: local } as unknown as LineCommandWorkflow, { payload: item.params, instanceId: item.id } as any, step);
     await admit(eventId, "/docs 2/9/2026");
-    expect(await run(commands[0])).toEqual({ status: "rejected" });
+    expect(await run(commands[0])).toEqual({ status: delivery });
     expect(create).not.toHaveBeenCalled();
     expect(JSON.stringify(replies[0])).toContain("ไม่ได้เริ่ม");
-    expect(await local.DB.prepare("SELECT group_id, state FROM line_result_outbox WHERE result_json LIKE ?").bind(`%${invalidId}%`).first()).toEqual({ group_id: group, state: "pending" });
+    expect(await local.DB.prepare("SELECT group_id, state FROM line_result_outbox WHERE result_json LIKE ?").bind(`%${invalidId}%`).first()).toEqual({ group_id: group, state: delivery === "rejected" ? "pending" : delivery });
     await admit(eventId, "/docs 2/9/2026");
-    expect(await run(commands[1])).toEqual({ status: "duplicate" });
+    expect(await run(commands[1])).toEqual({ status: delivery === "rejected" ? "duplicate" : "ignored" });
+    const otherConfig = JSON.parse(configEnv.APP_CONFIG_JSON); otherConfig.LINE_ALLOWED_GROUP_ID = "Cother";
+    local.APP_CONFIG_JSON = JSON.stringify(otherConfig);
+    await admit(crypto.randomUUID(), "hello", "Cother");
+    expect(await run(commands[2])).toEqual({ status: "ignored" });
+    expect(replies).toHaveLength(1);
+    local.APP_CONFIG_JSON = configEnv.APP_CONFIG_JSON;
     await admit(crypto.randomUUID(), "hello");
-    expect(await run(commands[2])).toEqual({ status: "accepted" });
-    expect(JSON.stringify(replies[1])).toContain("ไม่ได้เริ่ม");
+    expect(await run(commands[3])).toEqual({ status: delivery === "rejected" ? "accepted" : "ignored" });
+    if (delivery === "rejected") expect(JSON.stringify(replies[1])).toContain("ไม่ได้เริ่ม");
+    expect(replies).toHaveLength(delivery === "rejected" ? 2 : 1);
     expect(create).not.toHaveBeenCalled();
+    if (delivery === "uncertain") {
+      const repo = createLineReplyRepository(local.DB, {now: () => new Date()});
+      const head = await repo.head(group);
+      expect(await repo.recordOwnerDisposition({eventId,sequence:head!.sequence,groupId:group,decision:'close_unverifiable',actor:'test',reason:'test cleanup'})).toBe(true);
+    }
   });
 
   it("delivers the generated publication after a lost signed start reply", async () => {
