@@ -768,6 +768,32 @@ export async function readPublicationCleanupReceipt(
     .first<{origin_workflow_id:string; context_json:string; doc_id:string}>();
 }
 
+export async function readPublicationCleanupFailure(
+  db: D1Database,
+  attempt: {runId: string; generation: number; notificationCycle: number; groupId: string},
+  verifierId: string,
+): Promise<{origin_workflow_id: string; context_json: string; doc_id: string; stage: string; failure_code: string} | null> {
+  return db.prepare(`SELECT c.origin_workflow_id, c.context_json, i.doc_id, f.stage, f.failure_code
+    FROM publication_cleanup_intents i
+    JOIN publication_verification_claims c ON c.publication_run_id=i.publication_run_id AND c.generation=i.generation
+      AND c.notification_cycle=i.notification_cycle AND c.origin_workflow_id=i.origin_workflow_id AND c.context_json=i.context_json
+    JOIN publication_jobs j ON j.publication_run_id=c.publication_run_id AND j.generation=c.generation
+      AND j.notification_cycle=c.notification_cycle AND j.correlation_id=c.origin_workflow_id AND j.settings_context_json=c.context_json
+    JOIN workflow_feedback f ON f.kind='publication' AND f.run_id=c.publication_run_id AND f.generation=c.generation
+      AND f.notification_cycle=c.notification_cycle AND f.group_id=c.group_id AND f.context_json=c.context_json
+    JOIN workflow_feedback_results r ON r.kind=f.kind AND r.run_id=f.run_id AND r.generation=f.generation
+      AND r.notification_cycle=f.notification_cycle AND r.group_id=f.group_id AND r.revision=0
+    WHERE length(f.failure_code)>0 AND json_extract(r.outcome_json,'$.stage')=f.stage
+      AND json_extract(r.outcome_json,'$.failureCode')=f.failure_code AND json_extract(r.outcome_json,'$.outcome')='unconfirmed'
+      AND c.publication_run_id=? AND c.generation=? AND c.notification_cycle=? AND c.group_id=? AND c.verifier_id=? AND c.completed=0
+      AND json_valid(c.context_json) AND json_extract(c.context_json,'$.replyGroupId')=c.group_id
+      AND length(i.doc_id)>0 AND i.saved_temp_doc=1 AND length(i.dispatch_verifier_id)>0 AND i.deletion_acknowledged=1
+      AND j.state IN ('locked','validating','generating','failed') AND j.finalization_json IS NULL
+      AND j.google_doc_id IS NOT i.doc_id AND j.successful_generation=0`)
+    .bind(attempt.runId,attempt.generation,attempt.notificationCycle,attempt.groupId,verifierId)
+    .first<{origin_workflow_id:string; context_json:string; doc_id:string; stage:string; failure_code:string}>();
+}
+
 export async function claimPublicationCleanupDispatch(
   db: D1Database,
   attempt: {runId: string; generation: number; notificationCycle: number; groupId: string},

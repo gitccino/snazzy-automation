@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import { testEnv } from '../helpers/env';
-import { acquireOrResumeJob, admitPublicationCleanup, claimPublicationVerification, claimPublicationCleanupDispatch, recordPublicationCleanupReceipt, readPublicationCleanupCandidate, readPublicationCleanupReceipt } from '../../src/db/publication-repository';
+import { acquireOrResumeJob, admitPublicationCleanup, claimPublicationVerification, claimPublicationCleanupDispatch, recordPublicationCleanupReceipt, readPublicationCleanupCandidate, readPublicationCleanupReceipt, readPublicationCleanupFailure } from '../../src/db/publication-repository';
 
 it('captures an owned cleanup once and fences conflicting attempts', async () => {
   const db = testEnv().DB, id = crypto.randomUUID();
@@ -144,4 +144,26 @@ it('reads an acknowledged receipt only for the current owner and matching captur
   await db.prepare("UPDATE publication_verification_claims SET verifier_id=? WHERE publication_run_id=?").bind(replacement,id).run();
   expect(await readPublicationCleanupReceipt(db,attempt,claim.verifierId)).toBeNull();
   expect(await readPublicationCleanupReceipt(db,attempt,replacement)).not.toBeNull();
+});
+
+
+it('joins a confirmed receipt to the matching saved primary failure', async () => {
+  const db = testEnv().DB, id = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:'group',settings:{config:{googleDriveFolderId:'folder'}}});
+  await acquireOrResumeJob(db,{now:()=>new Date()},id,'owner');
+  await db.prepare('UPDATE publication_jobs SET settings_context_json=?, temp_doc_id=? WHERE publication_run_id=?').bind(context,'doc',id).run();
+  await admitPublicationCleanup(db,id,1,1,'owner','doc');
+  const attempt = {runId:id,generation:1,notificationCycle:1,groupId:'group'};
+  const claim = await claimPublicationVerification(db,attempt);
+  if (claim.status !== 'claimed') throw new Error('expected claim');
+  await claimPublicationCleanupDispatch(db,attempt,claim.verifierId,'doc');
+  await recordPublicationCleanupReceipt(db,{...attempt,verifierId:claim.verifierId,docId:'doc',acknowledged:true});
+  expect(await readPublicationCleanupFailure(db,attempt,claim.verifierId)).toBeNull();
+  await db.prepare("INSERT INTO workflow_feedback(kind,run_id,generation,notification_cycle,group_id,context_json,stage,failure_code) VALUES ('publication',?,1,1,'group',?,'prepare outputs','claude_failed')").bind(id,context).run();
+  await db.prepare("INSERT INTO workflow_feedback_results(kind,run_id,generation,notification_cycle,revision,result_key,outcome_json,group_id) VALUES ('publication',?,1,1,0,?,?,'group')").bind(id,id,JSON.stringify({stage:'prepare outputs',failureCode:'claude_failed',outcome:'unconfirmed'})).run();
+  expect(await readPublicationCleanupFailure(db,attempt,claim.verifierId)).toEqual({origin_workflow_id:'owner',context_json:context,doc_id:'doc',stage:'prepare outputs',failure_code:'claude_failed'});
+  expect(await readPublicationCleanupFailure(db,attempt,'stale')).toBeNull();
+  expect(await readPublicationCleanupFailure(db,{...attempt,groupId:'foreign'},claim.verifierId)).toBeNull();
+  await db.prepare("UPDATE publication_jobs SET correlation_id='foreign' WHERE publication_run_id=?").bind(id).run();
+  expect(await readPublicationCleanupFailure(db,attempt,claim.verifierId)).toBeNull();
 });
