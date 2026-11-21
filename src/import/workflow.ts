@@ -309,7 +309,11 @@ export class ImportWorkflow extends WorkflowEntrypoint<
       assetUrlTtlSeconds: 300,
     };
     const outbox=createLineReplyRepository(this.env.DB,clock);
-    const notificationDate=await step.do('terminal-display-date',()=>Promise.resolve(bangkokDateTimeThai(clock)));
+    const notificationDate=await step.do('terminal-display-date',async()=> {
+      const run = await this.env.DB.prepare('SELECT started_at FROM import_runs WHERE id=?').bind(payload.importRunId).first<{started_at:string}>();
+      if (!run) throw new Error('import_run_missing');
+      return bangkokDateTimeThai({now:()=>new Date(run.started_at)});
+    });
     const enqueue=async(outcome:'success'|'partial'|'failed'|'unconfirmed',messages:import('../line/reply-types').LineReplyMessage[])=>{
       if(!context.replyGroupId)return;
       const legacy = await this.env.DB.prepare("SELECT 1 FROM line_result_outbox WHERE result_key=? AND group_id=? AND json_extract(result_json, '$.outcome')='unconfirmed'").bind(JSON.stringify(['import',payload.importRunId,1,1,'terminal']),context.replyGroupId).first();

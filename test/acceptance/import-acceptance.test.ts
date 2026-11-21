@@ -404,7 +404,7 @@ describe("import acceptance", () => {
   });
 
 
-  it.each(["none", "recording", "legacy", "finalization"])("delivers a mixed upload summary with interruption: %s", async (mode) => {
+  it.each(["none", "recording", "legacy", "finalization", "uncached-finalization", "transaction"])("delivers a mixed upload summary with interruption: %s", async (mode) => {
     const interrupt = mode !== "none";
     const id = crypto.randomUUID(), group = `Cimport-${id}`, other = `Cother-${id}`, token = `token-${id}`;
     const album = await deriveSourceAlbumId(token);
@@ -418,6 +418,7 @@ describe("import acceptance", () => {
       LINE_COMMAND_WORKFLOW: { createBatch: async (items: any[]) => { commands.push(...items); return []; }, get: async () => ({ status: async () => ({ status: "running" }) }) },
       IMPORT_WORKFLOW: { createBatch: async (items: any[]) => { business.push(...items); created = true; throw new Error("creation response lost"); }, get: async () => { if (!created) throw new Error("instance.not_found"); return { status: async () => ({ status: "running" }) }; } },
     } as unknown as Env;
+    const r2Put = vi.spyOn(local.IMAGES_BUCKET, "put");
     const underlyingStep = retryingStep();
     const completed = new Map<string, unknown>();
     const failed = new Map<string, unknown>();
@@ -425,7 +426,7 @@ describe("import acceptance", () => {
     const step = { async do(name: string, options: any, callback?: any) {
       if (completed.has(name)) return completed.get(name);
       if (failed.has(name)) throw failed.get(name);
-      if (interrupt && !interrupted && (mode === "finalization" ? name === "finalize-checkpoint" : name.startsWith("record-failed-group-"))) { interrupted = true; throw new Error("recording interrupted"); }
+      if (interrupt && mode !== "transaction" && !interrupted && (mode.includes("finalization") ? name === "finalize-checkpoint" : name.startsWith("record-failed-group-"))) { interrupted = true; throw new Error("recording interrupted"); }
       try {
         const result = await underlyingStep.do(name, options, callback);
         completed.set(name, result);
@@ -458,12 +459,16 @@ describe("import acceptance", () => {
       expect(business[0].params).toMatchObject({ sourceAlbumId: album, trigger: "line", trustedEventId: id, replyGroupId: group });
       const runImport = () => ImportWorkflow.prototype.run.call({ env: local } as unknown as ImportWorkflow, { payload: business[0].params, instanceId: business[0].id } as any, step);
       if (interrupt) {
-        await expect(runImport()).rejects.toThrow("recording interrupted");
+        if (mode === "transaction") await local.DB.exec("CREATE TRIGGER test_checkpoint_failure BEFORE INSERT ON import_checkpoints BEGIN SELECT RAISE(ABORT, 'checkpoint failure'); END");
+        await expect(runImport()).rejects.toThrow(mode === "transaction" ? "checkpoint failure" : "recording interrupted");
+        if (mode === "transaction") await local.DB.exec("DROP TRIGGER test_checkpoint_failure");
         expect(await local.DB.prepare("SELECT COUNT(*) AS count FROM line_result_outbox WHERE group_id=?").bind(group).first()).toEqual({ count: 1 });
-        if (mode === "finalization") {
+        if (mode.includes("finalization") || mode === "transaction") {
           expect(await local.DB.prepare("SELECT last_position FROM import_checkpoints WHERE source_album_id=?").bind(album).first()).toBeNull();
+          expect(await local.DB.prepare("SELECT status FROM import_runs WHERE id=?").bind(business[0].params.importRunId).first()).toEqual({ status: "running" });
           expect(await groupStates(business[0].params.importRunId)).toHaveLength(3);
         }
+        if (mode === "uncached-finalization" || mode === "transaction") { completed.clear(); failed.clear(); }
         if (mode === "legacy") {
           const runId = business[0].params.importRunId;
           await local.DB.prepare("UPDATE line_result_outbox SET result_key=? WHERE group_id=?").bind(JSON.stringify(["import", runId, 1, 1, "terminal"]), group).run();
@@ -473,7 +478,12 @@ describe("import acceptance", () => {
           expect(await local.DB.prepare("SELECT COUNT(*) AS count FROM line_result_outbox WHERE group_id=?").bind(group).first()).toEqual({ count: 1 });
         }
       }
+      const putsBeforeReplay = r2Put.mock.calls.length;
       const result = await runImport() as ImportRunResult;
+      if (mode === "uncached-finalization" || mode === "transaction") {
+        expect(r2Put).toHaveBeenCalledTimes(putsBeforeReplay);
+        completed.clear(); failed.clear();
+      }
       await runImport();
       expect(result).toMatchObject({ succeededProductIds: ["A-501"], ignoredGroupCount: 1, failedGroups: [
         { productId: "A-502", errorCode: "airtable_create_unconfirmed" },

@@ -230,9 +230,12 @@ export async function downloadAndGroupSnapshot(
       photos: group.photos.map(photo => ({ applePhotoId: photo.applePhotoId, r2Key: photo.r2Key })),
     });
     if (row.state === "succeeded") {
+      if (row.importRunId !== importRunId) continue;
+    } else if (row.state === "failed" && row.importRunId === importRunId && row.failureReason) {
+      heldGroups.push({ groupId: row.id, productId: row.productId, errorCode: row.failureReason });
       continue;
     }
-    if (await deps.repo.findConfirmedOverlap(deps.sourceAlbumId, groupHash, group.photos.map(photo => photo.applePhotoId))) {
+    if (row.state !== "succeeded" && await deps.repo.findConfirmedOverlap(deps.sourceAlbumId, groupHash, group.photos.map(photo => photo.applePhotoId))) {
       await deps.repo.setGroupState(row.id, "failed", { failureReason: "confirmed_group_membership_changed" });
       heldGroups.push({ groupId: row.id, productId: null, errorCode: "confirmed_group_membership_changed" });
       continue;

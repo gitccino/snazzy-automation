@@ -10,7 +10,7 @@ it('replays an ambiguous finalization and delivers the committed result once', a
   const env = { ...testEnv(), ...createTestEnv() }, db = env.DB;
   const runId = crypto.randomUUID(), groupId = crypto.randomUUID();
   const context = { settings: await loadSettingsSnapshot(env), replyGroupId: groupId };
-  await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json) VALUES (?,?,'line','running','now',?)").bind(runId,runId,JSON.stringify(context)).run();
+  await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json) VALUES (?,?,'line','running','2026-09-01T09:00:00.000Z',?)").bind(runId,runId,JSON.stringify(context)).run();
   const groupIdRow = crypto.randomUUID();
   await db.prepare("INSERT INTO product_groups(id,import_run_id,ordinal,group_hash,state,product_id,airtable_record_id,first_photo_id,last_photo_id,created_at,updated_at) VALUES (?,?,1,?,'succeeded','A-501','rec1','p1','p2','now','now')").bind(groupIdRow,runId,groupIdRow).run();
   const sequenceBefore = await db.prepare('SELECT * FROM sequences ORDER BY name').all();

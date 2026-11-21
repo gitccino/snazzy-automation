@@ -382,7 +382,7 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
           `INSERT INTO product_groups (id, import_run_id, ordinal, group_hash, state, first_photo_id, last_photo_id, attempt_count, created_at, updated_at)
            VALUES (?, ?, ?, ?, 'pending', ?, ?, 0, ?, ?)
            ON CONFLICT(group_hash) DO UPDATE SET
-             import_run_id = excluded.import_run_id,
+             import_run_id = CASE WHEN product_groups.state = 'succeeded' THEN product_groups.import_run_id ELSE excluded.import_run_id END,
              ordinal = excluded.ordinal,
              first_photo_id = excluded.first_photo_id,
              last_photo_id = excluded.last_photo_id,
