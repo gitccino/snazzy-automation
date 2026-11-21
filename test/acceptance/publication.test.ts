@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseConfig } from "../../src/config";
 import type { Env } from "../../src/env";
 import {
-  acquireOrResumeJob, getProductCache, putProductCollage,
+  acquireOrResumeJob, claimPublicationVerification, getProductCache, putProductCollage,
 } from "../../src/db/publication-repository";
 import { createAssetStore, verifyAssetToken } from "../../src/import/asset-store";
 import { createLineReplyRepository } from "../../src/db/line-reply-repository";
@@ -304,6 +304,7 @@ describe("publication acceptance", () => {
     await env.DB.exec("DELETE FROM product_image_preparations");
     await env.DB.exec("DELETE FROM publication_product_cache");
     await env.DB.exec("DELETE FROM publication_cleanup_intents");
+    await env.DB.exec("DELETE FROM publication_verification_claims");
     await env.DB.exec("DELETE FROM publication_jobs");
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network forbidden in acceptance tests"));
   });
@@ -418,6 +419,7 @@ describe("publication acceptance", () => {
   });
 
   it.each([
+    { provider: "cleanup", status: 401, code: "anthropic_auth_failed", stage: "prepare outputs", notice: "Claude" },
     { provider: "image", status: 200, code: "product_image_format_invalid", stage: "prepare product images", notice: "ไฟล์รูปต้องเป็น JPEG" },
     { provider: "claude", status: 401, code: "anthropic_auth_failed", stage: "prepare outputs", notice: "Claude" },
     { provider: "claude", status: 404, code: "anthropic_model_failed", stage: "prepare outputs", notice: "โมเดล" },
@@ -438,6 +440,7 @@ describe("publication acceptance", () => {
       PUBLICATION_WORKFLOW: { create: async (item: any) => { business.push(item); return { id: item.id }; }, get: async () => { if (!business.length) throw new Error("instance.not_found"); return { status: async () => ({ status: "running" }) }; } },
     } as unknown as Env;
     const step = { do: async (_name: string, a: any, b?: any) => (b ?? a)() } as unknown as WorkflowStep;
+    let cleanupFailed = false;
     vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
       const request = new Request(input, init), url = new URL(request.url);
       if (url.pathname.includes("/member/")) return Response.json({ userId: "U1", displayName: "Tester" });
@@ -448,10 +451,18 @@ describe("publication acceptance", () => {
       }
       if (provider === "image" && url.hostname === "fixtures.airtableusercontent.com") return new Response("SECRET invalid image https://private.example/token", { headers: { "content-type": "image/jpeg" } });
       if (url.hostname === "api.anthropic.com") {
-        if (provider === "claude") return Response.json({ type: "error", error: { type: status === 401 ? "authentication_error" : "not_found_error", message: "SECRET provider response" } }, { status });
+        if (provider === "claude" || provider === "cleanup") return Response.json({ type: "error", error: { type: status === 401 ? "authentication_error" : "not_found_error", message: "SECRET provider response" } }, { status });
         return Response.json(url.pathname.endsWith("count_tokens") ? { input_tokens: 12000 } : toolResponse([{ productId: "A-1001", drafts: drafts("A-1001") }]));
       }
       if (url.hostname === "oauth2.googleapis.com" && provider === "google") return Response.json({ error: "invalid_grant", error_description: "SECRET refresh token" }, { status });
+      if (provider === "cleanup" && url.pathname === "/drive/v3/files" && request.method === "GET") {
+        fixture.state.docs.set("temp-doc-1", { text: template, name: "temporary", owner: fixtureId });
+        return Response.json({ files: [{ id: "temp-doc-1" }] });
+      }
+      if (provider === "cleanup" && url.pathname.endsWith("/temp-doc-1")) {
+        if (request.method === "GET") return Response.json({ id: "temp-doc-1", parents: [config.googleDriveFolderId], trashed: false, appProperties: { publicationRunId: fixtureId } });
+        if (request.method === "DELETE" && !cleanupFailed) { cleanupFailed = true; return new Response("SECRET cleanup", { status: 503 }); }
+      }
       if (provider === "copy" && url.pathname.endsWith("/copy")) return new Response("SECRET copy error", { status });
       if (provider === "mismatch" && url.hostname === "docs.googleapis.com" && request.method === "GET" && fixture.batches.length) {
         const doc = fixture.state.docs.get(url.pathname.split("/").at(-1)!)!;
@@ -472,7 +483,10 @@ describe("publication acceptance", () => {
     expect(business).toHaveLength(1);
     await expect(PublicationWorkflow.prototype.run.call({ env: local } as unknown as PublicationWorkflow, { payload: business[0].params, instanceId: business[0].id } as any, step)).rejects.toBeDefined();
     expect(await local.DB.prepare("SELECT stage, failure_code FROM workflow_feedback WHERE run_id=?").bind(fixtureId).first()).toEqual({ stage, failure_code: code });
-    expect(fixture.state.docs.size).toBe(0);
+    expect(fixture.state.docs.size).toBe(provider === "cleanup" ? 1 : 0);
+    if (provider === "cleanup") {
+      expect(await local.DB.prepare("SELECT doc_id, deletion_acknowledged FROM publication_cleanup_intents WHERE publication_run_id=?").bind(fixtureId).first()).toEqual({ doc_id: "temp-doc-1", deletion_acknowledged: null });
+    }
     if (provider === "mismatch") expect(fixture.batches.length).toBeGreaterThan(0);
     const persisted = await local.DB.prepare("SELECT outcome_json FROM workflow_feedback_results WHERE run_id=?").bind(fixtureId).all();
     expect(JSON.stringify(persisted)).not.toMatch(/SECRET|private\.example|refresh token/i);
@@ -500,6 +514,21 @@ describe("publication acceptance", () => {
       expect(JSON.stringify(replies[1])).toContain("รูปที่ 1");
     }
     expect(replies[1].replyToken).toBe(`token-${fresh}`);
+    if (provider === "cleanup") {
+      const claim = await claimPublicationVerification(local.DB, { runId: fixtureId, generation: 1, notificationCycle: 1, groupId: group });
+      if (claim.status !== "claimed") throw new Error("missing verification claim");
+      local.PUBLICATION_WORKFLOW = { get: async () => ({ status: async () => ({ status: "terminated" }) }) } as any;
+      const payload = { kind: "verification", publicationRunId: fixtureId, generation: 1, notificationCycle: 1, groupId: group, verifierId: claim.verifierId };
+      const verify = () => PublicationWorkflow.prototype.run.call({ env: local } as unknown as PublicationWorkflow, { payload, instanceId: claim.verifierId } as any, step);
+      await verify(); await verify();
+      const row = await local.DB.prepare("SELECT result_json FROM publication_verification_claims WHERE publication_run_id=?").bind(fixtureId).first<{result_json:string}>();
+      expect(JSON.parse(row!.result_json).outcome).toBe("unconfirmed");
+      expect(fixture.state.docs.size).toBe(1);
+      expect(await local.DB.prepare("SELECT deletion_acknowledged FROM publication_cleanup_intents WHERE publication_run_id=?").bind(fixtureId).first()).toEqual({ deletion_acknowledged: null });
+      const correction = crypto.randomUUID(); await admit(correction, "hello"); await runCommand(commands[3]);
+      expect(replies).toHaveLength(2);
+      expect(await local.DB.prepare("SELECT completed FROM publication_verification_claims WHERE publication_run_id=?").bind(fixtureId).first()).toEqual({ completed: 1 });
+    }
     await runCommand(commands[2]);
     expect(replies).toHaveLength(2);
     expect(business).toHaveLength(1);

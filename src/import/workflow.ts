@@ -271,6 +271,8 @@ export class ImportWorkflow extends WorkflowEntrypoint<
       }
       throw error;
     }
+    const failed = await this.env.DB.prepare("SELECT 1 FROM import_runs WHERE id=? AND source_album_id=? AND status='completed_with_failures' AND failure_reason IS NOT NULL AND checkpoint_position IS NULL").bind(payload.importRunId, payload.sourceAlbumId).first();
+    if (failed) throw new Error("import_run_failed");
     const config = context.settings.config;
     const clock = { now: () => new Date() };
     const ids = { next: () => newCorrelationId() };

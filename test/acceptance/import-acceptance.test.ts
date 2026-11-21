@@ -625,6 +625,75 @@ describe("import acceptance", () => {
     } finally { vi.restoreAllMocks(); }
   });
 
+  it.each(["interrupted", "ignored"] as const)("delivers a signed upload scan result: %s", async mode => {
+    const id = crypto.randomUUID(), group = `Cscan-${id}`, token = `token-${id}`;
+    const album = await deriveSourceAlbumId(token);
+    const specs = mode === "interrupted" ? productGroupOf(9, 1) : [{ id: "ignore", markerKind: "ignore_start" as const }, { id: "ignored-photo" }];
+    const harness = await buildHarness(album, specs, { idPrefix: id });
+    const commands: any[] = [], business: any[] = [], replies: any[] = [];
+    const config = JSON.parse(createTestEnv().APP_CONFIG_JSON); config.LINE_ALLOWED_GROUP_ID = group;
+    const local = { ...testEnv(), ...createTestEnv(), ICLOUD_SHARED_ALBUM_TOKEN: token, LINE_CHANNEL_SECRET: "secret", APP_CONFIG_JSON: JSON.stringify(config),
+      LINE_COMMAND_WORKFLOW: { createBatch: async (items: any[]) => { commands.push(...items); return []; } },
+      IMPORT_WORKFLOW: { createBatch: async (items: any[]) => { business.push(...items); return []; }, get: async () => { throw new Error("instance.not_found"); } },
+    } as unknown as Env;
+    const step = retryingStep() as unknown as WorkflowStep;
+    vi.spyOn(icloud, "createICloudClient").mockReturnValue(harness.source);
+    vi.spyOn(marker, "createMarkerDetector").mockReturnValue(fakeMarkerDetector);
+    vi.spyOn(products, "createAirtableProductsClient").mockReturnValue(harness.deps.airtable);
+    const download = harness.source.download.bind(harness.source);
+    let fail = mode === "interrupted";
+    vi.spyOn(harness.source, "download").mockImplementation(async photo => {
+      if (fail && photo.position === 3) { fail = false; throw new OperationalError("scan_interrupted", "SECRET scan", false); }
+      return download(photo);
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url).includes("/member/")) return Response.json({ userId: "U1", displayName: "Tester" });
+      if (!String(url).endsWith("/message/reply")) throw new Error(`unexpected fetch ${url}`);
+      replies.push(JSON.parse(String(init?.body))); return Response.json({});
+    });
+    const admit = async (eventId: string, text: string) => {
+      const body = JSON.stringify({ events: [{ type: "message", webhookEventId: eventId, replyToken: `reply-${eventId}`, source: { type: "group", groupId: group, userId: "U1" }, message: { type: "text", id: `m-${eventId}`, text } }] });
+      const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const signature = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)))));
+      expect((await handleLineRoute(new Request("https://app/line/webhook", { method: "POST", headers: { "x-line-signature": signature }, body }), local, {} as ExecutionContext)).status).toBe(200);
+    };
+    const command = (item: any) => LineCommandWorkflow.prototype.run.call({ env: local } as unknown as LineCommandWorkflow, { payload: item.params, instanceId: item.id } as any, step);
+    const run = () => ImportWorkflow.prototype.run.call({ env: local } as unknown as ImportWorkflow, { payload: business[0].params, instanceId: business[0].id } as any, step);
+    try {
+      await admit(id, "/upload"); await command(commands[0]);
+      expect(business).toHaveLength(1);
+      if (mode === "interrupted") {
+        await expect(run()).rejects.toBeDefined();
+        expect(await local.DB.prepare("SELECT last_position FROM import_checkpoints WHERE source_album_id=?").bind(album).first()).toBeNull();
+        expect(harness.created.size).toBe(0);
+      } else {
+        expect(await run()).toMatchObject({ succeededProductIds: [], ignoredGroupCount: 1 });
+      }
+      const fresh = crypto.randomUUID(); await admit(fresh, "hello"); await command(commands[1]);
+      const message = JSON.stringify(replies[1]);
+      expect(replies[1].replyToken).toBe(`reply-${fresh}`);
+      expect(message).not.toContain("SECRET");
+      if (mode === "interrupted") {
+        expect(message).not.toContain("ไม่มีสินค้าใหม่ให้นำเข้า");
+        expect(message).toContain("ยังยืนยันผลการนำเข้าสินค้าไม่ได้");
+        expect(await local.DB.prepare("SELECT COUNT(*) AS count FROM photo_assets WHERE source_album_id=?").bind(album).first()).toEqual({ count: 2 });
+        await expect(run()).rejects.toBeDefined();
+        expect(await local.DB.prepare("SELECT COUNT(*) AS count FROM photo_assets WHERE source_album_id=?").bind(album).first()).toEqual({ count: 2 });
+        const recoveryId = crypto.randomUUID();
+        const recovered = await harness.startAndRun(recoveryId, "admin");
+        expect(recovered.succeededProductIds).toEqual(["A-501"]);
+        expect(harness.source.downloads).toContain("g1-photo-8");
+        await harness.resumeRun(recoveryId, "admin");
+        expect(harness.created.size).toBe(1);
+      } else {
+        expect(message).toContain("ข้ามสินค้าซ้ำ 1 รายการ");
+        await run();
+      }
+      expect(harness.created.size).toBe(mode === "interrupted" ? 1 : 0);
+      await command(commands[1]); expect(replies).toHaveLength(2);
+    } finally { vi.restoreAllMocks(); }
+  });
+
   it("holds a lost create response when replay cannot find the row", async () => {
     const create = vi.fn(async () => { throw new OperationalError("airtable_response_lost", "response lost", true); });
     const harness = await buildHarness(`album-${crypto.randomUUID()}`, productGroupOf(9, 1), { idPrefix: "lost-id", createProduct: create });
