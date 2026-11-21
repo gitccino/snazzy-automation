@@ -912,3 +912,20 @@ it('holds an ambiguous failed-job restart on replay without selecting a new Read
   expect(fetchMock).not.toHaveBeenCalled();
   expect(h.restart).toHaveBeenCalledTimes(1);
 });
+
+it('holds a documented invalid-id creation refusal without retrying the handoff', async () => {
+  vi.restoreAllMocks();
+  mockRun('Ready');
+  const h = makeTriggerEnv('running');
+  await h.env.DB.exec('DELETE FROM publication_regeneration_events');
+  await h.env.DB.exec('DELETE FROM line_command_ingress');
+  await h.env.DB.exec('DELETE FROM publication_jobs');
+  await h.env.DB.prepare('INSERT INTO line_command_ingress VALUES (?, ?, ?, ?, ?)').bind('refused-event', 'group-1', JSON.stringify({type:'docs'}), 'command-1', clock.now().toISOString()).run();
+  const { captureOperationContext } = await import('../../src/settings/runtime');
+  const context = await captureOperationContext(h.env, 'group-1');
+  h.get.mockRejectedValue(new Error('instance.not_found'));
+  h.create.mockRejectedValue(new Error('Invalid workflow ID (instance.invalid_id)'));
+  await expect(handleDocsTrigger(h.env, 'line', clock, undefined, fetch, context, 'refused-event')).rejects.toThrow('(instance.invalid_id)');
+  await expect(handleDocsTrigger(h.env, 'line', clock, undefined, fetch, context, 'refused-event')).rejects.toThrow('publication_handoff_unconfirmed');
+  expect(h.create).toHaveBeenCalledTimes(1);
+});
