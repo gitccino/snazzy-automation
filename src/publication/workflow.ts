@@ -1,3 +1,4 @@
+import { docsWorkflowFailureCard, publicationFailureGuidance } from '../line/docs-summary-card';
 import { earlySetupResult } from '../line/early-setup-notice';
 import {
   preparePublicationImages,
@@ -187,7 +188,10 @@ export async function runPublicationWorkflow(
     try {
       noticeJson=await step.do('record exhausted publication failure',retries,()=>workflowCall('Unable to record the publication failure.',async()=>{
         let intent:Notice|null=null;
-        await failPublicationAfterExhaustion({...deps,notify:async(text,contents)=>{intent={text,...(contents?{contents}:{}),outcome:'failed'};}},runId,reason,displayDate,...generationArgs);
+        await failPublicationAfterExhaustion({...deps,notify:async()=>{
+          const card=docsWorkflowFailureCard({thaiDate:displayDate ?? 'ไม่สามารถอ่านวันที่รายการได้',reason:publicationFailureGuidance(stage,publicationErrorCode(originalError,'publication_stage_failed')),airtableRunUrl:`https://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`},deps.config.publicBaseUrl);
+          intent={text:card.text,contents:card.contents,outcome:'failed'};
+        }},runId,reason,displayDate,...generationArgs);
         return JSON.stringify(intent);
       }));
     } catch(recordingError) {
@@ -199,8 +203,8 @@ export async function runPublicationWorkflow(
             .bind(runId,generation,feedbackIdentity.notificationCycle,feedbackIdentity.groupId,JSON.stringify(['publication',runId,generation,feedbackIdentity.notificationCycle,'terminal'])).first<{outcome_json:string}>();
           if (saved) {
             const fact=JSON.parse(saved.outcome_json) as {stage:string;failureCode?:string};
-            const stage = fact.stage === 'prepare outputs' && fact.failureCode?.startsWith('anthropic_') ? 'สร้างคำบรรยาย' : ({'validate publication':'ตรวจสอบข้อมูล','prepare product images':'เตรียมรูปภาพ','prepare outputs':'เตรียมรูปภาพและคำบรรยาย','ensure temporary document':'สร้างเอกสาร','fill and verify document':'เขียนและตรวจสอบเอกสาร','finalize publication':'จัดเตรียมเอกสารขั้นสุดท้าย','recover finalization':'ตรวจสอบเอกสาร'} as Record<string,string>)[fact.stage] ?? 'เตรียมเอกสาร';
-            return JSON.stringify({text:`ขั้นตอน${stage}ไม่สำเร็จ\nสถานะการล้างข้อมูลหรือบันทึก Airtable ยังไม่แน่นอน\nกรุณาตรวจสอบงานเดิมใน Airtable ก่อนดำเนินการต่อ\nhttps://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`,outcome:'unconfirmed'} satisfies Notice);
+            const guidance = publicationFailureGuidance(fact.stage, fact.failureCode);
+            return JSON.stringify({text:`วันที่: ${displayDate ?? "ไม่สามารถอ่านวันที่รายการได้"}\n${guidance}\nสถานะการล้างข้อมูลหรือบันทึก Airtable ยังไม่แน่นอน\nให้ผู้ดูแลตรวจสอบงานเดิมก่อนดำเนินการต่อ\nhttps://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`,outcome:'unconfirmed'} satisfies Notice);
           }
         }
         const card=docsUnconfirmedCard({thaiDate:displayDate??'ไม่สามารถอ่านวันที่รายการได้',airtableRunUrl:`https://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`},deps.config.publicBaseUrl);

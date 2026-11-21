@@ -163,7 +163,7 @@ function rethrowPermanentAnthropicError(
   });
   if (status !== null && status >= 400 && status < 500 && status !== 429) {
     throw new OperationalError(
-      `anthropic_${action}_failed`,
+      status === 401 || status === 403 ? "anthropic_auth_failed" : status === 404 ? "anthropic_model_failed" : `anthropic_${action}_failed`,
       `Anthropic ${action} failed with status ${status}`,
       false,
     );

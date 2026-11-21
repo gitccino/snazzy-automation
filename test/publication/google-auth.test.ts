@@ -82,7 +82,7 @@ describe("createGoogleAuthClient", () => {
     }
     expect(error).toBeInstanceOf(OperationalError);
     expect(error).toMatchObject({
-      code: "google_token_exchange_failed",
+      code: status === 400 ? "google_auth_failed" : "google_token_exchange_failed",
       retryable,
       message: `Google token exchange failed with status ${status}`,
     });
@@ -106,7 +106,7 @@ describe("createGoogleAuthClient", () => {
     }
     expect(error).toBeInstanceOf(OperationalError);
     expect(error).toMatchObject({
-      code: "google_token_exchange_failed",
+      code: "google_auth_failed",
       retryable: false,
       message: "Google token exchange failed with status 400",
     });

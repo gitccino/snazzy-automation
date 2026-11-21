@@ -407,7 +407,7 @@ describe("publication stages", () => {
       .mockRejectedValueOnce({ status: 403, message: "upstream secret" })
       .mockResolvedValueOnce(captionResponse([{ productId: "A-1002", drafts }]) as never);
     const two = { ...validated, run: { ...validated.run, products: [product, { ...product, productId: "A-1002", airtableRecordId: "rec-product-2" }] } };
-    await expect(preparePublicationOutputs(deps, two)).rejects.toMatchObject({ code: "anthropic_create_message_failed", retryable: false });
+    await expect(preparePublicationOutputs(deps, two)).rejects.toMatchObject({ code: "anthropic_auth_failed", retryable: false });
     expect((await getProductCache(env.DB, "rec-run-1", "A-1001")).captionsJson).toBe(JSON.stringify(drafts));
     await preparePublicationOutputs(deps, two);
     expect(JSON.stringify(create.mock.calls[2]![0])).not.toContain("A-1001");

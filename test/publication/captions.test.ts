@@ -190,7 +190,7 @@ describe("planCaptionBatches", () => {
       [toCaptionRequestProducts([product("A-1001")])[0]!],
       1_000,
     )).rejects.toMatchObject({
-      code: "anthropic_count_tokens_failed",
+      code: "anthropic_auth_failed",
       retryable: false,
     });
   });
@@ -313,7 +313,7 @@ describe("requestCaptionBatch", () => {
       "claude-opus-5",
       requested,
     )).rejects.toMatchObject({
-      code: "anthropic_create_message_failed",
+      code: "anthropic_auth_failed",
       retryable: false,
     });
   });

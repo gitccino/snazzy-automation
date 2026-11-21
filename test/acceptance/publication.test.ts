@@ -359,6 +359,76 @@ describe("publication acceptance", () => {
     expect(business).toHaveLength(1);
   });
 
+  it.each([
+    { provider: "claude", status: 401, code: "anthropic_auth_failed", stage: "prepare outputs", notice: "Claude" },
+    { provider: "claude", status: 404, code: "anthropic_model_failed", stage: "prepare outputs", notice: "โมเดล" },
+    { provider: "google", status: 400, code: "google_auth_failed", stage: "ensure temporary document", notice: "Google" },
+    { provider: "google", status: 503, code: "google_token_exchange_failed", stage: "ensure temporary document", notice: "สร้างเอกสาร" },
+    { provider: "copy", status: 403, code: "google_drive_copy_failed", stage: "ensure temporary document", notice: "สร้างเอกสาร" },
+    { provider: "verification", status: 403, code: "google_docs_get_failed", stage: "fill and verify document", notice: "เขียนและตรวจสอบเอกสาร" },
+    { provider: "fill", status: 400, code: "google_docs_batch_update_failed", stage: "fill and verify document", notice: "เขียนและตรวจสอบเอกสาร" },
+  ])("delivers sanitized $provider $status failure only to its group", async ({ provider, status, code, stage, notice }) => {
+    const fixtureId = crypto.randomUUID();
+    const fixture = publicationFixture([product("A-1001")], fixtureId);
+    if (provider === "fill") fixture.state.batchFailureStatus = status;
+    const id = crypto.randomUUID(), group = "CtestGroup", other = "Cother";
+    const commands: any[] = [], business: any[] = [], replies: any[] = [];
+    const local = { ...env, ...configEnv, LINE_CHANNEL_SECRET: "secret", IMAGES_BUCKET: fixture.image.bucket, IMAGES: fixture.image.images,
+      LINE_COMMAND_WORKFLOW: { createBatch: async (items: any[]) => { commands.push(...items); return []; } },
+      PUBLICATION_WORKFLOW: { create: async (item: any) => { business.push(item); return { id: item.id }; }, get: async () => { if (!business.length) throw new Error("instance.not_found"); return { status: async () => ({ status: "running" }) }; } },
+    } as unknown as Env;
+    const step = { do: async (_name: string, a: any, b?: any) => (b ?? a)() } as unknown as WorkflowStep;
+    vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+      const request = new Request(input, init), url = new URL(request.url);
+      if (url.pathname.includes("/member/")) return Response.json({ userId: "U1", displayName: "Tester" });
+      if (url.pathname.endsWith("/message/reply")) {
+        replies.push(await request.json());
+
+        return Response.json({});
+      }
+      if (url.hostname === "api.anthropic.com") {
+        if (provider === "claude") return Response.json({ type: "error", error: { type: status === 401 ? "authentication_error" : "not_found_error", message: "SECRET provider response" } }, { status });
+        return Response.json(url.pathname.endsWith("count_tokens") ? { input_tokens: 12000 } : toolResponse([{ productId: "A-1001", drafts: drafts("A-1001") }]));
+      }
+      if (url.hostname === "oauth2.googleapis.com" && provider === "google") return Response.json({ error: "invalid_grant", error_description: "SECRET refresh token" }, { status });
+      if (provider === "copy" && url.pathname.endsWith("/copy")) return new Response("SECRET copy error", { status });
+      if (provider === "verification" && url.hostname === "docs.googleapis.com" && request.method === "GET" && fixture.batches.length) return new Response("SECRET verification error", { status });
+      return fixture.deps.fetcher(request);
+    });
+    const admit = async (eventId: string, text: string, groupId = group) => {
+      const body = JSON.stringify({ events: [{ type: "message", webhookEventId: eventId, replyToken: `token-${eventId}`, source: { type: "group", groupId, userId: "U1" }, message: { type: "text", id: `m-${eventId}`, text } }] });
+      const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const signature = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)))));
+      expect((await handleLineRoute(new Request("https://app/line/webhook", { method: "POST", headers: { "x-line-signature": signature }, body }), local, {} as ExecutionContext)).status).toBe(200);
+    };
+    const runCommand = (item: any) => LineCommandWorkflow.prototype.run.call({ env: local } as unknown as LineCommandWorkflow, { payload: item.params, instanceId: item.id } as any, step);
+    await admit(id, "/docs 2/9/2026");
+    expect(await runCommand(commands[0])).toEqual({ status: "accepted" });
+    expect(business).toHaveLength(1);
+    await expect(PublicationWorkflow.prototype.run.call({ env: local } as unknown as PublicationWorkflow, { payload: business[0].params, instanceId: business[0].id } as any, step)).rejects.toBeDefined();
+    expect(await local.DB.prepare("SELECT stage, failure_code FROM workflow_feedback WHERE run_id=?").bind(fixtureId).first()).toEqual({ stage, failure_code: code });
+    expect(fixture.state.docs.size).toBe(0);
+    const persisted = await local.DB.prepare("SELECT outcome_json FROM workflow_feedback_results WHERE run_id=?").bind(fixtureId).all();
+    expect(JSON.stringify(persisted)).not.toMatch(/SECRET|refresh token/i);
+    const otherConfig = JSON.parse(configEnv.APP_CONFIG_JSON); otherConfig.LINE_ALLOWED_GROUP_ID = other;
+    local.APP_CONFIG_JSON = JSON.stringify(otherConfig);
+    await admit(crypto.randomUUID(), "hello", other);
+    await runCommand(commands[1]);
+    local.APP_CONFIG_JSON = configEnv.APP_CONFIG_JSON;
+    expect(replies).toHaveLength(1);
+    const fresh = crypto.randomUUID();
+    await admit(fresh, "hello");
+    expect(await runCommand(commands[2])).toEqual({ status: "accepted" });
+    expect(replies).toHaveLength(2);
+    expect(JSON.stringify(replies[1])).toContain(notice);
+    expect(JSON.stringify(replies[1])).toContain("ผู้ดูแล");
+    expect(JSON.stringify(replies[1])).not.toMatch(/SECRET|หมดอายุ|expired/i);
+    expect(replies[1].replyToken).toBe(`token-${fresh}`);
+    await runCommand(commands[2]);
+    expect(replies).toHaveLength(2);
+    expect(business).toHaveLength(1);
+  });
+
   it.each([false, true])("preserves old Docs through replacement and saved-finalization retry (lost response: %s)", async (loseResponse) => {
     const fixture = publicationFixture();
     await fixture.run();
@@ -684,7 +754,7 @@ describe("publication acceptance", () => {
       expect(fixture.calls.filter(c => c.url.endsWith(`/tblRuns/${runId}`) && c.method === "PATCH").at(-1)!.body).toEqual({
         fields: { Status: "Failed", "Error Summary": "Unable to fill or verify the Google document." },
       });
-      expect(fixture.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Unable to fill or verify the Google document."), expect.objectContaining({ type: "bubble" }), expect.any(String));
+      expect(fixture.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("ขั้นตอนเขียนและตรวจสอบเอกสารไม่สำเร็จ"), expect.objectContaining({ type: "bubble" }), expect.any(String));
       expect(fixture.notify.mock.calls[0]![0]).toMatch(/[ก-๙]/);
       const cached = await getProductCache(env.DB, runId, "A-1001");
       expect(cached).toEqual({

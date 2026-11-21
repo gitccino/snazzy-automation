@@ -41,7 +41,7 @@ export function buildPublicationWorkflowFailureMessage(input: {
     "การดำเนินการ: สร้างเอกสารเผยแพร่ล้มเหลว",
     `สาเหตุ: ${input.reason}`,
     `ลิงก์ Airtable: ${input.airtableRunUrl}`,
-    "ส่งคำสั่ง /docs เพื่อลองใหม่",
+    "ให้ผู้ดูแลตรวจสอบงานเดิมก่อนส่ง /docs ซ้ำ",
   ].join("\n");
 }
 
