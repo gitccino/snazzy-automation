@@ -40,7 +40,9 @@ it('checks a stopped owned publication when Airtable saved success before D1', a
     expect(JSON.parse(claim.result_json)).toMatchObject({outcome:'success',messages:[{text:expect.stringContaining(intent.docUrl)}]});
     const outbox = await env.DB.prepare('SELECT group_id,result_json FROM line_result_outbox WHERE group_id=?').bind(groupId).all();
     expect(outbox.results).toHaveLength(1);
-    expect(await env.DB.prepare('SELECT state,successful_generation FROM publication_jobs WHERE publication_run_id=?').bind(runId).first()).toEqual({state:'generating',successful_generation:0});
+    expect(await env.DB.prepare('SELECT state,successful_generation,google_doc_id FROM publication_jobs WHERE publication_run_id=?').bind(runId).first()).toEqual({state:'succeeded',successful_generation:1,google_doc_id:intent.docId});
+    expect(await handleDocsTrigger(env,'line',fixedClock('2026-11-20T00:00:00Z'),intent.publicationDate,fetch,context as any)).toMatchObject({status:'already_generated'});
+    expect(dispatched).toHaveLength(1);
     expect(requests.filter(request=>!request.includes('oauth2.googleapis.com')).every(request=>request.startsWith('GET '))).toBe(true);
   } finally { mock.mockRestore(); }
 });

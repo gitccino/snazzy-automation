@@ -635,8 +635,8 @@ export async function readFinalizationCandidate(
   db: D1Database,
   attempt: { runId: string; generation: number; notificationCycle: number; groupId: string },
   verifierId: string,
-): Promise<{ origin_workflow_id: string; context_json: string; intent: PublicationFinalizationIntent; finalizationJson: string; googleDocId: string | null } | null> {
-  const row = await db.prepare(`SELECT c.origin_workflow_id, c.context_json, j.finalization_json, j.google_doc_id
+): Promise<{ origin_workflow_id: string; context_json: string; intent: PublicationFinalizationIntent; finalizationJson: string; googleDocId: string | null; googleDocUrl: string | null; successfulGeneration: number } | null> {
+  const row = await db.prepare(`SELECT c.origin_workflow_id, c.context_json, j.finalization_json, j.google_doc_id, j.google_doc_url, j.successful_generation
     FROM publication_verification_claims c
     JOIN publication_jobs j ON j.publication_run_id=c.publication_run_id AND j.generation=c.generation
       AND j.notification_cycle=c.notification_cycle AND j.correlation_id=c.origin_workflow_id AND j.settings_context_json=c.context_json
@@ -648,11 +648,11 @@ export async function readFinalizationCandidate(
       AND length(json_extract(c.context_json,'$.settings.config.googleTemplateDocId'))>0
       AND j.finalization_json IS NOT NULL`)
     .bind(attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId, verifierId)
-    .first<{origin_workflow_id:string; context_json:string; finalization_json:string; google_doc_id:string | null}>();
+    .first<{origin_workflow_id:string; context_json:string; finalization_json:string; google_doc_id:string | null; google_doc_url:string | null; successful_generation:number}>();
   if (!row) return null;
   try {
     const intent = FinalizationIntentSchema.parse(JSON.parse(row.finalization_json));
-    return intent.generation === attempt.generation && intent.docId !== row.google_doc_id ? {origin_workflow_id:row.origin_workflow_id, context_json:row.context_json, intent, finalizationJson:row.finalization_json, googleDocId:row.google_doc_id} : null;
+    return intent.generation === attempt.generation && intent.docId !== row.google_doc_id ? {origin_workflow_id:row.origin_workflow_id, context_json:row.context_json, intent, finalizationJson:row.finalization_json, googleDocId:row.google_doc_id, googleDocUrl:row.google_doc_url, successfulGeneration:row.successful_generation} : null;
   } catch { return null; }
 }
 
@@ -660,7 +660,7 @@ export async function completePublicationVerification(
   db: D1Database,
   attempt: { runId: string; generation: number; notificationCycle: number; groupId: string },
   verifierId: string,
-  intent?: { originWorkflowId: string; contextJson: string; result: TerminalResultV1; candidate?: { finalizationJson: string; googleDocId: string | null }; cleanupFailure?: { doc_id: string; stage: string; failure_code: string } },
+  intent?: { originWorkflowId: string; contextJson: string; result: TerminalResultV1; candidate?: { finalizationJson: string; googleDocId: string | null; googleDocUrl: string | null; successfulGeneration: number }; cleanupFailure?: { doc_id: string; stage: string; failure_code: string } },
 ): Promise<boolean> {
   if (intent) {
     const value = intent.result;
@@ -670,6 +670,9 @@ export async function completePublicationVerification(
       value.generation !== attempt.generation || value.notificationCycle !== attempt.notificationCycle ||
       !['success', 'partial', 'validation_failed', 'failed', 'unconfirmed'].includes(value.outcome)) throw new Error('verification_invalid_result');
   }
+  const success = intent?.result.outcome === 'success' ? intent.candidate : undefined;
+  const finalization = success ? FinalizationIntentSchema.parse(JSON.parse(success.finalizationJson)) : null;
+  if (intent?.result.outcome === 'success' && (!success || !finalization || finalization.generation !== attempt.generation || finalization.docId === success.googleDocId)) throw new Error('verification_invalid_result');
   const update = db.prepare(`UPDATE publication_verification_claims SET completed=1, result_json=?
     WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND group_id=? AND verifier_id=? AND completed=0
       AND EXISTS (SELECT 1 FROM publication_jobs WHERE publication_run_id=? AND generation=? AND notification_cycle=?
@@ -678,7 +681,8 @@ export async function completePublicationVerification(
       AND result_json IS NULL AND (? IS NULL OR (origin_workflow_id=? AND context_json=?))
       AND (? IS NULL OR EXISTS (SELECT 1 FROM publication_jobs j WHERE j.publication_run_id=publication_verification_claims.publication_run_id
         AND j.generation=publication_verification_claims.generation AND j.notification_cycle=publication_verification_claims.notification_cycle
-        AND j.finalization_json=? AND j.google_doc_id IS ?))
+        AND j.finalization_json=? AND j.google_doc_id IS ? AND j.google_doc_url IS ? AND j.successful_generation=?
+        AND (? != 'success' OR j.state NOT IN ('succeeded','failed','validation_failed'))))
       AND (COALESCE(?, '') != 'failed' OR (? IS NOT NULL AND EXISTS (SELECT 1 FROM publication_cleanup_intents i
         JOIN publication_jobs j ON j.publication_run_id=i.publication_run_id AND j.generation=i.generation AND j.notification_cycle=i.notification_cycle
           AND j.correlation_id=i.origin_workflow_id AND j.settings_context_json=i.context_json
@@ -701,7 +705,7 @@ export async function completePublicationVerification(
       attempt.runId, attempt.generation, attempt.notificationCycle, attempt.groupId,
       intent?.originWorkflowId ?? null, intent?.originWorkflowId ?? null, intent?.contextJson ?? null,
       intent?.originWorkflowId ?? null, intent?.originWorkflowId ?? null, intent?.contextJson ?? null,
-      intent?.candidate?.finalizationJson ?? null, intent?.candidate?.finalizationJson ?? null, intent?.candidate?.googleDocId ?? null, intent?.result.outcome ?? null, intent?.cleanupFailure?.doc_id ?? null, intent?.cleanupFailure?.doc_id ?? null, intent?.cleanupFailure?.stage ?? null, intent?.cleanupFailure?.failure_code ?? null, intent?.cleanupFailure?.doc_id ?? null);
+      intent?.candidate?.finalizationJson ?? null, intent?.candidate?.finalizationJson ?? null, intent?.candidate?.googleDocId ?? null, intent?.candidate?.googleDocUrl ?? null, intent?.candidate?.successfulGeneration ?? null, intent?.result.outcome ?? null, intent?.result.outcome ?? null, intent?.cleanupFailure?.doc_id ?? null, intent?.cleanupFailure?.doc_id ?? null, intent?.cleanupFailure?.stage ?? null, intent?.cleanupFailure?.failure_code ?? null, intent?.cleanupFailure?.doc_id ?? null);
   if (!intent) return (await update.run()).meta.changes === 1;
   const key = JSON.stringify(['publication', attempt.runId, attempt.generation, attempt.notificationCycle, 'verification']);
   const revision = db.prepare(`INSERT INTO workflow_feedback_results(kind,run_id,generation,notification_cycle,revision,result_key,outcome_json,group_id)
@@ -714,7 +718,14 @@ export async function completePublicationVerification(
       AND NOT (json_extract(f.outcome_json,'$.outcome')='unconfirmed' AND json_extract(f.outcome_json,'$.action')='verify' AND json_extract(c.result_json,'$.outcome')='unconfirmed')
       `)
     .bind(attempt.runId, attempt.generation, attempt.notificationCycle, verifierId);
-  const [result] = await db.batch([update, revision, db.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at)
+  const repair = success && finalization ? [db.prepare(`UPDATE publication_jobs SET state='succeeded', successful_generation=generation,
+    google_doc_id=?, google_doc_url=?, temp_doc_id=NULL, finalization_json=NULL, updated_at=?
+    WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND correlation_id=? AND settings_context_json=?
+      AND finalization_json=? AND google_doc_id IS ? AND google_doc_url IS ? AND successful_generation=?
+      AND state NOT IN ('succeeded','failed','validation_failed') AND changes()=1`)
+    .bind(finalization.docId, finalization.docUrl, new Date().toISOString(), attempt.runId, attempt.generation, attempt.notificationCycle,
+      intent.originWorkflowId, intent.contextJson, success.finalizationJson, success.googleDocId, success.googleDocUrl, success.successfulGeneration)] : [];
+  const [result] = await db.batch([update, ...repair, revision, db.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at)
     SELECT ?, group_id, result_json, ? FROM publication_verification_claims c
     WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND verifier_id=? AND completed=1
       AND NOT EXISTS (SELECT 1 FROM workflow_feedback_results f WHERE f.kind='publication' AND f.run_id=c.publication_run_id

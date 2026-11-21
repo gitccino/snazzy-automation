@@ -45,7 +45,7 @@ it('renews only a confirmed interrupted verifier and fences late completion', as
   expect(results.filter(r => r.status === 'claimed')).toHaveLength(1);
   if (!renewed || renewed.status !== 'claimed') throw new Error('expected renewal');
   expect(renewed.verifierId).not.toBe(first.verifierId);
-  const result = {schemaVersion:1, kind:'publication', runId, generation:2, notificationCycle:3, outcome:'success', messages:[{type:'text', text:'original'}]} as const;
+  const result = {schemaVersion:1, kind:'publication', runId, generation:2, notificationCycle:3, outcome:'unconfirmed', messages:[{type:'text', text:'original'}]} as const;
   const intent = {originWorkflowId:renewed.originWorkflowId, contextJson:renewed.contextJson, result: {...result, messages: [...result.messages]}};
   expect(await completePublicationVerification(db, request, first.verifierId, intent)).toBe(false);
   expect(await completePublicationVerification(db, request, renewed.verifierId, {...intent, contextJson:'{}'})).toBe(false);
@@ -259,7 +259,7 @@ it('reads only the current generation finalization intent under the active claim
   const claim = await claimPublicationVerification(db,attempt);
   if (claim.status !== 'claimed') throw new Error('expected claim');
   const read = () => readFinalizationCandidate(db,attempt,claim.verifierId);
-  expect(await read()).toEqual({origin_workflow_id:'workflow',context_json:context,intent,finalizationJson:JSON.stringify(intent),googleDocId:'old'});
+  expect(await read()).toEqual({origin_workflow_id:'workflow',context_json:context,intent,finalizationJson:JSON.stringify(intent),googleDocId:'old',googleDocUrl:null,successfulGeneration:1});
   expect(await readFinalizationCandidate(db,attempt,'stale')).toBeNull();
   expect(await readFinalizationCandidate(db,{...attempt,groupId:'foreign'},claim.verifierId)).toBeNull();
   await db.prepare('UPDATE publication_jobs SET finalization_json=? WHERE publication_run_id=?').bind(JSON.stringify({...intent,generation:1,docId:'old'}),runId).run();
@@ -287,7 +287,14 @@ it('reads only the current generation finalization intent under the active claim
   expect(await db.prepare('SELECT result_json FROM publication_verification_claims WHERE publication_run_id=?').bind(runId).first()).toEqual({result_json:null});
   expect(await db.prepare('SELECT count(*) AS n FROM line_result_outbox WHERE result_json LIKE ?').bind(`%${runId}%`).first()).toEqual({n:0});
   await db.prepare('UPDATE publication_jobs SET finalization_json=? WHERE publication_run_id=?').bind(candidate.finalizationJson,runId).run();
+  for (const [column, changed, original] of [['google_doc_id','other','old'], ['google_doc_url','other',null], ['successful_generation',0,1], ['correlation_id','other','workflow'], ['settings_context_json','{}',context], ['generation',2,1], ['notification_cycle',2,1]] as const) {
+    await db.prepare(`UPDATE publication_jobs SET ${column}=? WHERE publication_run_id=?`).bind(changed,runId).run();
+    expect(await completePublicationVerification(db,attempt,claim.verifierId,completion)).toBe(false);
+    await db.prepare(`UPDATE publication_jobs SET ${column}=? WHERE publication_run_id=?`).bind(original,runId).run();
+  }
+  expect(await completePublicationVerification(db,{...attempt,groupId:'foreign'},claim.verifierId,completion)).toBe(false);
   expect(await completePublicationVerification(db,attempt,claim.verifierId,completion)).toBe(true);
+  expect(await db.prepare('SELECT state,successful_generation,google_doc_id,google_doc_url,finalization_json FROM publication_jobs WHERE publication_run_id=?').bind(runId).first()).toEqual({state:'succeeded',successful_generation:1,google_doc_id:'new',google_doc_url:finalization.docUrl,finalization_json:null});
   expect(await completePublicationVerification(db,attempt,claim.verifierId,completion)).toBe(false);
   expect(await db.prepare('SELECT count(*) AS n FROM line_result_outbox WHERE result_json LIKE ?').bind(`%${runId}%`).first()).toEqual({n:1});
 });
