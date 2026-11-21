@@ -6,6 +6,22 @@ import type { Clock } from '../shared/time';
 import { LineReplyError, validateReplyMessages, type LineClient } from './client';
 import { renderCommandReply } from './reply-renderer';
 import type { CommandReply } from './soldout';
+import type { TerminalResultV1 } from './reply-types';
+
+function unconfirmedPublicationResult(row:{run_id:string;generation:number;notification_cycle:number}, facts:{thaiDate:string;airtableRunUrl:string;publicBaseUrl:string}):TerminalResultV1 {
+  let messages:TerminalResultV1['messages'];
+  try {
+    const card=docsUnconfirmedCard({thaiDate:facts.thaiDate,airtableRunUrl:facts.airtableRunUrl},facts.publicBaseUrl);
+    messages=[{type:'flex',altText:card.text,contents:card.contents}];
+    validateReplyMessages(messages);
+  } catch {
+    const date=facts.thaiDate.slice(0,500).replace(/[\uD800-\uDBFF]$/, '');
+    const link=facts.airtableRunUrl.length<=2000 ? `\n${facts.airtableRunUrl}` : '';
+    const text=`ยังยืนยันสถานะงานเอกสารไม่ได้\nกรุณาตรวจสอบงานเดิมก่อนส่ง /docs ซ้ำ\nอ้างอิง: ${row.run_id.slice(0,200)}\nวันที่: ${date}${link}`;
+    messages=[{type:'text',text}];
+  }
+  return {schemaVersion:1,kind:'publication',runId:row.run_id,generation:row.generation,notificationCycle:row.notification_cycle,outcome:'unconfirmed',messages};
+}
 
 export async function retryReplyPersistence<T>(operation:()=>Promise<T>):Promise<T> {
   for(let attempt=0;;attempt++) {
@@ -38,8 +54,7 @@ export async function deliverEventReply(input: {
             await deps.repo.enqueueResult({resultKey:row.result_key,groupId:input.groupId,result:result as Parameters<LineReplyRepository['enqueueResult']>[0]['result']});
           }
           if(row.kind==='publication' && outcome.outcome==='unconfirmed' && facts?.thaiDate && facts.airtableRunUrl && facts.publicBaseUrl) {
-            const card=docsUnconfirmedCard({thaiDate:facts.thaiDate,airtableRunUrl:facts.airtableRunUrl},facts.publicBaseUrl);
-            await deps.repo.enqueueResult({resultKey:row.result_key,groupId:input.groupId,result:{schemaVersion:1,kind:'publication',runId:row.run_id,generation:row.generation,notificationCycle:row.notification_cycle,outcome:'unconfirmed',messages:[{type:'flex',altText:card.text,contents:card.contents}]}});
+            await deps.repo.enqueueResult({resultKey:row.result_key,groupId:input.groupId,result:unconfirmedPublicationResult(row,facts as {thaiDate:string;airtableRunUrl:string;publicBaseUrl:string})});
           }
         }
         await deps.feedback.markMaterialized(row.result_key,input.groupId);
@@ -56,8 +71,7 @@ export async function deliverEventReply(input: {
           const outcome=JSON.parse(row.outcome_json) as {outcome?:string;result?:{messages:{type:string;text?:string}[]};references?:{thaiDate?:string;airtableRunUrl?:string;publicBaseUrl?:string}};
           const facts=outcome.references;
           if(outcome.outcome==='unconfirmed' && facts?.thaiDate && facts.airtableRunUrl && facts.publicBaseUrl) {
-            const card=docsUnconfirmedCard({thaiDate:facts.thaiDate,airtableRunUrl:facts.airtableRunUrl},facts.publicBaseUrl);
-            const replacement={schemaVersion:1,kind:'publication',runId:row.run_id,generation:row.generation,notificationCycle:row.notification_cycle,outcome:'unconfirmed',messages:[{type:'flex',altText:card.text,contents:card.contents}]};
+            const replacement=unconfirmedPublicationResult(row,facts as {thaiDate:string;airtableRunUrl:string;publicBaseUrl:string});
             await deps.feedback.replaceUnsentHead(input.groupId,row.sequence,row.result_json,replacement);
             await deps.feedback.replaceRejectedHead(input.groupId,row.sequence,row.result_json,replacement);
           }
