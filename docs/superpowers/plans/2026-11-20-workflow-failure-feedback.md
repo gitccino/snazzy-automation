@@ -40,6 +40,8 @@ Ledger: additive repository implemented with atomic outcome writes and fenced ev
 
 **Files:** `src/routes/line.ts`, `src/routes/upload.ts`, `src/publication/trigger.ts`, `src/line/command-workflow.ts`, `src/import/workflow.ts`, `src/publication/workflow.ts`. Tests in `test/routes/line.test.ts`, `test/routes/upload.test.ts`, `test/publication/trigger.test.ts`, and the three corresponding Workflow suites.
 
+Ledger: ingress identity was persisted at `6226f08`; upload replay reconciliation was added at `6fe4c50`, and publication handoff binding and restart fencing at `d228803` and `38552a3`. The lost upload start-reply path is exercised through the LINE command adapter, including subsequent same-group feedback and one business dispatch (`test/acceptance/line-reply-outbox.test.ts`, `5e6b11f`); other acceptance boundaries remain open. The existing saved-reply-only regression deliberately suppresses historical redelivery because its dispatch history is unknown; it does not prove recovery for a newly accepted command.
+
 - [ ] Write failing tests for D1 outage before acknowledgment, partial batch redelivery, accepted-but-timed-out Workflow creation, definite refusal, lost start reply, and settings/identity failure before the business handler. Assert one business execution per accepted event, correct HTTP response, durable origin, and no false start.
 - [ ] Preserve signature and allowlist checks. At ingress durably record the minimum trusted command identity before acknowledging and connect it to the deterministic command Workflow. Return 503 for eligible events that could not be accepted; deduplicate earlier entries on redelivery. In the command Workflow, distinguish a saved reply from evidence of dispatch. A previously recorded command may require feedback repair; it must never run the command again merely to send feedback.
 - [ ] Bind the intended business Workflow ID and attempt before creation. For ambiguous creation, look up that ID; a lookup outage leaves a recoverable claim. Record an early setup failure using trusted ingress identity even if normal config or identity lookup fails. Hold unverified origins for the owner. Keep admin/cron behavior and group boundaries intact. For duplicate or competing group commands expose only the permitted response.
@@ -95,6 +97,123 @@ Ledger: additive repository implemented with atomic outcome writes and fenced ev
 
 - Publication failure intents now capture original display facts; eligible replies repair one missing publication notice and mark existing outbox rows materialized. Targeted D1 reply and feedback tests and typecheck pass. Legacy intents without display facts, import notices, correction handling, and the remaining Task 5 cases remain open.
 
+### Task 7 local verification — partial
+
+At `8cd2ca9`, `keeps a malformed queue head in place while sending the ordinary command` failed with a JSON parse error before the fix and passed afterward; the reply-delivery suite passed 19/19. The head remains pending for inspection. Invalid stored message shapes are also held. This does not implement authorized correction of a proven-unsent malformed payload.
+
+The following existing executable tests cover parts of the numbered scenarios, not their entire acceptance contracts:
+
+1. `test/routes/line.test.ts` — `records eligible ingress before handoff and recovers a partially failed mixed batch`; business handoff replay remains open (Task 2 ledger).
+2. `test/import/early-failure.test.ts` — `queues a setup failure only for the trusted LINE owner, including replay`; other setup boundaries remain open.
+3. `test/publication/trigger.test.ts` — `dispatches one verifier for the owner of a stopped Generating attempt`; missing/unavailable cases and actual effect verification remain open.
+4. `test/db/workflow-feedback.test.ts` — `persists an idempotent outcome for the owning publication attempt and rejects stale writers`; complete cross-entry concurrency coverage remains open.
+5. `test/line/reply-delivery.test.ts` — `repairs a committed publication intent using its original display facts`; import, corrections and fallback remain open.
+6. `test/line/reply-delivery.test.ts` — `network uncertainty holds FIFO but leaves command replies available` and `keeps a malformed queue head in place while sending the ordinary command`; safe payload repair remains open.
+7. `test/acceptance/publication.test.ts` — run and product lookup 503s produce failure feedback rather than missing-field reports; confirmed missing fields produce the Thai validation report (`8d4f584`). Corrected-data publication still fails at image setup in the baseline.
+8. `test/publication/workflow.test.ts` — `renders verify-first uncertainty and preserves both safe failure codes without secrets`; comprehensive provider-stage coverage remains open.
+9. `test/publication/workflow.test.ts` — `persists the primary failure and notice intent before cleanup fails`; next-command cleanup repair remains open.
+10. `test/publication/trigger.test.ts` — `dispatches one verifier for the owner of a stopped Generating attempt`; safe Airtable projection repair after proven pre-document failure is not implemented. Repository claim renewal is tested in `test/db/publication-verification-claim.test.ts` — `renews only a confirmed interrupted verifier and fences late completion`, but the trigger does not invoke renewal for a terminated verifier.
+11. `test/acceptance/publication.test.ts` — `recovers uncertain copy and fill responses into one final dated document with the template suffix per product` currently fails at image setup; verification-only reconciliation remains open.
+12. `test/import/workflow.test.ts` — `records a terminal download failure durably before stopping the workflow`; complete empty/ignored/orphan versus incomplete scan recovery remains open.
+13. `test/import/service.test.ts` — `verifies and adopts a response-lost Airtable row before recording success`; full interruption matrix remains open.
+14. `test/import/workflow.test.ts` — `records a group only after all six attempts and continues the next sibling`; unresolved groups without IDs and mixed durable summary remain open.
+15. `test/import/service.test.ts` — `short-circuits a group that is already succeeded`; checkpoint coverage and independent recovery reachability remain open.
+
+Release checklist, pending separate staging authorization:
+
+- [ ] Privately back up D1 and inspect in-flight jobs, unresolved outbox heads and captured targets; use isolated fixtures.
+- [ ] Apply additive migrations before deploying the compatible Worker; verify migration and code compatibility.
+- [ ] Exercise forced Claude and cleanup failure with stale Generating, then interrupted mixed import after Airtable creation. Verify next commands, same-group replies, links, counts and no duplicate creations.
+- [ ] Verify all 15 cases, group isolation, changed settings, start cards, legitimate regeneration and empty imports before rollout.
+- [ ] For rollback, quiesce admissions and review running workflow compatibility; retain all D1 evidence and prevent older code from dispatching or mutating unresolved work before reverting.
+
+Final local suite comparison: baseline e3486c7 1090/1118 passed (28 failed); after 8cd2ca9 1192/1211 passed (19 failed). No new failing names; nine baseline import acceptance names no longer fail. Typecheck passed; acceptance 64/76 passed. Exact remaining failing test names (parameterized repetitions preserved):
+
+- `test/acceptance/line-acceptance.test.ts :: LINE acceptance: exactly 30 cases parser: /search A1234`
+- `test/acceptance/line-acceptance.test.ts :: LINE acceptance: exactly 30 cases parser: /soldout A1234 ราคา 1290`
+- `test/acceptance/publication.test.ts :: publication acceptance preserves old Docs through replacement and saved-finalization retry (lost response: false)`
+- `test/acceptance/publication.test.ts :: publication acceptance preserves old Docs through replacement and saved-finalization retry (lost response: true)`
+- `test/acceptance/publication.test.ts :: publication acceptance clears previous validation errors when staff corrects data and publication succeeds`
+- `test/acceptance/publication.test.ts :: publication acceptance allows only one of two different runs to publish the same date, including concurrent Workflows`
+- `test/acceptance/publication.test.ts :: publication acceptance regenerates edited Airtable inputs after Failed restart while preserving matching product outputs`
+- `test/acceptance/publication.test.ts :: publication acceptance places the first four Airtable-ordered images in the white 1080-square collage and reuses its private cache`
+- `test/acceptance/publication.test.ts :: publication acceptance recovers uncertain copy and fill responses into one final dated document with the template suffix per product`
+- `test/acceptance/publication.test.ts :: publication acceptance deduplicates authorized /docs calls under one Workflow ID and one Bangkok date`
+- `test/acceptance/publication.test.ts :: publication acceptance exhausts six Google 503 attempts before cleanup, then restarts a errored Workflow using cached products`
+- `test/acceptance/publication.test.ts :: publication acceptance exhausts six Google 429 attempts before cleanup, then restarts a unknown Workflow using cached products`
+- `test/line/airtable-inventory.test.ts :: reads every daily-sales page with Bangkok boundaries and requested fields`
+- `test/line/soldout.test.ts :: does not persist or mutate for invalid sold price %p`
+- `test/line/soldout.test.ts :: does not persist or mutate for invalid sold price %p`
+- `test/line/soldout.test.ts :: does not persist or mutate for invalid sold price %p`
+- `test/line/soldout.test.ts :: does not persist or mutate for invalid sold price %p`
+- `test/line/soldout.test.ts :: does not persist or mutate for invalid sold price %p`
+- `test/line/soldout.test.ts :: does not persist or mutate for invalid sold price %p`
+
+### Task 6 partial — verifier renewal ownership fence
+
+Verifier claim renewal now requires the current job's original Workflow ID and captured context to match the claim. The new regression failed before the fix and the claim suite passed 6/6 afterward; typecheck passed. This does not implement pre-Google failure eligibility, guarded Airtable projection repair, or the remaining Task 6 scenarios.
+Full suite after this partial change: 1197/1216 passed, 19 failed; failing names match the recorded 19-failure baseline above. No new failing names.
+
+Local verification note: the focused verification-entry, claim, and trigger suites passed (58 tests), and typecheck passed at 0ea7a09. Guarded projection repair remains open. `reopenFailedJobForRestart` can advance a failed attempt while its verifier is outstanding; repair must fence retry admission across the external Airtable write and confirmation, including interrupted or uncertain writes, before marking a result confirmed. Airtable has no conditional status update, so observed conflicting manual changes must be held and the remaining read-to-write race must be accounted for.
+
+### Task 6 import recovery — investigation only
+
+At `9946a6b`, the upload route returns `owner_review` for a stopped or unavailable owned import Workflow and `busy` for another group. Import verification dispatch, durable verifier ownership, evidence-only reconciliation, and the entry-point regressions remain unimplemented. `npm run typecheck` and `npx vitest run test/routes/upload.test.ts` passed (22 tests); these are baseline checks, not verification of recovery. The existing plan edits were preserved.
+
+Local investigation at 9d36015: `npx vitest run test/publication/verification-entry.test.ts` failed 9/11 in isolation, matching the nine additional names reported during `npm test`. All nine fail at line 85: expected one `line_result_outbox` row, received zero. Each fixture inserts an existing revision-zero `workflow_feedback_results` row before running the verifier twice. `completePublicationVerification` deliberately stores a feedback revision instead of inserting an outbox row when feedback exists; eligible-message delivery later materializes pending feedback in order (introduced by 9946a6b). The test does not perform that delivery. The full run reported those nine and the 19 recorded baseline failures, but hung after Workflow engine errors and was interrupted; a completed full-suite name comparison is still required. No fix or assertion change has been verified.
+
+### Reconciliation at 8d4f584
+
+The earlier Task 6 import investigation was historical: stopped-import verification dispatch, claim renewal and read-only candidate evidence are now implemented and exercised by `test/routes/upload.test.ts` and `test/import/verification-entry.test.ts`. These do not establish full import recovery or checkpoint coverage. Publication verification feedback delivery was covered at `8648d59`; the nine obsolete outbox assertions described above no longer represent current tests. Saved LINE reply provenance and safe resumption were added at `4e03889` and `82c0ea3`. The Task 7 malformed-payload repair is now covered for proven rejection in `test/line/reply-delivery.test.ts`; uncertain sends remain held.
+
+Case 7: publication workflow entry tests cover run and linked-product lookup 503s against a confirmed missing field, including final notification and durable job state. Focused tests passed 3/3 and typecheck passed at `8d4f584`. This does not cover every provider error or production delivery.
+
+Suite evidence at 82c0ea3: `npm test` was interrupted after hanging with Workflow engine errors. All 114 test files were subsequently run in twelve separate Vitest processes: 1241 passed, 19 failed (1260 total). The 19 failure names and repetitions match the recorded baseline; no additional failing names. This split run began before the two new case 7 tests were added; those passed separately at 8d4f584. No remote release work was performed.
+
+### Eligible-message scheduling investigation at 5702de9
+
+The spec requires a bounded check after time-sensitive reply work, scoped to the authorized originating group, and requires proof of a stopped original Workflow before verification. The current command Workflow has no eligible-message verifier scheduling. The existing command-trigger claims alone do not close the interruption window between persisting a claim and creating its verifier: their held-claim paths do not reliably redispatch a saved intent when creation never occurred. A durable, replayable dispatch path and entry-point regressions remain necessary; no implementation or release-readiness claim is made here.
+
+At 5702de9, `npm run typecheck` passed and the upload, publication trigger and LINE command Workflow suites passed 80 tests; Miniflare logged Workflow engine errors during the run. These checks do not cover the missing eligible-message scheduling or constitute a full baseline-name comparison.
+
+### Eligible-message fairness follow-up
+
+A durable per-group cursor rotates current import and publication claims, including when a selected origin remains active. Selector tests cover repeated selection, stale/completed claims and group isolation; the ordinary-message entry test covers three replies followed by three distinct origin checks. Typecheck and the two focused suites passed (8 tests). The acceptance run before the final test-only assertion adjustment reported 70 passed and the same 12 recorded baseline failure names. The earlier 15-case status remains partial as listed above; this fairness change does not complete those cases or authorize a remote release. Full-suite baseline-name comparison and the remaining local plan work remain open.
+
+Full local comparison: the single `npm test` run stalled after Miniflare Workflow engine errors and was interrupted. All 115 test files were subsequently run in 12 batches: 1270 passed, 19 failed. All 19 failure names and repetitions match the recorded baseline above; no new failure names. The focused suites were rerun successfully after correcting the entry test's assumption about the cursor's initial position. Remote checks remain unperformed.
+
+### Cleanup recovery investigation at fad166c
+
+Case 9 remains open: `runPublicationWorkflow` persists the primary failure and queues an unconfirmed notice if `failPublicationAfterExhaustion` fails, but does not durably distinguish failed Google cleanup from failed Airtable synchronization. The verification entry only repairs `readPreGoogleFailure` candidates, which require tracked pre-Google evidence and no temporary document. It cannot retry discovery or deletion of a possibly created temporary document. A safe repair needs a durable cleanup-specific intent, verified file ownership and generation fencing before deletion, replay of an uncertain delete, and guarded Airtable projection repair. The existing failure notice mentions both possible secondary failures; it is not evidence that cleanup was repaired. Normal-entry regression coverage for the original Claude-plus-cleanup incident is still needed.
+
+At fad166c, typecheck passed and the publication workflow, verification-entry and trigger suites passed 95 tests. Miniflare emitted Workflow engine errors despite the passing result. This is focused evidence only; it does not establish the full 15-case acceptance matrix or a new full-suite comparison.
+
+### Cleanup projection follow-up at c6e827a
+
+Case 9/10 update: acknowledged cleanup can now lead to a guarded projection repair on the captured Airtable row and a stored Thai correction (deff69e). `test/publication/verification-entry.test.ts` additionally covers a lost PATCH response with successful readback and an observed manual Ready conflict before PATCH; replay makes no second PATCH. The focused verification-entry suite passed 24/24. These tests seed the cleanup receipt and initial failure: they do not prove the original incident end-to-end through an eligible LINE message, nor do they cover the unavoidable Airtable read-to-write race. Cases 1–8 and 11–15 retain the partial status listed above; the 15-case acceptance contract and local release checks remain open.
+
+At c6e827a, all 115 test files ran in 12 separate Vitest batches: 1288 passed and 19 failed. The failure names and multiplicities match the 19 listed baseline failures above. `npm run typecheck` passed. The original incident end-to-end test and remaining local acceptance/release work are still outstanding; no remote actions were taken.
+
+### Cleanup correction delivery at 7d29e53
+
+The verification-entry regression seeds the original failure and display facts with an acknowledged cleanup receipt in one D1 database, runs the verifier, and drains feedback via fresh eligible LINE replies. It checks group isolation, the original uncertainty notice followed by one Thai Failed correction, and replay without additional messages or provider calls. The focused suite passed 25/25 and typecheck passed. This is seeded receipt coverage, not an end-to-end exercise of the original failure and deletion; the Airtable read-to-write race remains. The other approved cases and release checklist above remain open.
+
+Local release checks: `npm run test:acceptance` completed with 71 passed and 12 failed; all 12 failure names match the recorded baseline above and remain unresolved. `npm test` was interrupted after stalling with Miniflare Workflow engine errors, so no full-suite comparison is claimed. No remote operations were performed.
+
+### Ordinary workflow cleanup regression at c77f4fe
+
+The ordinary workflow now exercises a real D1 job and saved temporary document with upstream stages stubbed, a permanent document-fill failure, and the real exhaustion handler. A lost Drive delete response leaves the primary failure and exact cleanup intent persisted by the workflow itself. The same D1 state then goes through verifier cleanup, Airtable repair and eligible LINE delivery, including group isolation and replay. This is simulated provider transport, not production evidence; the Airtable read-to-write race remains.
+
+Local checks: typecheck passed; publication workflow and verification-entry suites passed 55/55. The full suite completed with 1289 passed and 20 failed: the 19 previously recorded failures plus `test/import/terminal-replay.test.ts`, which passed on isolated rerun. This does not establish a clean full-suite baseline comparison. No remote operations were performed; the remaining acceptance matrix and release checklist remain open.
+
+### Local comparison after c77f4fe
+
+Typecheck passed. The complete import suite passed 136/136, including terminal replay. A single full-suite run stalled after Miniflare Workflow engine errors and was interrupted. All 116 test files subsequently completed in 12 bounded batches: 1290 passed and 19 failed, matching the recorded baseline names and multiplicities. The extra terminal-replay failure did not reproduce in its neighboring batch; its original failure trace was not found, so its cause remains undiagnosed. This comparison does not complete the acceptance matrix or authorize staging. No code or assertions were changed and no remote actions were performed.
+
+### Publication acceptance fixture follow-up
+
+The fixture now models individual product reads, persisted preview replacements and R2 originals, and supplies the workflow owner for Google copy admission. The corrected-data and lost copy/fill-response acceptance scenarios pass together (2/2); typecheck passes. Running the full publication acceptance file yielded 8 passed and 7 failed. The seven were among the previously recorded baseline failures: one lost-finalization retry encounters stale ownership, three restart cases encounter stale copy ownership, two collage/count assertions assume the old image path, and the trigger assertion omits captured context. These require further investigation without weakening their behavioral assertions. The 15-case contract, remaining plan tasks, full-suite comparison and release checks remain open; no remote actions were performed.
+
 ### Publication acceptance reconciliation after 9533f36
 
 The seven remaining publication acceptance failures were fixture drift, not a demonstrated production defect. Failed restarts advance the notification cycle; the fixture now supplies cycle 2 and explicitly proves cycle 1 cannot create a document. The lost-finalization retry also uses its reopened cycle. The trigger assertion compares its dispatched context with the persisted context and checks captured Airtable and template settings. Image preparation now writes originals before the collage, so collage assertions count collage writes separately; unique source images and persisted Airtable attachment order preserve the four-image and edited-order checks. The corrected-data and lost copy/fill cases remain covered.
@@ -129,6 +248,24 @@ Signed LINE entry regressions exercise `/upload` and `/docs` when business creat
 
 `npx vitest run test/routes/upload.test.ts test/acceptance/line-reply-outbox.test.ts test/publication/trigger.test.ts` passed 84 tests; Miniflare logged Workflow engine errors. `npm run typecheck` passed. Definitive provider refusal with a usable token, real business finalization, and the lost initial reply for `/docs` remain unproven; no documented refusal discriminator was established, so absence was not treated as refusal. Case 1 remains open. No remote operations were performed.
 
+### Case 1 generated publication follow-up at 6d3ebc0
+
+`test/acceptance/publication.test.ts` now drives a signed `/docs 2/9/2026` event through local D1 and the actual publication Workflow entry with simulated Airtable, Anthropic, Google, R2 and Images boundaries. The initial LINE reply is accepted with its response lost; replay does not resend it or dispatch another Workflow. The business Workflow produces one document and its own durable success result. A different group cannot drain it; a fresh originating-group event receives the generated document link once, and replay does not resend. The test does not combine this with a lost Workflow creation response, and simulates rather than exercises live providers.
+
+[Cloudflare's Workers API documentation](https://developers.cloudflare.com/workflows/build/workers-api/) identifies `(instance.invalid_id)` and `(body)` as invalid creation options, and `(instance.already_exists)` as an existing instance. `test/publication/trigger.test.ts` simulates the documented invalid-ID refusal and verifies the current conservative hold and no replayed create. It does not establish a durable definitive-refusal outcome or a usable-token LINE notification: the trigger still treats this refusal as unconfirmed on replay, and a lookup outage can mask the original error. No refusal is inferred from `instance.not_found`. The documented newer object-form batch API is not exposed by the installed binding types; `/upload` uses the existing array form.
+
+The `/upload` signed-entry tests still seed the terminal result rather than run the import business fixture; joining its separate injected dependencies to the real entry and producing/delivering its generated result remains open. Case 1 also still needs definitive refusal feedback through usable signed LINE entry for both commands, and lost creation response combined with lost start reply and business-generated final delivery. Other cases and release checks remain as recorded above.
+
+Local focused evidence: 76 tests passed across publication acceptance, LINE outbox acceptance, and publication trigger; Miniflare logged Workflow engine/instance errors. `npm run typecheck` passed. No production code or remote state changed.
+
+Full local `npm test` run: 1312 passed, 9 failed across 3 files. Failures: `test/acceptance/line-acceptance.test.ts` parser cases `/search A1234` and `/soldout A1234 ราคา 1290`; `test/line/airtable-inventory.test.ts` daily-sales requested fields (additional Product Cost); and six `test/line/soldout.test.ts` invalid-sold-price cases (Thai error text differs). The two parser cases were already listed above; the other seven were not compared against a fresh base run. No unrelated fixes were made.
+
+### Case 1 generated import follow-up
+
+`test/acceptance/import-acceptance.test.ts` now combines an accepted-but-lost Workflow creation response and an accepted-but-lost start reply through signed LINE ingress. It runs the actual `ImportWorkflow` with the dispatched parameters, local D1 and the existing simulated iCloud, marker, R2 and Airtable fixtures. One product and one generated terminal result are persisted; command redelivery and a different group do not deliver it, while a fresh event in the originating group delivers it once despite redelivery. This is simulated provider evidence, not a live integration check. No production gap was demonstrated.
+
+The focused import acceptance, LINE outbox acceptance and upload route suites passed 47/47; typecheck passed. A full `npm test` run was interrupted after stalling with Miniflare Workflow engine errors; it had reported the same nine failures named in the prior full-run note, but did not complete. Definitive refusal feedback remains open: no typed positive refusal evidence was established, and missing lookup is not treated as refusal. Other case 1 and release gaps remain open. No remote operations were performed.
+
 ### Case 14 mixed import and interrupted recording
 
 Signed `/upload` entry now exercises a simulated mixed batch through the real import Workflow and local D1: one confirmed product, one ignored marker group, one unconfirmed Airtable create, and one insufficient-photo group without a Product ID. The terminal rows and later eligible LINE reply show 1 success, 2 failures, 1 ignored group, a stable ID-less group reference, owner review for the uncertain create and retry wording scoped to corrected items. Cached Workflow-step replay and duplicate LINE events do not allocate or create another product or deliver another summary. The ID-less group is a non-retryable validation failure; this does not prove an allocation-service outage.
@@ -142,6 +279,12 @@ Focused local evidence: `npx vitest run test/acceptance/import-acceptance.test.t
 A local D1 signed-entry regression reproduces a legacy unconfirmed notice stored under the terminal key: a repeated interruption previously inserted a duplicate, and the final summary conflicted with the old row. Replay now retains that notice and writes the final summary under a distinct key; subsequent eligible replies deliver each once. The mixed-batch fixture also interrupts before the finalization step, verifies durable group rows and no checkpoint at that point, then resumes, advances the checkpoint, finds the unresolved group by hash, and delivers the generated summary without another product creation. This uses cached workflow-step results and simulated providers. It does not inject a failure inside D1's atomic batch, reconstruct the summary without cached steps, or prove owner recovery can independently select a group no longer present in the album. Cases 14 and 15 remain open for those conditions and the broader contract above.
 
 Focused local evidence: `npx vitest run test/acceptance/import-acceptance.test.ts test/import/notify.test.ts test/import/workflow.test.ts test/db/import-repository.test.ts test/import/verification-entry.test.ts` passed 81/81; `npm run typecheck` passed. No remote operations were performed.
+
+### Case 15 missing historical group reproduction (unresolved)
+
+A local D1 regression in `test/acceptance/import-acceptance.test.ts` uses the existing mutable album and provider fixtures. The first admin workflow records one successful product and one insufficient-photo failure, then advances the checkpoint. Removing the failed group from the album and starting a fresh workflow yields `failedGroups: []`, even though the failed group row remains in D1. The new regression currently fails at the expected owner-hold assertion. The confirmed product count remains one up to that assertion; the test has not yet verified delivery through LINE.
+
+The gap is not fixed. Historical group rows are reassigned on matching scans, and a later LINE result must respect the captured originating group and avoid treating a historical hold as a newly failed group or claiming missing originals are available. A safe owner-scoped hold and its disposition/replay behavior still need implementation and verification. No commit, deployment, push, or PR was made. Prior ledger and `.serena` changes were retained.
 
 ### Case 15 uncached mixed-summary replay
 
@@ -215,3 +358,48 @@ Local verification for this review: typecheck and `git diff --check` passed; pub
 The installed Workers types expose `unknown` as a status but no typed absence result. In the installed Miniflare Workflow binding, `WorkflowBinding.get()` catches every exception from the underlying `handle.status()` and throws `instance.not_found`; its local engine emits `Engine was never started` when instance metadata is missing. Thus the local exception does not distinguish missing metadata from another status failure. This is evidence about the local implementation, not proof of production Cloudflare's failure semantics. Neither a returned `unknown` nor an arbitrary lookup failure establishes that the original stopped. The current import and publication verifier entries require an explicit terminal status; the saved-claim dispatcher does too. The verifiers can perform guarded provider repairs, so treating the ambiguous exception as proof risks acting while the original is still live. A trustworthy independent absence signal or equivalent durable fencing is still needed before enabling missing-owner dispatch and entry. No provider/API contract or live lookup was verified.
 
 The Ready/Failed publication path now holds an existing job on a missing-looking lookup rather than recreating its business Workflow. A real-D1 regression verifies repeated LINE requests preserve the captured context, failed state and cached collage; an unconfirmed replacement creation is also held. Genuinely new jobs retain the existing creation path. This does not enable verification of a confirmed-missing original and does not close Case 3; import and publication trigger-to-verifier missing-owner tests, outage protection with an independent absence proof, paused-owner assessment, and the other previously recorded gaps remain open. Focused publication trigger, upload, both verifier entry and pending-verification suites passed 124 tests; typecheck and diff check passed. Miniflare emitted Workflow engine errors in the passing run. No remote operations were performed.
+
+### Local owner notice repair — partial
+
+The authenticated import owner CLI can materialize only an existing trusted early-setup notice for the exact run, originating LINE group and captured Airtable base/table. The D1 statement atomically records the operator disposition, queues the notice and marks the intent materialized; changed evidence, conflicting queue state and replay are held. A real isolated local Wrangler/D1 CLI regression and focused D1 suites cover this path. This does not reconcile historical products: saved create claims and ordered photo/R2 references do not prove Airtable attachment identity, and current provider verification checks only attachment count. Case 15 and the broader spec line 69 inspection and repair procedure remain open. No remote migration or deployment was performed.
+
+
+### Local owner inspection continuation — partial
+
+The import group inspector now requires the captured base and table as well as the exact run, LINE owner and current group. It projects saved failure codes, verification claim, create claim, checkpoint and the owner's current FIFO head and dispatch evidence without message bodies or context secrets. External liveness remains unknown; sync/cleanup is not established. The group head can belong to a different run. Local D1 coverage checks exact and wrong selections, malformed context and read-only behavior. The separate local CLI notice repair regression remains the evidence for that supported repair.
+
+This is not the full line 69 procedure: runs without a product group and publication attempts lack equivalent inspection, original raw failure details are intentionally withheld, and provider originals, sync/cleanup and live Workflow status need independent evidence. Case 15's historical product disposition and case 10 projection repair remain unimplemented; case 3 still needs trustworthy absence evidence or fencing. Full normal-entry matrix, complete seeded owner procedure and remaining local fault/entry coverage are local deliverables, not provider-blocked rollout. Live provider validation, staging, rollback and deployment remain separately blocked by local-only scope. No new disposition semantics are implied.
+
+### Local verification follow-up at c0d6cf4
+
+The reported 1,356 passed/12 failed run and its third additional failure trace were not found in available local logs. A fresh complete run before fixture changes produced 1,357 passed/11 failed and the Node CLI check passed separately. In addition to the nine previously recorded LINE failures, `test/acceptance/publication.test.ts` failed `preserves old Docs through replacement and saved-finalization retry (lost response: true)` with `publication_job_terminal: Unable to finalize the publication` at `src/publication/workflow.ts:123` and `test/acceptance/publication.test.ts:537`, and `exhausts six Google 429 attempts before cleanup, then restarts a missing Workflow using cached products` with expected HTTP 202, received 200 at line 845. Both reproduced in isolation (26 passed/2 failed). The saved `/private/tmp/snazzy-workflow-feedback-tests.log` predates `a94b4b4` and `0bcfb17` and records 1,358 passed/9 failed; `0bcfb17` holds a missing existing Workflow. The first fixture incorrectly reported its already-created replacement missing; the second expected the now-disallowed recreation. The fixture now distinguishes an existing errored replacement and checks a missing owner hold before an existing errored Workflow recovers, retaining cached-product and finalization assertions. The file passes 28/28.
+
+Vitest discovered the `node:test` CLI regression inside its Workers pool and failed at line 8 with `TypeError: test is not a function`. Renaming it to the existing standalone CLI-check convention and invoking it under Node before Vitest in `npm test` preserves the local Wrangler/D1 repair, conflict and replay assertions. The Node test passed. A subsequent bounded `npm test` completed with 1,359 passed/9 failed across 119 Vitest files, plus the passing Node test; the nine names and multiplicities match the prior baseline: the two LINE parser cases `/search A1234` and `/soldout A1234 ราคา 1290`, daily-sales requested fields, and six invalid sold-price cases. This run preceded the final strengthening of the 429 fixture to resume after the hold; that final file passed 28/28 separately. Four scoped suites passed 84 tests, typecheck and diff check passed. Miniflare logged Workflow engine errors. No remote action was performed. Group-less import and publication inspection remains open.
+
+### Final local audit at ef4ba8e
+
+This status supersedes conflicting historical notes above; the previous ledger is retained as history. All evidence is local and provider simulations do not establish live behavior. “Covered” refers to named tests in the matrix and follow-ups, not every permutation.
+
+| Case | Current status |
+|---|---|
+| 1 | Signed import and publication success and lost-reply recovery covered; invalid publication ID preflight refusal covered. Arbitrary provider refusal is not established; combined publication creation/reply loss is untested. |
+| 2 | Trusted early setup failure and notice repair covered; additional pre-persistence and setup faults untested. |
+| 3 | Stopped owners can dispatch verification; unknown or missing owners are held. Mandatory confirmed-missing verification remains absent: no trustworthy independent absence proof or equivalent fence is established. Paused-owner paths require assessment. |
+| 4 | Ownership, stale writer and several concurrent admission fences covered; cross-entry and changed-context combinations remain untested. |
+| 5 | Saved intents, correction ordering and conflicting/invalid repair holds covered; further interruption/rendering permutations untested. |
+| 6 | FIFO, uncertainty, rejection, owner decision and safe malformed-head repair covered; ambiguous sends remain held. Additional permutations untested. |
+| 7 | Lookup failures versus missing fields and corrected publication covered; access and signed-entry permutations untested. |
+| 8 | Sanitized failure codes, image diagnostics and selected provider-stage failures covered; broader provider-stage permutations untested. |
+| 9 | Primary failure, cleanup intent/receipt and guarded failure projection correction covered locally; exact Claude-plus-cleanup incident is not proven end to end. Airtable read-to-write race remains. |
+| 10 | Verified finalization and already-Generated synchronization covered. Mandatory repair of unchanged Generating projection after verified success remains absent; Airtable lacks conditional PATCH and a manual edit can race the write. |
+| 11 | Lost copy/fill recovery and finalization evidence checks covered; additional ambiguity and interruption permutations untested. |
+| 12 | Empty versus incomplete scan and checkpoint protection covered; individual interruption and signed-entry permutations untested. |
+| 13 | Lost Airtable create response and audit replay covered; allocation, attachment and persistence fault permutations untested. |
+| 14 | Signed mixed import, interrupted recording, replay and transaction rollback covered; allocation outage and further D1 interruptions untested. Legacy interrupted notices under the former terminal key require reconciliation. |
+| 15 | Missing historical groups are surfaced and exact owner inspection exists. Mandatory historical group repair/disposition and durable audit/replay remain absent; attachment count does not establish original identity. |
+
+Spec line 69: `ef4ba8e` adds exact captured-owner/target inspection for group-less imports and current or retained historical publication attempts, complementing group inspection, audited early-notice repair and the separate queue disposition procedure. The inspector exposes selected safe identifiers, failure codes, result revisions, queue dispatches, verification claims and publication cleanup/write evidence; it does not establish live Workflow or provider state. Sync confirmation is not durably recorded as a distinct receipt and is reported as unknown; a prior verified result is historical evidence, not proof of current provider state. Complete scoped verified-state repair, historical group disposition and a full seeded procedure remain mandatory local work. The inspector's SQL binds selection values, checks captured context before output, holds mismatches and malformed context, suppresses raw errors/context and documents its separate-read race. No demonstrated small inspector defect was found. No new sync machinery was added without a reliable producer and consumer.
+
+The full 15-case normal-entry matrix and complete seeded owner procedure are local deliverables, distinct from optional fault permutations and live staging validation. Rollout remains blocked by the mandatory gaps above. After local completion and separate authorization: privately back up D1 and inventory running jobs, captured targets and unresolved queue heads; apply additive migrations before compatible code; exercise the 15 cases and cross-group/configuration fencing, forced cleanup failure and interrupted mixed import with isolated staging fixtures; verify counts, links, queue order, provider creations, regeneration, empty imports and start cards. For rollback, quiesce admissions, assess running Workflow compatibility, preserve all D1 evidence and prevent older code from mutating or dispatching unresolved work before reverting. No remote action was performed.
+
+Final audit verification: typecheck and diff check passed; five focused owner/verification suites passed 47 tests and the standalone local Wrangler/D1 CLI check passed. Fresh and seeded pre-0014 SQLite upgrades applied all 40 migrations, retained two import runs, a publication job and a queued result, and passed foreign-key checks. A single `npm test` stalled after Miniflare Workflow engine errors and was stopped; all 120 Vitest files then completed in 12 bounded batches: 1,361 passed and the same nine previously recorded failures (two LINE parser, one daily-sales fields, six invalid-price cases). The Node CLI check also passed separately. These failures remain unresolved; no live service was checked.
