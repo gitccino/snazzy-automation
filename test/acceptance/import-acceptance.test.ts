@@ -27,6 +27,13 @@ import {
 import type { ImportRunResult, ImportWorkflowParams } from "../../src/import/types";
 import { ImportWorkflow, runImportWorkflow } from "../../src/import/workflow";
 import { handleUploadTrigger } from "../../src/routes/upload";
+import { handleLineRoute } from "../../src/routes/line";
+import { LineCommandWorkflow } from "../../src/line/command-workflow";
+import type { Env } from "../../src/env";
+import type { WorkflowStep } from "cloudflare:workers";
+import * as icloud from "../../src/icloud/client";
+import * as marker from "../../src/import/marker";
+import * as products from "../../src/import/airtable-products";
 import { deriveSourceAlbumId } from "../../src/icloud/client";
 import { importWorkflowId } from "../../src/shared/ids";
 import { captureOperationContext } from "../../src/settings/runtime";
@@ -286,6 +293,64 @@ describe("import acceptance", () => {
       db.prepare("DELETE FROM import_runs"),
       db.prepare("DELETE FROM sequences"),
     ]);
+  });
+
+  it("delivers the generated import once after lost creation and start responses", async () => {
+    const id = crypto.randomUUID(), group = `Cimport-${id}`, other = `Cother-${id}`, token = `token-${id}`;
+    const album = await deriveSourceAlbumId(token);
+    const harness = await buildHarness(album, productGroupOf(9, 1), { idPrefix: id });
+    const commands: any[] = [], business: any[] = [], replies: any[] = [];
+    let created = false;
+    const config = JSON.parse(createTestEnv().APP_CONFIG_JSON);
+    config.LINE_ALLOWED_GROUP_ID = group;
+    const local = { ...testEnv(), ...createTestEnv(), ICLOUD_SHARED_ALBUM_TOKEN: token, LINE_CHANNEL_SECRET: "secret", APP_CONFIG_JSON: JSON.stringify(config),
+      LINE_COMMAND_WORKFLOW: { createBatch: async (items: any[]) => { commands.push(...items); return []; }, get: async () => ({ status: async () => ({ status: "running" }) }) },
+      IMPORT_WORKFLOW: { createBatch: async (items: any[]) => { business.push(...items); created = true; throw new Error("creation response lost"); }, get: async () => { if (!created) throw new Error("instance.not_found"); return { status: async () => ({ status: "running" }) }; } },
+    } as unknown as Env;
+    const step = retryingStep() as unknown as WorkflowStep;
+    vi.spyOn(icloud, "createICloudClient").mockReturnValue(harness.source);
+    vi.spyOn(marker, "createMarkerDetector").mockReturnValue(fakeMarkerDetector);
+    vi.spyOn(products, "createAirtableProductsClient").mockReturnValue(harness.deps.airtable);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url).includes("/member/")) return Response.json({ userId: "U1", displayName: "Tester" });
+      if (!String(url).endsWith("/message/reply")) throw new Error(`unexpected fetch ${url}`);
+      replies.push(JSON.parse(String(init?.body)));
+      if (replies.length === 1) throw new Error("start response lost");
+      return Response.json({});
+    });
+    const admit = async (eventId: string, text: string, groupId = group) => {
+      const body = JSON.stringify({ events: [{ type: "message", webhookEventId: eventId, replyToken: `reply-${eventId}`, source: { type: "group", groupId, userId: "U1" }, message: { type: "text", id: `m-${eventId}`, text } }] });
+      const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const signature = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)))));
+      expect((await handleLineRoute(new Request("https://app/line/webhook", { method: "POST", headers: { "x-line-signature": signature }, body }), local, {} as ExecutionContext)).status).toBe(200);
+    };
+    const runCommand = (item: any) => LineCommandWorkflow.prototype.run.call({ env: local } as unknown as LineCommandWorkflow, { payload: item.params, instanceId: item.id } as any, step);
+    try {
+      await admit(id, "/upload");
+      expect(await runCommand(commands[0])).toEqual({ status: "uncertain" });
+      await admit(id, "/upload");
+      expect(await runCommand(commands[1])).toEqual({ status: "duplicate" });
+      expect(business).toHaveLength(1);
+      expect(business[0].params).toMatchObject({ sourceAlbumId: album, trigger: "line", trustedEventId: id, replyGroupId: group });
+      const result = await ImportWorkflow.prototype.run.call({ env: local } as unknown as ImportWorkflow, { payload: business[0].params, instanceId: business[0].id } as any, step);
+      expect(result).toMatchObject({ succeededProductIds: ["A-501"], failedGroups: [] });
+      expect(harness.created.size).toBe(1);
+      expect(await local.DB.prepare("SELECT status FROM import_runs WHERE id=?").bind(business[0].params.importRunId).first()).toEqual({ status: "completed" });
+      expect(await local.DB.prepare("SELECT COUNT(*) AS count FROM line_result_outbox WHERE group_id=?").bind(group).first()).toEqual({ count: 1 });
+      await admit(id, "/upload"); expect(await runCommand(commands[2])).toEqual({ status: "duplicate" });
+      expect(replies).toHaveLength(1);
+      config.LINE_ALLOWED_GROUP_ID = other; local.APP_CONFIG_JSON = JSON.stringify(config);
+      await admit(crypto.randomUUID(), "hello", other); await runCommand(commands[3]);
+      expect(replies).toHaveLength(1);
+      config.LINE_ALLOWED_GROUP_ID = group; local.APP_CONFIG_JSON = JSON.stringify(config);
+      const fresh = crypto.randomUUID();
+      await admit(fresh, "hello"); expect(await runCommand(commands[4])).toEqual({ status: "accepted" });
+      expect(replies).toHaveLength(2);
+      expect(replies[1].replyToken).toBe(`reply-${fresh}`);
+      expect(JSON.stringify(replies[1].messages)).toContain("A-501");
+      await admit(fresh, "hello"); await runCommand(commands[5]);
+      expect(replies).toHaveLength(2); expect(business).toHaveLength(1); expect(harness.created.size).toBe(1);
+    } finally { vi.restoreAllMocks(); }
   });
 
   it("holds a lost create response when replay cannot find the row", async () => {
