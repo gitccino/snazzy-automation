@@ -74,6 +74,33 @@ describe("import-repository", () => {
     expect(await r.hasRunningImportRun(albumId)).toBe(false);
   });
 
+  it("atomically records a LINE scan failure and its notice, fencing conflicts and replay", async () => {
+    const db = testEnv().DB, r = repo();
+    const id = crypto.randomUUID(), sourceAlbumId = crypto.randomUUID(), groupId = crypto.randomUUID();
+    await r.createImportRun({ id, sourceAlbumId, trigger: "line" });
+    await db.prepare("UPDATE import_runs SET settings_context_json=? WHERE id=?").bind(JSON.stringify({ replyGroupId: groupId }), id).run();
+    const result = { schemaVersion: 1 as const, kind: "import" as const, runId: id, generation: 1, notificationCycle: 1, outcome: "failed" as const, messages: [{ type: "text" as const, text: "check run" }] };
+    const input = { id, sourceAlbumId, failureReason: "source_unavailable", lineResult: { groupId, result } };
+    await expect(r.failImportRun({ ...input, lineResult: { groupId: "other", result } })).rejects.toThrow();
+    expect(await r.hasRunningImportRun(sourceAlbumId)).toBe(true);
+    await r.failImportRun(input);
+    await r.failImportRun(input);
+    const rows = await db.prepare("SELECT group_id,result_json FROM line_result_outbox WHERE result_key=?").bind(JSON.stringify(["import", id, 1, 1, "terminal"])).all();
+    expect(rows.results).toEqual([{ group_id: groupId, result_json: JSON.stringify(result) }]);
+    await expect(r.failImportRun({ ...input, lineResult: { groupId, result: { ...result, messages: [{ type: "text", text: "different" }] } } })).rejects.toThrow();
+    expect(await r.getCheckpoint(sourceAlbumId)).toBeNull();
+  });
+
+  it("rolls back a scan failure when its notice conflicts", async () => {
+    const db = testEnv().DB, r = repo();
+    const id = crypto.randomUUID(), sourceAlbumId = crypto.randomUUID(), groupId = crypto.randomUUID();
+    await r.createImportRun({ id, sourceAlbumId, trigger: "line" });
+    await db.prepare("UPDATE import_runs SET settings_context_json=? WHERE id=?").bind(JSON.stringify({ replyGroupId: groupId }), id).run();
+    await db.prepare("INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at) VALUES(?,?,?,?)").bind(JSON.stringify(["import", id, 1, 1, "terminal"]), groupId, "{}", "now").run();
+    await expect(r.failImportRun({ id, sourceAlbumId, failureReason: "source_unavailable", lineResult: { groupId, result: { schemaVersion: 1, kind: "import", runId: id, generation: 1, notificationCycle: 1, outcome: "failed", messages: [{ type: "text", text: "check run" }] } } })).rejects.toThrow();
+    expect(await r.hasRunningImportRun(sourceAlbumId)).toBe(true);
+  });
+
   it("terminalizes a failed workflow run without advancing its checkpoint", async () => {
     const r = repo();
     const albumId = `album-${crypto.randomUUID()}`;

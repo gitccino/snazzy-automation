@@ -38,6 +38,7 @@ export interface ImportRepository {
     id: string;
     sourceAlbumId: string;
     failureReason: string;
+    lineResult?: { readonly groupId: string; readonly result: Readonly<TerminalResultV1> };
   }): Promise<void>;
   getCheckpoint(sourceAlbumId: string): Promise<number | null>;
   finalizeImportRun(input: {
@@ -185,36 +186,32 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
     },
 
     async failImportRun(input) {
-      const result = await db
-        .prepare(
-          `UPDATE import_runs
-           SET status = 'completed_with_failures', finished_at = ?,
-               failure_reason = ?
-           WHERE id = ?
-             AND source_album_id = ?
-             AND status = 'running'`,
-        )
-        .bind(
-          clock.now().toISOString(),
-          input.failureReason,
-          input.id,
-          input.sourceAlbumId,
-        )
-        .run();
-      if (result.meta.changes !== 1) {
-        const terminal = await db
-          .prepare(
-            `SELECT 1 AS identical
-             FROM import_runs
-             WHERE id = ?
-               AND source_album_id = ?
-               AND status = 'completed_with_failures'
-               AND failure_reason = ?
-               AND checkpoint_position IS NULL`,
-          )
-          .bind(input.id, input.sourceAlbumId, input.failureReason)
-          .first<{ identical: number }>();
-        if (terminal === null) {
+      const notice = input.lineResult;
+      const key = JSON.stringify(["import", input.id, 1, 1, "terminal"]);
+      const json = notice ? JSON.stringify(notice.result) : null;
+      if (notice) {
+        const value = notice.result;
+        validateReplyMessages(value.messages);
+        if (!notice.groupId.trim() || value.schemaVersion !== 1 || value.kind !== "import" || value.runId !== input.id || value.generation !== 1 || value.notificationCycle !== 1 || value.outcome !== "failed") throw new Error("import_invalid_result");
+      }
+      const now = clock.now().toISOString();
+      const results = await db.batch([
+        db.prepare(`UPDATE import_runs SET status='completed_with_failures', finished_at=?, failure_reason=?
+          WHERE id=? AND source_album_id=? AND status='running'
+          AND (? IS NULL OR json_extract(settings_context_json, '$.replyGroupId')=?)`)
+          .bind(now, input.failureReason, input.id, input.sourceAlbumId, notice?.groupId ?? null, notice?.groupId ?? null),
+        ...(notice ? [db.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at)
+          SELECT ?,?,?,? WHERE changes()=1
+          ON CONFLICT(result_key) DO UPDATE SET group_id = CASE
+            WHEN group_id=excluded.group_id AND result_json=excluded.result_json THEN group_id ELSE NULL END`)
+          .bind(key, notice.groupId, json, now)] : []),
+      ]);
+      if (results[0]?.meta.changes !== 1) {
+        const terminal = await db.prepare(`SELECT 1 FROM import_runs WHERE id=? AND source_album_id=?
+          AND status='completed_with_failures' AND failure_reason=? AND checkpoint_position IS NULL
+          AND (? IS NULL OR json_extract(settings_context_json, '$.replyGroupId')=?)`)
+          .bind(input.id, input.sourceAlbumId, input.failureReason, notice?.groupId ?? null, notice?.groupId ?? null).first();
+        if (!terminal || (notice && !await db.prepare('SELECT 1 FROM line_result_outbox WHERE result_key=? AND group_id=? AND result_json=?').bind(key, notice.groupId, json).first())) {
           throw new Error(`cannot fail import run "${input.id}"`);
         }
       }

@@ -333,6 +333,10 @@ export class ImportWorkflow extends WorkflowEntrypoint<
             id: payload.importRunId,
             sourceAlbumId: payload.sourceAlbumId,
             failureReason,
+            ...(context.replyGroupId ? { lineResult: { groupId: context.replyGroupId, result: {
+              schemaVersion: 1, kind: 'import', runId: payload.importRunId, generation: 1, notificationCycle: 1, outcome: 'failed',
+              messages: [{ type: 'text', text: `⚠️ ยังยืนยันผลการนำเข้าสินค้าไม่ได้ กรุณาตรวจสอบก่อนส่ง /upload ซ้ำ\n${payload.importRunId}` }],
+            } } } : {}),
           }),
         processGroupAttempt: processProductGroupAttempt,
         recordExhaustedFailure: recordExhaustedGroupFailure,
