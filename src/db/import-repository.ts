@@ -56,6 +56,7 @@ export interface ImportRepository {
   recordPhotoAsset(input: Omit<PhotoAssetRow, "createdAt">): Promise<void>;
   findGroupByHash(groupHash: string): Promise<ProductGroupRow | null>;
   findConfirmedOverlap(sourceAlbumId: string, groupHash: string, photoIds: string[]): Promise<boolean>;
+  listHistoricalHolds(runId: string): Promise<Array<{ groupId: string; productId: string | null; errorCode: string }>>;
   upsertPendingGroup(input: { id: string; importRunId: string; ordinal: number; groupHash: string; firstPhotoId: string; lastPhotoId: string; photos?: Array<{ applePhotoId: string; r2Key: string | null }> }): Promise<ProductGroupRow>;
   claimAirtableCreate(input: { groupId: string; productId: string; baseId: string; tableId: string }): Promise<"acquired" | "existing" | "conflict">;
   setGroupState(id: string, state: ProductGroupState, patch?: Partial<{ productId: string | null; airtableRecordId: string; failureReason: string | null; attemptCount: number }>): Promise<void>;
@@ -355,6 +356,23 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
             WHERE m.group_id = g.id AND m.apple_photo_id IN (SELECT value FROM json_each(?))
           )) LIMIT 1`).bind(sourceAlbumId, groupHash, JSON.stringify(photoIds), JSON.stringify(photoIds), JSON.stringify(photoIds)).first();
       return row !== null;
+    },
+
+    async listHistoricalHolds(runId) {
+      const rows = await db.prepare(`SELECT g.id AS groupId, g.product_id AS productId, 'historical_group_unavailable' AS errorCode
+        FROM product_groups g JOIN import_runs origin ON origin.id=g.import_run_id
+        JOIN import_runs current ON current.id=? AND current.source_album_id=origin.source_album_id
+        WHERE origin.id<>current.id AND g.state IN ('pending','importing','failed')
+          AND origin.trigger=current.trigger
+          AND (json_valid(origin.settings_context_json) AND json_valid(current.settings_context_json)
+              AND (origin.trigger!='line' OR (json_extract(origin.settings_context_json,'$.replyGroupId') IS NOT NULL
+                AND json_extract(origin.settings_context_json,'$.replyGroupId')=json_extract(current.settings_context_json,'$.replyGroupId')))
+              AND json_extract(origin.settings_context_json,'$.settings.config.airtableBaseId') IS NOT NULL
+              AND json_extract(origin.settings_context_json,'$.settings.config.airtableBaseId')=json_extract(current.settings_context_json,'$.settings.config.airtableBaseId')
+              AND json_extract(origin.settings_context_json,'$.settings.config.airtableProductsTableId') IS NOT NULL
+              AND json_extract(origin.settings_context_json,'$.settings.config.airtableProductsTableId')=json_extract(current.settings_context_json,'$.settings.config.airtableProductsTableId'))
+        ORDER BY g.created_at, g.id`).bind(runId).all<{groupId: string; productId: string | null; errorCode: string}>();
+      return rows.results;
     },
 
     async upsertPendingGroup(input) {

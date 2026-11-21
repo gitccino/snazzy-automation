@@ -39,7 +39,7 @@ export interface DownloadAndGroupOutcome {
   // Optional for workflow steps persisted before ignored counts were introduced.
   ignoredGroupCount?: number;
   pendingGroups: PersistedGroup[];
-  heldGroups?: Array<{ groupId: string; productId: null; errorCode: string }>;
+  heldGroups?: Array<{ groupId: string; productId: string | null; errorCode: string }>;
   orphanRange: OrphanRange | null;
   checkpointPosition: number;
 }
@@ -252,6 +252,8 @@ export async function downloadAndGroupSnapshot(
         }),
     });
   }
+
+  heldGroups.push(...await deps.repo.listHistoricalHolds(importRunId));
 
   const orphanRange: OrphanRange | null =
     orphanPhotos.length === 0

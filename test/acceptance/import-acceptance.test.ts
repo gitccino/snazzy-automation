@@ -16,7 +16,7 @@ import type {
   AirtableProductsClient,
 } from "../../src/import/airtable-products";
 import { createAssetStore } from "../../src/import/asset-store";
-import { sendImportSummary } from "../../src/import/notify";
+import { buildImportSummaryCard, buildImportSummaryMessage, sendImportSummary } from "../../src/import/notify";
 import {
   downloadAndGroupSnapshot,
   finalizeImportRun,
@@ -98,6 +98,7 @@ async function buildHarness(
   options: {
     firstImportCutoffDate?: string | null;
     idPrefix: string;
+    contextJson?: string;
     createProduct?: (
       payload: AirtableProductPayload,
     ) => Promise<{ recordId: string }>;
@@ -244,6 +245,7 @@ async function buildHarness(
     push,
     async startAndRun(runId, trigger) {
       await repo.createImportRun({ id: runId, sourceAlbumId, trigger });
+      if (options.contextJson) await env.DB.prepare("UPDATE import_runs SET settings_context_json=? WHERE id=?").bind(options.contextJson, runId).run();
       return resumeRun(runId, trigger);
     },
     resumeRun,
@@ -293,6 +295,54 @@ describe("import acceptance", () => {
       db.prepare("DELETE FROM import_runs"),
       db.prepare("DELETE FROM sequences"),
     ]);
+  });
+
+  it("holds an unresolved group absent from a later album scan for owner review", async () => {
+    const album = crypto.randomUUID();
+    const harness = await buildHarness(album, [...productGroupOf(9, 1), ...productGroupOf(3, 2)], { idPrefix: album, contextJson: JSON.stringify({ replyGroupId: null, settings: { config: { airtableBaseId: "base", airtableProductsTableId: "table" } } }) });
+    const first = await harness.startAndRun(crypto.randomUUID(), "admin");
+    const unresolved = first.failedGroups[0]!;
+    expect(first.succeededProductIds).toEqual(["A-501"]);
+    expect(unresolved.errorCode).toBe("insufficient_product_photos");
+    harness.source.setSpecs(productGroupOf(9, 1));
+    const later = await harness.startAndRun(crypto.randomUUID(), "admin");
+    expect(later.failedGroups).toEqual([expect.objectContaining({groupId: unresolved.groupId, errorCode: "historical_group_unavailable"})]);
+    const summary = { result: later, orphanRange: null, nowThaiText: "now" };
+    expect(buildImportSummaryMessage(summary)).toContain("รายการเดิมรอเจ้าของตรวจสอบ 1 รายการ");
+    expect(buildImportSummaryMessage(summary)).not.toContain("พิมพ์ /upload");
+    expect(JSON.stringify(buildImportSummaryCard(summary, "https://example.com"))).toContain("รายการเดิมรอเจ้าของตรวจสอบ 1 รายการ");
+    expect(harness.created.size).toBe(1);
+    const again = await harness.startAndRun(crypto.randomUUID(), "admin");
+    expect(again.failedGroups).toEqual(later.failedGroups);
+    harness.source.setSpecs([...productGroupOf(9, 1), ...productGroupOf(3, 2)]);
+    const present = await harness.startAndRun(crypto.randomUUID(), "admin");
+    expect(present.failedGroups).toHaveLength(1);
+    expect(present.failedGroups[0]).toMatchObject({ groupId: unresolved.groupId, errorCode: "insufficient_product_photos" });
+    harness.source.setSpecs(productGroupOf(9, 1));
+    await harness.deps.repo.setGroupState(unresolved.groupId, "succeeded", { productId: "A-999" });
+    expect((await harness.startAndRun(crypto.randomUUID(), "admin")).failedGroups).toEqual([]);
+  });
+
+  it("only surfaces historical holds to the captured owner and target", async () => {
+    const album = crypto.randomUUID(), original = crypto.randomUUID();
+    const harness = await buildHarness(album, productGroupOf(3, 1), { idPrefix: album });
+    const first = await harness.startAndRun(original, "line");
+    const context = (group: string, base = "base") => JSON.stringify({ replyGroupId: group, settings: { config: { airtableBaseId: base, airtableProductsTableId: "table" } } });
+    await testEnv().DB.prepare("UPDATE import_runs SET settings_context_json=? WHERE id=?").bind(context("owner"), original).run();
+    const read = async (trigger: "line" | "admin", value: string | null, sourceAlbumId = album) => {
+      const id = crypto.randomUUID();
+      await harness.deps.repo.createImportRun({ id, sourceAlbumId, trigger });
+      await testEnv().DB.prepare("UPDATE import_runs SET settings_context_json=? WHERE id=?").bind(value, id).run();
+      const holds = await harness.deps.repo.listHistoricalHolds(id);
+      await testEnv().DB.prepare("UPDATE import_runs SET status='completed' WHERE id=?").bind(id).run();
+      return holds;
+    };
+    expect(await read("line", context("owner"))).toEqual([expect.objectContaining({ groupId: first.failedGroups[0]!.groupId })]);
+    expect(await read("line", context("foreign"))).toEqual([]);
+    expect(await read("line", context("owner", "other"))).toEqual([]);
+    expect(await read("line", context("owner"), crypto.randomUUID())).toEqual([]);
+    expect(await read("admin", context("owner"))).toEqual([]);
+    expect(await read("line", null)).toEqual([]);
   });
 
   it("delivers the generated import once after lost creation and start responses", async () => {
