@@ -241,8 +241,9 @@ export class ImportWorkflow extends WorkflowEntrypoint<
             } catch { /* A failed read cannot confirm the row. */ }
           }
         }
+        const holds = await this.env.DB.prepare("SELECT id FROM product_groups WHERE import_run_id=? AND state IN ('pending','importing','failed') ORDER BY created_at,id LIMIT 10").bind(runId).all<{id:string}>();
         await completeImportVerification(this.env.DB, {runId, albumId:claim.source_album_id, workflowId:claim.origin_workflow_id, groupId:claim.group_id, contextJson:claim.context_json}, event.instanceId,
-          {schemaVersion:1, kind:'import', runId, generation:1, notificationCycle:1, outcome:'unconfirmed', messages:[{type:'text', text:`⚠️ ยังยืนยันผลการนำเข้าไม่ได้ กรุณาตรวจสอบงานเดิมก่อนส่ง /upload ซ้ำ\n${runId}${verified.length ? `\nตรวจพบ ${verified.length} แถวที่รหัสสินค้า รหัสกลุ่ม วันที่ และจำนวนภาพตรงกับข้อมูลเดิม (ยังไม่ได้ยืนยันตัวตนภาพ)` : ""}`}]});
+          {schemaVersion:1, kind:'import', runId, generation:1, notificationCycle:1, outcome:'unconfirmed', messages:[{type:'text', text:`⚠️ ยังยืนยันผลการนำเข้าไม่ได้ กรุณาตรวจสอบงานเดิมก่อนส่ง /upload ซ้ำ\n${runId}${holds.results.length ? `\nกลุ่มรอตรวจสอบ (สูงสุด 10): ${holds.results.map(row => row.id).join(', ')}` : ''}${verified.length ? `\nตรวจพบ ${verified.length} แถวที่รหัสสินค้า รหัสกลุ่ม วันที่ และจำนวนภาพตรงกับข้อมูลเดิม (ยังไม่ได้ยืนยันตัวตนภาพ)` : ""}`}]});
         return { ...result, candidates };
       });
       return { kind: "verification", evidence };
@@ -310,6 +311,14 @@ export class ImportWorkflow extends WorkflowEntrypoint<
     };
     const outbox=createLineReplyRepository(this.env.DB,clock);
     const notificationDate=await step.do('terminal-display-date',async()=> {
+      const saved = context.replyGroupId ? await this.env.DB.prepare(`SELECT json_extract(o.result_json, '$.messages[0].contents.body.contents[1].text') AS date
+        FROM line_result_outbox o JOIN import_runs r ON r.id=?
+        WHERE r.status IN ('completed','completed_with_failures') AND o.group_id=?
+          AND o.result_key IN (?,?) AND json_valid(o.result_json)
+          AND json_extract(o.result_json, '$.outcome') IN ('success','partial')
+        ORDER BY o.sequence LIMIT 1`).bind(payload.importRunId, context.replyGroupId,
+          JSON.stringify(['import',payload.importRunId,1,1,'terminal']), JSON.stringify(['import',payload.importRunId,1,1,'terminal-summary'])).first<{date:string | null}>() : null;
+      if (typeof saved?.date === 'string') return saved.date;
       const run = await this.env.DB.prepare('SELECT started_at FROM import_runs WHERE id=?').bind(payload.importRunId).first<{started_at:string}>();
       if (!run) throw new Error('import_run_missing');
       return bangkokDateTimeThai({now:()=>new Date(run.started_at)});

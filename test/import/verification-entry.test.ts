@@ -59,6 +59,24 @@ it('does not complete an empty scan while the original workflow is still running
   expect(await env.DB.prepare('SELECT status FROM import_runs WHERE id=?').bind(runId).first('status')).toBe('running');
 });
 
+it('identifies a missing-original group for the owner without claiming it was recovered', async () => {
+  const env = testEnv(), db = env.DB, runId = crypto.randomUUID(), albumId = crypto.randomUUID(), owner = crypto.randomUUID(), groupId = crypto.randomUUID();
+  const contextJson = JSON.stringify({replyGroupId:owner});
+  await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json,scan_evidence_json) VALUES(?,?,'line','running','now',?,'\"incomplete\"')").bind(runId,albumId,contextJson).run();
+  await db.prepare("INSERT INTO product_groups(id,import_run_id,ordinal,group_hash,state,first_photo_id,last_photo_id,created_at,updated_at) VALUES(?,?,0,?,'failed','missing','missing','now','now')").bind(groupId,runId,crypto.randomUUID()).run();
+  await claimImportVerification(db,{runId,albumId,workflowId:importWorkflowId(runId),groupId:owner,contextJson});
+  (env as any).IMPORT_WORKFLOW = {get: async () => ({status: async () => ({status:'errored'})})};
+  const run = () => ImportWorkflow.prototype.run.call({env} as any,{instanceId:`import-verification-${runId}`,payload:{kind:'verification',importRunId:runId}} as any,{do:async (_:string,cb:()=>Promise<unknown>)=>cb()} as any);
+  await run(); await run();
+  const rows = (await db.prepare('SELECT group_id,result_json FROM line_result_outbox WHERE group_id=?').bind(owner).all<{group_id:string;result_json:string}>()).results;
+  expect(rows).toHaveLength(1);
+  const result = JSON.parse(rows[0]!.result_json);
+  expect(result.outcome).toBe('unconfirmed');
+  expect(result.messages[0].text).toContain(groupId);
+  expect(await db.prepare('SELECT state FROM product_groups WHERE id=?').bind(groupId).first('state')).toBe('failed');
+  expect(await db.prepare('SELECT status FROM import_runs WHERE id=?').bind(runId).first('status')).toBe('running');
+});
+
 it.each([
   ['interrupted scan', '"incomplete"'],
   ['legacy nonempty scan without grouping evidence', JSON.stringify([{applePhotoId:'photo', position:0, captureAt:null, mediaType:'image/jpeg'}])],

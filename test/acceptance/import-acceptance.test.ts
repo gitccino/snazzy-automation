@@ -404,8 +404,8 @@ describe("import acceptance", () => {
   });
 
 
-  it.each(["none", "recording", "legacy", "finalization", "uncached-finalization", "transaction"])("delivers a mixed upload summary with interruption: %s", async (mode) => {
-    const interrupt = mode !== "none";
+  it.each(["none", "recording", "legacy", "finalization", "uncached-finalization", "transaction", "legacy-terminal"])("delivers a mixed upload summary with interruption: %s", async (mode) => {
+    const interrupt = mode !== "none" && mode !== "legacy-terminal";
     const id = crypto.randomUUID(), group = `Cimport-${id}`, other = `Cother-${id}`, token = `token-${id}`;
     const album = await deriveSourceAlbumId(token);
     const harness = await buildHarness(album, [...productGroupOf(9, 1), { id: "ignored", markerKind: "ignore_start" }, { id: "ignored-photo" }, ...productGroupOf(9, 2), ...productGroupOf(3, 3)], { idPrefix: id, createProduct: async payload => { if (payload.productId === "A-502") throw new OperationalError("airtable_response_lost", "lost", true); return { recordId: `rec-${payload.productId}` }; } });
@@ -527,8 +527,23 @@ describe("import acceptance", () => {
       expect(summary).toContain("ล้มเหลว 2 รายการ");
       expect(summary).toContain("กรุณาให้เจ้าของตรวจสอบ");
       expect(summary).toContain("รายการที่แก้ไขแล้ว");
+      if (mode === "legacy-terminal") {
+        const runId = business[0].params.importRunId;
+        await local.DB.prepare("INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at) SELECT ?,group_id,result_json,created_at FROM line_result_outbox WHERE group_id=?").bind(`later-${id}`, group).run();
+        const before = await local.DB.prepare("SELECT * FROM line_result_outbox WHERE group_id=? ORDER BY sequence").bind(group).all();
+        const receipt = await local.DB.prepare("SELECT * FROM line_reply_dispatches WHERE event_id=?").bind(fresh).first();
+        // The old workflow rendered at execution time, which could differ from the run start.
+        await local.DB.prepare("UPDATE import_runs SET started_at='2020-01-01T00:00:00.000Z' WHERE id=?").bind(runId).run();
+        completed.clear(); failed.clear();
+        await runImport();
+        expect((await local.DB.prepare("SELECT * FROM line_result_outbox WHERE group_id=? ORDER BY sequence").bind(group).all()).results).toEqual(before.results);
+        expect(await local.DB.prepare("SELECT * FROM line_reply_dispatches WHERE event_id=?").bind(fresh).first()).toEqual(receipt);
+        await admit(crypto.randomUUID(), "hello"); await runCommand(commands.at(-1));
+        expect(replies).toHaveLength(3);
+        expect((await local.DB.prepare("SELECT state FROM line_result_outbox WHERE group_id=? ORDER BY sequence").bind(group).all()).results).toEqual([{state: "accepted"}, {state: "accepted"}]);
+      }
       await admit(fresh, "hello"); await runCommand(commands.at(-1));
-      expect(replies).toHaveLength(interrupt ? 3 : 2); expect(business).toHaveLength(1); expect(harness.created.size).toBe(1);
+      expect(replies).toHaveLength(interrupt || mode === "legacy-terminal" ? 3 : 2); expect(business).toHaveLength(1); expect(harness.created.size).toBe(1);
     } finally { vi.restoreAllMocks(); }
   });
 
