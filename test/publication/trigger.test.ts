@@ -946,3 +946,24 @@ it('holds a documented invalid-id creation refusal without retrying the handoff'
   await expect(handleDocsTrigger(h.env, 'line', clock, undefined, fetch, context, 'refused-event')).rejects.toThrow('publication_handoff_unconfirmed');
   expect(h.create).toHaveBeenCalledTimes(1);
 });
+
+it('binds an invalid ID failure before lookup and replays it without selecting another run', async () => {
+  vi.restoreAllMocks();
+  const fetchMock = mockRun('Ready');
+  fetchMock.mockResolvedValueOnce(Response.json({records:[{id:'bad:id',fields:{'Publication Date':'2026-09-02',Status:'Ready',Products:[]}}]}));
+  const h = makeTriggerEnv('running');
+  await h.env.DB.exec('DELETE FROM publication_regeneration_events');
+  await h.env.DB.exec('DELETE FROM line_command_ingress');
+  await h.env.DB.exec('DELETE FROM publication_jobs');
+  await h.env.DB.prepare('INSERT INTO line_command_ingress VALUES (?, ?, ?, ?, ?)').bind('invalid-event', 'group-1', JSON.stringify({type:'docs'}), 'command-1', clock.now().toISOString()).run();
+  const { captureOperationContext } = await import('../../src/settings/runtime');
+  const context = await captureOperationContext(h.env, 'group-1');
+  const result = {status:'failed_to_start',publicationRunId:'bad:id'};
+  expect(await handleDocsTrigger(h.env,'line',clock,undefined,fetch,context,'invalid-event')).toEqual(result);
+  fetchMock.mockClear();
+  expect(await handleDocsTrigger(h.env,'line',clock,undefined,fetch,context,'invalid-event')).toEqual(result);
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(h.get).not.toHaveBeenCalled();
+  expect(h.create).not.toHaveBeenCalled();
+  await expect(handleDocsTrigger(h.env,'line',clock,undefined,fetch,{...context,replyGroupId:'other'},'invalid-event')).rejects.toThrow('publication_event_identity_mismatch');
+});

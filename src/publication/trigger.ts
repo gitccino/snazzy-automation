@@ -19,6 +19,7 @@ import { OperationalError } from "../shared/errors";
 
 export type DocsTriggerResult =
   | { status: "no_runnable_run" }
+  | { status: "failed_to_start"; publicationRunId: string }
   | { status: "owner_review"; publicationRunId: string }
   | { status: "checking"; publicationRunId: string }
   | { status: "busy" }
@@ -69,6 +70,7 @@ export async function handleDocsTrigger(
           (binding.action !== "regenerate" && (binding.group_id !== ingress.group_id || binding.ingress_operation !== ingress.operation)))
         throw new Error("publication_event_identity_mismatch");
       const publicationRunId = binding.publication_run_id;
+      if (binding.handoff_status === "failed_to_start") return { status: "failed_to_start", publicationRunId };
       if ((binding.action === "create" || binding.action === "restart") && binding.handoff_status === "started")
         return { status: binding.action === "restart" ? "restarted" : "started", publicationRunId };
       if (binding.handoff_status === "regenerating")
@@ -183,6 +185,15 @@ export async function handleDocsTrigger(
     return { status: "already_generated", publicationRunId };
 
   let id = publicationWorkflowId(publicationRunId, acquired.job.generation);
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(replacing ? publicationWorkflowId(publicationRunId, acquired.job.generation + 1) : id)) {
+    if (trigger === "line" && trustedEventId && !trustedGroupId) throw new Error("publication_event_identity_mismatch");
+    if (trigger === "line" && trustedEventId && trustedGroupId) {
+      const binding = await bindInitialPublicationCreate(env.DB, trustedEventId, trustedGroupId, publicationDate, publicationRunId, acquired.job.generation, acquired.job.notificationCycle, "create", "failed_to_start");
+      if (!binding) throw new Error("publication_event_identity_mismatch");
+      if (!binding.bindingCreated) return handleDocsTrigger(env, trigger, clock, publicationDate, fetcher, context, trustedEventId);
+    }
+    return { status: "failed_to_start", publicationRunId };
+  }
   let workflow = await lookupWorkflow(env, id);
   if (workflow && activeStatuses.includes(workflow.state.status))
     return { status: "already_running", publicationRunId };

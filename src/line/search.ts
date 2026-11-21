@@ -26,6 +26,7 @@ export type UploadTriggerResult =
 
 export type DocsTriggerResult =
   | { status: "no_runnable_run" }
+  | { status: "failed_to_start"; publicationRunId: string }
   | { status: "owner_review"; publicationRunId: string }
   | { status: "checking"; publicationRunId: string }
   | { status: "busy" }
@@ -161,6 +162,8 @@ function testSoldoutReply(caseNumber: number | null, publicBaseUrl: string): str
 
 function docsResultText(result: DocsTriggerResult, publicationDate?: string): string {
   switch (result.status) {
+    case "failed_to_start":
+      return "⚠️ งานเอกสารไม่ได้เริ่ม กรุณาให้เจ้าของตรวจสอบรหัส Publication Run และแก้ไขก่อนส่ง /docs อีกครั้ง";
     case "busy":
       return "⚠️ มีงานสร้างเอกสารที่ต้องตรวจสอบ";
     case "owner_review":

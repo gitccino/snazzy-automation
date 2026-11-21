@@ -157,6 +157,7 @@ it.each([
 
 it.each([
   [{ status: "started", publicationRunId: "run-1" }, { status: "started", publicationRunId: "run-1" }],
+  [{ status: "failed_to_start", publicationRunId: "run-1" }, { status: "failed_to_start", publicationRunId: "run-1" }],
   [{ status: "restarted", publicationRunId: "run-1" }, { status: "restarted", publicationRunId: "run-1" }],
   [{ status: "resumed", publicationRunId: "run-1" }, { status: "resumed", publicationRunId: "run-1" }],
   [{ status: "already_running", publicationRunId: "run-1" }, { status: "already_running", publicationRunId: "run-1" }],

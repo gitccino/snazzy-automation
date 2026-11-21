@@ -305,6 +305,46 @@ describe("publication acceptance", () => {
   });
   afterEach(() => vi.restoreAllMocks());
 
+  it("holds an invalid external run ID before dispatch and recovers a rejected reply in its original group", async () => {
+    const invalidId = `bad:${crypto.randomUUID()}`;
+    const fixture = publicationFixture([product("A-1001")], invalidId);
+    const eventId = crypto.randomUUID(), group = "CtestGroup";
+    const commands: any[] = [], replies: any[] = [];
+    const create = vi.fn(), get = vi.fn(async () => { throw new Error("instance.not_found"); });
+    const local = { ...env, ...configEnv, LINE_CHANNEL_SECRET: "secret",
+      LINE_COMMAND_WORKFLOW: { createBatch: async (items: any[]) => { commands.push(...items); return []; } },
+      PUBLICATION_WORKFLOW: { create, get },
+    } as unknown as Env;
+    const step = { do: async (_name: string, a: any, b?: any) => (b ?? a)() } as unknown as WorkflowStep;
+    vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+      const request = new Request(input, init), url = new URL(request.url);
+      if (url.pathname.includes("/member/")) return Response.json({ userId: "U1", displayName: "Tester" });
+      if (url.pathname.endsWith("/message/reply")) {
+        replies.push(await request.json());
+        return replies.length === 1 ? new Response("rate limited", { status: 429 }) : Response.json({});
+      }
+      return fixture.deps.fetcher(request);
+    });
+    const admit = async (id: string, text: string) => {
+      const body = JSON.stringify({ events: [{ type: "message", webhookEventId: id, replyToken: `token-${id}`, source: { type: "group", groupId: group, userId: "U1" }, message: { type: "text", id: `m-${id}`, text } }] });
+      const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const signature = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)))));
+      expect((await handleLineRoute(new Request("https://app/line/webhook", { method: "POST", headers: { "x-line-signature": signature }, body }), local, {} as ExecutionContext)).status).toBe(200);
+    };
+    const run = (item: any) => LineCommandWorkflow.prototype.run.call({ env: local } as unknown as LineCommandWorkflow, { payload: item.params, instanceId: item.id } as any, step);
+    await admit(eventId, "/docs 2/9/2026");
+    expect(await run(commands[0])).toEqual({ status: "rejected" });
+    expect(create).not.toHaveBeenCalled();
+    expect(JSON.stringify(replies[0])).toContain("ไม่ได้เริ่ม");
+    expect(await local.DB.prepare("SELECT group_id, state FROM line_result_outbox WHERE result_json LIKE ?").bind(`%${invalidId}%`).first()).toEqual({ group_id: group, state: "pending" });
+    await admit(eventId, "/docs 2/9/2026");
+    expect(await run(commands[1])).toEqual({ status: "duplicate" });
+    await admit(crypto.randomUUID(), "hello");
+    expect(await run(commands[2])).toEqual({ status: "accepted" });
+    expect(JSON.stringify(replies[1])).toContain("ไม่ได้เริ่ม");
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it("delivers the generated publication after a lost signed start reply", async () => {
     const fixture = publicationFixture();
     const id = crypto.randomUUID(), group = "CtestGroup", other = "Cother";

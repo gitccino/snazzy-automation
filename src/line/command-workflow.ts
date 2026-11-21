@@ -2,6 +2,7 @@ import { selectPendingVerification } from '../db/pending-verification';
 import { createWorkflowFeedbackRepository } from '../db/workflow-feedback';
 import { createLineReplyRepository } from '../db/line-reply-repository';
 import { deliverEventReply } from './reply-delivery';
+import { renderCommandReply } from './reply-renderer';
 import { loadSettingsSnapshot } from '../settings/runtime';
 import { isMessengerEvent, messengerAccessAllowed } from "../messenger/line";
 import { captureOperationContext } from "../settings/runtime";
@@ -134,6 +135,33 @@ export class LineCommandWorkflow extends WorkflowEntrypoint<Env,{event:LineIngre
     const parsed = event.type === 'message' ? parseLineCommand(event.message.text) : null;
     const provenance = parsed?.ok && (parsed.command.type === 'docs' || parsed.command.type === 'upload')
       ? { groupId: event.source.groupId, operation: JSON.stringify(parsed.command), workflowId: input.instanceId, receivedAt } : undefined;
+    const queueStartFailure = async (reply: CommandReply | null, clock: import('../shared/time').Clock, publicBaseUrl: string, save = false) => {
+      if (!provenance || !reply) return false;
+      const binding = await this.env.DB.prepare(`SELECT e.publication_run_id, e.generation, e.notification_cycle FROM publication_regeneration_events e
+        JOIN line_command_ingress i ON i.event_id=e.event_id
+        WHERE e.event_id=? AND e.handoff_status='failed_to_start' AND e.group_id=? AND e.ingress_operation=i.operation
+          AND i.group_id=? AND i.operation=? AND i.workflow_id=? AND i.received_at=?`)
+        .bind(event.webhookEventId, provenance.groupId, provenance.groupId, provenance.operation, provenance.workflowId, provenance.receivedAt)
+        .first<{publication_run_id:string;generation:number;notification_cycle:number}>();
+      if (!binding) return false;
+      const messages = renderCommandReply(reply, publicBaseUrl);
+      const resultKey=JSON.stringify(['publication-start-failure',event.webhookEventId]);
+      const result={schemaVersion:1 as const,kind:'publication' as const,runId:binding.publication_run_id,generation:binding.generation,notificationCycle:binding.notification_cycle,outcome:'failed' as const,messages};
+      if (save) await this.env.DB.batch([
+        this.env.DB.prepare(`INSERT OR IGNORE INTO line_event_replies(event_id,reply_json,provenance)
+          SELECT ?,?,'prepared' WHERE EXISTS (SELECT 1 FROM line_command_ingress WHERE event_id=? AND group_id=? AND operation=? AND workflow_id=? AND received_at=?)`)
+          .bind(event.webhookEventId,JSON.stringify(reply),event.webhookEventId,provenance.groupId,provenance.operation,provenance.workflowId,provenance.receivedAt),
+        this.env.DB.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at)
+          SELECT ?,?,?,? WHERE EXISTS (SELECT 1 FROM line_event_replies WHERE event_id=? AND provenance='prepared' AND reply_json=?) ON CONFLICT(result_key) DO NOTHING`)
+          .bind(resultKey,provenance.groupId,JSON.stringify(result),clock.now().toISOString(),event.webhookEventId,JSON.stringify(reply)),
+      ]);
+      else {
+        const saved=await this.env.DB.prepare("SELECT 1 FROM line_event_replies WHERE event_id=? AND provenance='prepared' AND reply_json=?").bind(event.webhookEventId,JSON.stringify(reply)).first();
+        if (!saved) throw new Error('publication_start_reply_mismatch');
+      }
+      await createLineReplyRepository(this.env.DB,clock).enqueueResult({resultKey,groupId:provenance.groupId,result});
+      return true;
+    };
     const completed=await step.do('already-processed',()=>this.env.DB.prepare('SELECT event_id FROM line_events WHERE event_id=? UNION ALL SELECT event_id FROM line_event_replies WHERE event_id=? LIMIT 1').bind(event.webhookEventId,event.webhookEventId).first<{event_id:string}>());
     if(completed) {
       const saved = provenance && await this.env.DB.prepare(`SELECT r.reply_json FROM line_event_replies r
@@ -142,7 +170,9 @@ export class LineCommandWorkflow extends WorkflowEntrypoint<Env,{event:LineIngre
         .bind(event.webhookEventId, provenance.groupId, provenance.operation, provenance.workflowId, provenance.receivedAt).first<{reply_json:string}>();
       if (!saved) return {status:'duplicate' as const};
       const deps = await createWebhookDeps(this.env,input.instanceId,context);
-      const status = await step.do('reply-once',attemptOptions,()=>deliverEventReply({eventId:event.webhookEventId,groupId:event.source.groupId,workflowId:input.instanceId,receivedAt,replyToken:event.replyToken,commandReply:JSON.parse(saved.reply_json) as CommandReply,drainQueue:true,publicBaseUrl:deps.publicBaseUrl},{repo:createLineReplyRepository(this.env.DB,deps.clock),line:deps.line,clock:deps.clock,isGroupAllowed:allowed,feedback:createWorkflowFeedbackRepository(this.env.DB)}));
+      const savedReply=JSON.parse(saved.reply_json) as CommandReply;
+      const queued=await queueStartFailure(savedReply,deps.clock,deps.publicBaseUrl);
+      const status = await step.do('reply-once',attemptOptions,()=>deliverEventReply({eventId:event.webhookEventId,groupId:event.source.groupId,workflowId:input.instanceId,receivedAt,replyToken:event.replyToken,commandReply:queued ? null : savedReply,drainQueue:true,publicBaseUrl:deps.publicBaseUrl},{repo:createLineReplyRepository(this.env.DB,deps.clock),line:deps.line,clock:deps.clock,isGroupAllowed:allowed,feedback:createWorkflowFeedbackRepository(this.env.DB)}));
       return {status};
     }
     const deps=await createWebhookDeps(this.env,input.instanceId,context);
@@ -154,11 +184,14 @@ export class LineCommandWorkflow extends WorkflowEntrypoint<Env,{event:LineIngre
     });
     if(event.type!=='queue-trigger' && isMessengerEvent(event) && deps.messenger && !await messengerAccessAllowed(event,deps.messenger))
       reply={kind:'text',text:'⚠️ สิทธิ์หรือการตั้งค่าเปลี่ยนแล้ว กรุณาขอรายการใหม่'};
+    let queued=false;
     await step.do('record-command-completion',attemptOptions,async()=>{
-      if(reply)await deps.repo.saveEventReply(event.webhookEventId,reply,provenance);
+      queued=await queueStartFailure(reply,deps.clock,deps.publicBaseUrl,true);
+      if(reply && !queued)await deps.repo.saveEventReply(event.webhookEventId,reply,provenance);
       await deps.repo.claimEvent(event.webhookEventId,event.source.groupId);
     });
-    const status=await step.do('reply-once',attemptOptions,()=>deliverEventReply({eventId:event.webhookEventId,groupId:event.source.groupId,workflowId:input.instanceId,receivedAt,replyToken:event.replyToken,commandReply:reply,drainQueue:event.type!=='postback',publicBaseUrl:deps.publicBaseUrl},{repo:createLineReplyRepository(this.env.DB,deps.clock),line:deps.line,clock:deps.clock,isGroupAllowed:allowed,feedback:createWorkflowFeedbackRepository(this.env.DB)}));
+    queued=await queueStartFailure(reply,deps.clock,deps.publicBaseUrl);
+    const status=await step.do('reply-once',attemptOptions,()=>deliverEventReply({eventId:event.webhookEventId,groupId:event.source.groupId,workflowId:input.instanceId,receivedAt,replyToken:event.replyToken,commandReply:queued ? null : reply,drainQueue:event.type!=='postback',publicBaseUrl:deps.publicBaseUrl},{repo:createLineReplyRepository(this.env.DB,deps.clock),line:deps.line,clock:deps.clock,isGroupAllowed:allowed,feedback:createWorkflowFeedbackRepository(this.env.DB)}));
     if (event.type === 'message' && parsed && !parsed.ok && parsed.code === 'unknown_command') {
       await step.do('dispatch-pending-verification', attemptOptions, async () => {
         try {
