@@ -212,7 +212,7 @@ describe("planCaptionBatches", () => {
         "claude-opus-5",
         [toCaptionRequestProducts([product("A-1001")])[0]!],
         1_000,
-      )).rejects.toBe(error);
+      )).rejects.toMatchObject({code:'anthropic_count_tokens_failed',retryable:true});
 
       expect(log).toHaveBeenCalledWith("Anthropic request failed", {
         operation: "count_tokens",
@@ -298,8 +298,7 @@ describe("requestCaptionBatch", () => {
       create: vi.fn().mockRejectedValue(new Error("rate limited")),
     });
     const requested = [toCaptionRequestProducts([product("A-1001")])[0]!];
-    const outcome = await requestCaptionBatch(client, "claude-opus-5", requested);
-    expect(outcome.missingProductIds).toEqual(["A-1001"]);
+    await expect(requestCaptionBatch(client, "claude-opus-5", requested)).rejects.toMatchObject({code:'anthropic_create_message_failed',retryable:true});
   });
 
   it("classifies a permanent Messages API rejection as non-retryable", async () => {

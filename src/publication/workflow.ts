@@ -107,6 +107,16 @@ function depsFor(
 }
 
 function publicationErrorCode(error:unknown,fallback:string):string {
+  const message = error instanceof Error ? error.message.replace(/^NonRetryableError: (?=workflow-failure-v1:)/, '') : '';
+  if (message.startsWith('workflow-failure-v1:')) {
+    try {
+      const fact: unknown = JSON.parse(message.slice('workflow-failure-v1:'.length));
+      if (typeof fact === 'object' && fact !== null && Object.keys(fact).sort().join(',') === 'code,reason' &&
+          typeof (fact as {code?:unknown}).code === 'string' && /^[a-z][a-z0-9_]{0,99}$/.test((fact as {code:string}).code) &&
+          typeof (fact as {reason?:unknown}).reason === 'string') return (fact as {code:string}).code;
+    } catch { /* Invalid envelopes use the safe fallback. */ }
+    return fallback;
+  }
   const code=error instanceof ProductImagePreparationFailure ? error.diagnostic?.code ?? "" : error instanceof OperationalError ? error.code : error instanceof Error ? error.name : '';
   return /^[a-z][a-z0-9_]{0,99}$/.test(code)?code:fallback;
 }
@@ -118,24 +128,15 @@ async function workflowCall<T>(
   try {
     return await call();
   } catch (error) {
-    if (error instanceof OperationalError && !error.retryable) {
-      // The name survives durable error serialization; custom Error fields may not.
-      throw new NonRetryableError(reason, error.code);
-    }
-    // Durable retries and their logs must not retain raw upstream bodies or secrets.
-    const safe=new Error(reason);
-    safe.name=publicationErrorCode(error,'publication_stage_failed');
-    throw safe;
+    const code = error instanceof OperationalError || error instanceof ProductImagePreparationFailure ? publicationErrorCode(error, 'publication_stage_failed') : 'publication_stage_failed';
+    const message = `workflow-failure-v1:${JSON.stringify({code, reason})}`;
+    if (error instanceof NonRetryableError || (error instanceof OperationalError && !error.retryable)) throw new NonRetryableError(message);
+    throw new Error(message);
   }
 }
 
 function isContenderRejection(error: unknown): boolean {
-  const code =
-    error instanceof OperationalError
-      ? error.code
-      : error instanceof Error
-        ? error.name
-        : null;
+  const code = publicationErrorCode(error, 'publication_stage_failed');
   return (
     code === "publication_job_locked" ||
     code === "publication_job_terminal" ||

@@ -168,6 +168,7 @@ function rethrowPermanentAnthropicError(
       false,
     );
   }
+  throw new OperationalError(`anthropic_${action}_failed`, `Anthropic ${action} failed`, true);
 }
 
 function isSubmitCaptionsToolUse(

@@ -22,6 +22,6 @@ export default defineConfig({
   ],
   test: {
     setupFiles: ["./test/apply-migrations.ts"],
-    exclude: ["**/node_modules/**", "**/.worktrees/**", "apps/**"],
+    exclude: ["**/node_modules/**", "**/.worktrees/**", "apps/**", "test/runtime-fixture/**"],
   },
 });

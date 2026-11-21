@@ -1,0 +1,1 @@
+{"name":"boundary-test","main":"worker.ts","compatibility_date":"2026-09-01","compatibility_flags":["nodejs_compat"],"workflows":[{"name":"boundary-test","binding":"BOUNDARY_WORKFLOW","class_name":"BoundaryWorkflow"}],"d1_databases":[{"binding":"DB","database_name":"boundary-test","database_id":"00000000-0000-0000-0000-000000000001"}]}

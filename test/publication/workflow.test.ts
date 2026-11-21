@@ -118,7 +118,7 @@ describe("runPublicationWorkflow", () => {
     stages.failPublicationAfterExhaustion.mockImplementation(real.failPublicationAfterExhaustion);
     stages.fillAndVerifyDocument.mockRejectedValue(new OperationalError("document_fill_failed", "private failure", false));
     const actualDeps = { ...deps, db: env.DB, config, fetcher, clock: { now: () => new Date() }, googleOAuthCredentials: { clientId: "client", clientSecret: "secret", refreshToken: "refresh" }, copyOwner: { workflowId: "original", notificationCycle: 1 } } as PublicationServiceDeps;
-    await expect(runPublicationWorkflow({ publicationRunId: runId, trigger: "line" }, retryingStep() as unknown as WorkflowStep, actualDeps, "original", { groupId, notificationCycle: 1 })).rejects.toMatchObject({ name: "document_fill_failed" });
+    await expect(runPublicationWorkflow({ publicationRunId: runId, trigger: "line" }, retryingStep() as unknown as WorkflowStep, actualDeps, "original", { groupId, notificationCycle: 1 })).rejects.toThrow('document_fill_failed');
     expect(await env.DB.prepare("SELECT stage,failure_code FROM workflow_feedback WHERE run_id=?").bind(runId).first()).toEqual({ stage: "fill and verify document", failure_code: "document_fill_failed" });
     expect(await env.DB.prepare("SELECT generation,notification_cycle,origin_workflow_id,context_json,doc_id,saved_temp_doc FROM publication_cleanup_intents WHERE publication_run_id=?").bind(runId).first()).toEqual({ generation: 1, notification_cycle: 1, origin_workflow_id: "original", context_json: context, doc_id: "temp-doc-1", saved_temp_doc: 1 });
     expect(fetcher.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(1);
@@ -277,10 +277,7 @@ describe("runPublicationWorkflow", () => {
       deps,
     );
     await expect(failure).rejects.toBeInstanceOf(NonRetryableError);
-    await expect(failure).rejects.toMatchObject({
-      name: "google_copy_failed",
-      message: "Unable to create the temporary Google document.",
-    });
+    await expect(failure).rejects.toThrow('google_copy_failed');
     expect(stages.ensureTemporaryDocument).toHaveBeenCalledTimes(1);
     expect(
       stages.failPublicationAfterExhaustion,
@@ -308,7 +305,7 @@ describe("runPublicationWorkflow", () => {
 
       await expect(
         runPublicationWorkflow(params, step as unknown as WorkflowStep, deps),
-      ).rejects.toMatchObject({ name: code });
+      ).rejects.toThrow(code);
 
       expect(stages[stage]).toHaveBeenCalledTimes(1);
       expect(stages.failPublicationAfterExhaustion).not.toHaveBeenCalled();
@@ -402,9 +399,7 @@ describe("runPublicationWorkflow", () => {
           retryingStep() as unknown as WorkflowStep,
           deps,
         ),
-      ).rejects.toMatchObject({
-        message: "Unable to prepare publication notification.",
-      });
+      ).rejects.toThrow("Unable to prepare publication notification.");
 
       expect(stages.finalizePublication).toHaveBeenCalledTimes(1);
       expect(stages.notifyPublicationSuccess).toHaveBeenCalledTimes(
@@ -430,9 +425,7 @@ describe("runPublicationWorkflow", () => {
           retryingStep() as unknown as WorkflowStep,
           deps,
         ),
-      ).rejects.toMatchObject({
-        message: "Unable to fill or verify the Google document.",
-      });
+      ).rejects.toThrow("Unable to fill or verify the Google document.");
 
       expect(stages.fillAndVerifyDocument).toHaveBeenCalledTimes(6);
       expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining('ยังยืนยันสถานะ'),expect.objectContaining({type:'bubble'}),'unconfirmed');
@@ -617,7 +610,7 @@ it.each(['cleanup_failed', 'airtable_update_failed'])('queues the saved primary 
   const notify=async(text:string,contents?:Record<string,unknown>,outcome:'success'|'failed'|'unconfirmed'='success')=>repo.enqueueResult({groupId,resultKey:key,result:{schemaVersion:1,kind:'publication',runId,generation:1,notificationCycle:1,outcome,messages:[contents?{type:'flex',altText:text,contents}:{type:'text',text}]}});
   const log=vi.spyOn(console,'error').mockImplementation(()=>{});
   try {
-    for(let i=0;i<2;i++) await expect(runPublicationWorkflow({publicationRunId:runId,trigger:'line'},retryingStep() as unknown as WorkflowStep,{...deps,db,notify,config:{...deps.config,publicationRetryLimit:0}},workflowId,{groupId,notificationCycle:1})).rejects.toMatchObject({name:'anthropic_create_message_failed'});
+    for(let i=0;i<2;i++) await expect(runPublicationWorkflow({publicationRunId:runId,trigger:'line'},retryingStep() as unknown as WorkflowStep,{...deps,db,notify,config:{...deps.config,publicationRetryLimit:0}},workflowId,{groupId,notificationCycle:1})).rejects.toThrow('anthropic_create_message_failed');
     const rows=(await db.prepare('SELECT result_key,result_json FROM line_result_outbox WHERE group_id=?').bind(groupId).all()).results;
     expect(rows).toHaveLength(1);
     expect(rows[0]?.result_key).toBe(key);
@@ -635,4 +628,22 @@ it.each(['cleanup_failed', 'airtable_update_failed'])('queues the saved primary 
     await db.prepare('DELETE FROM workflow_feedback WHERE run_id=?').bind(runId).run();
     await db.prepare('DELETE FROM publication_jobs WHERE publication_run_id=?').bind(runId).run();
   }
+});
+
+it('preserves a safe provider code when durable serialization discards error names', async () => {
+  vi.clearAllMocks();
+  const db = testEnv().DB, runId = crypto.randomUUID(), groupId = crypto.randomUUID(), workflowId = `publication-${runId}`;
+  await db.prepare(`INSERT INTO publication_jobs (publication_run_id, state, correlation_id, created_at, updated_at, generation, notification_cycle, settings_context_json) VALUES (?, 'generating', ?, 'x', 'x', 1, 1, ?)`).bind(runId, workflowId, JSON.stringify({replyGroupId: groupId})).run();
+  stages.recoverPublicationFinalization.mockResolvedValue(null);
+  stages.validatePublication.mockResolvedValue({kind:'ready', value:validated});
+  stages.preparePublicationOutputs.mockRejectedValue(new OperationalError('anthropic_auth_failed', 'SECRET', false));
+  stages.failPublicationAfterExhaustion.mockImplementation(async d => d.notify());
+  const notice = vi.fn();
+  const step = { do: async (_name: string, options: any, callback: any) => {
+    try { return await callback(); } catch (error) { throw new Error((error as Error).message); }
+  }};
+  await expect(runPublicationWorkflow({publicationRunId:runId,trigger:'line'}, step as unknown as WorkflowStep, {...deps,db,notify:notice,config:{...deps.config,publicationRetryLimit:0}}, workflowId, {groupId,notificationCycle:1})).rejects.toThrow();
+  expect(await db.prepare('SELECT failure_code FROM workflow_feedback WHERE run_id=?').bind(runId).first()).toEqual({failure_code:'anthropic_auth_failed'});
+  expect(JSON.stringify(notice.mock.calls)).toContain('เชื่อมต่อ Claude');
+  expect(JSON.stringify(notice.mock.calls)).not.toContain('SECRET');
 });
