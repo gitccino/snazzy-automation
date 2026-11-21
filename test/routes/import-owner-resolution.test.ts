@@ -36,13 +36,16 @@ it('authenticates, verifies and applies only matching historical evidence withou
     expect(provider).not.toHaveBeenCalled();
     expect((await call({...input,apply:false})).status).toBe(400);
     expect((await call({...input,ownerGroupId:'foreign'})).status).toBe(409);
+    expect((await call({...input,baseId:'foreign'})).status).toBe(409);
     expect((await call({...input,tableId:'foreign'})).status).toBe(409);
     expect(provider).not.toHaveBeenCalled();
     mismatch=true;
     expect(await (await call(input)).json()).toEqual({status:'held',reason:'attachment_mismatch'});
     mismatch=false;
     expect((await repo.listHistoricalHolds(freshRun)).some(x=>x.groupId===groupId)).toBe(true);
-    expect(await (await call(input)).json()).toEqual({status:'resolved'});
+    const concurrent = await Promise.all([call(input), call({...input, actor:'other'})]);
+    expect(concurrent.map(response => response.status).sort()).toEqual([200, 409]);
+    expect(await concurrent.find(response => response.status === 200)!.json()).toEqual({status:'resolved'});
     const audit=await db.prepare('SELECT evidence_json FROM import_owner_group_resolutions WHERE group_id=?').bind(groupId).first<{evidence_json:string}>();
     expect(audit?.evidence_json).not.toContain('airtableusercontent');
     expect(audit?.evidence_json).not.toContain('signature=secret');
