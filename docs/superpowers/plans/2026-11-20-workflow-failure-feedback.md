@@ -94,3 +94,9 @@ Ledger: additive repository implemented with atomic outcome writes and fenced ev
 ### Partial implementation — publication intent repair
 
 - Publication failure intents now capture original display facts; eligible replies repair one missing publication notice and mark existing outbox rows materialized. Targeted D1 reply and feedback tests and typecheck pass. Legacy intents without display facts, import notices, correction handling, and the remaining Task 5 cases remain open.
+
+### Publication acceptance reconciliation after 9533f36
+
+The seven remaining publication acceptance failures were fixture drift, not a demonstrated production defect. Failed restarts advance the notification cycle; the fixture now supplies cycle 2 and explicitly proves cycle 1 cannot create a document. The lost-finalization retry also uses its reopened cycle. The trigger assertion compares its dispatched context with the persisted context and checks captured Airtable and template settings. Image preparation now writes originals before the collage, so collage assertions count collage writes separately; unique source images and persisted Airtable attachment order preserve the four-image and edited-order checks. The corrected-data and lost copy/fill cases remain covered.
+
+Local evidence: `npx vitest run test/acceptance/publication.test.ts` passed 15/15 and `npm run typecheck` passed. `npm run test:acceptance` completed 81/83; the two remaining failures are the previously listed LINE parser cases `/search A1234` and `/soldout A1234 ราคา 1290`. Case 7 now includes corrected-data publication; case 11 includes uncertain copy/fill recovery to one dated document. These do not prove the full 15-case contracts: cases 1–6, 8–10, and 12–15 retain the partial status above, and provider-stage, verification-only, release and full-suite checks remain open. No remote actions were performed.

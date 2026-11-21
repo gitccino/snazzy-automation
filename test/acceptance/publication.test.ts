@@ -188,7 +188,7 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
       }
       if (url.hostname === "fixtures.airtableusercontent.com" && request.method === "GET") {
         if (![...attachments.values()].flat().some(attachment => attachment.url === request.url)) throw new Error(`Unexpected attachment: ${request.url}`);
-        const bytes = url.pathname.startsWith("/preview/") ? image.preview : jpeg.encode({ data: Buffer.from([url.pathname.length, url.pathname.charCodeAt(url.pathname.length - 1), 0, 255]), width: 1, height: 1 }, 80).data;
+        const bytes = url.pathname.startsWith("/preview/") ? image.preview : jpeg.encode({ data: Buffer.from([url.pathname.length, Number(url.pathname.split("/").at(-1)), 0, 255]), width: 1, height: 1 }, 80).data;
         return new Response(bytes, { headers: { "content-type": "image/jpeg" } });
       }
       if (url.hostname === "oauth2.googleapis.com") return Response.json({ access_token: "google-token", expires_in: 3600 });
@@ -269,10 +269,11 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
   const scheduler = retryingStep();
   return {
     products, state, calls, batches, failureSnapshots, image, countTokens, create, notify, deps, scheduler,
-    run: (generation = 1) => runPublicationWorkflow(
+    reverseAttachments: (recordId: string) => attachments.get(recordId)!.reverse(),
+    run: (generation = 1, notificationCycle = 1) => runPublicationWorkflow(
       { publicationRunId: fixtureRunId, trigger: "line", ...(generation > 1 ? { generation } : {}) },
       scheduler as unknown as WorkflowStep,
-      { ...deps, copyOwner: { workflowId: publicationWorkflowId(fixtureRunId, generation), notificationCycle: 1 } },
+      { ...deps, copyOwner: { workflowId: publicationWorkflowId(fixtureRunId, generation), notificationCycle } },
     ),
   };
 }
@@ -332,7 +333,7 @@ describe("publication acceptance", () => {
       expect(await handleDocsTrigger(triggerEnv, "cron", clock)).toMatchObject({ status: "already_generated" });
       await handleDocsTrigger(triggerEnv, "line", clock);
     }
-    const v2 = await fixture.run(2);
+    const v2 = await fixture.run(2, loseResponse ? 2 : 1);
     expect(v2!.productIds).toEqual(["A-1001"]);
     expect(fixture.state.docs.get("temp-doc-1")).toEqual(original);
     expect(fixture.state.docs.get("temp-doc-2")!.name).toBe("Publication 2026-09-02 (v2)");
@@ -412,7 +413,7 @@ describe("publication acceptance", () => {
     expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
     expect(first.state.docs.size + second.state.docs.size).toBe(1);
     expect(first.create.mock.calls.length + second.create.mock.calls.length).toBe(1);
-    expect(first.image.put.mock.calls.length + second.image.put.mock.calls.length).toBe(1);
+    expect(first.image.put.mock.calls.filter(([key]) => key.includes("/collage/")).length + second.image.put.mock.calls.filter(([key]) => key.includes("/collage/")).length).toBe(1);
     const rows = await env.DB.prepare("SELECT publication_run_id, publication_date, state FROM publication_jobs ORDER BY publication_run_id")
       .all<{ publication_run_id: string; publication_date: string | null; state: string }>();
     expect(rows.results.filter(row => row.state === "succeeded")).toHaveLength(1);
@@ -432,7 +433,7 @@ describe("publication acceptance", () => {
     const changedBefore = await getProductCache(env.DB, runId, "A-1001");
     const unchangedBefore = await getProductCache(env.DB, runId, "A-1002");
     products[0]!.description = "คำอธิบายใหม่";
-    products[0]!.orderedImageKeys.reverse();
+    fixture.reverseAttachments(products[0]!.airtableRecordId);
     fixture.create.mockResolvedValueOnce(toolResponse([{ productId: "A-1001", drafts: ["ฉบับใหม่หนึ่ง", "ฉบับใหม่สอง", "ฉบับใหม่สาม"] }]));
     vi.mocked(globalThis.fetch).mockImplementation(fixture.deps.fetcher as typeof fetch);
     const binding = workflowBinding();
@@ -440,14 +441,17 @@ describe("publication acceptance", () => {
     const response = await handleDocsRoute(docsRequest(), { ...env, ...configEnv, PUBLICATION_WORKFLOW: binding } as unknown as Env, clock);
     expect(await response.json()).toEqual({ status: "restarted", publicationRunId: runId });
     fixture.state.batchFailureStatus = 0;
-    await fixture.run();
+    await expect(fixture.run(1, 1)).rejects.toMatchObject({ name: "publication_generation_stale" });
+    expect(fixture.state.docs.size).toBe(0);
+    await fixture.run(1, 2);
     expect(fixture.create).toHaveBeenCalledTimes(2);
     expect(fixture.create.mock.calls[1]![0].messages[0].content).toContain("คำอธิบายใหม่");
     expect(fixture.create.mock.calls[1]![0].messages[0].content).not.toContain("A-1002");
-    expect(fixture.image.put.mock.calls.map(call => call[0])).toEqual([
+    expect(fixture.image.put.mock.calls.map(call => call[0]).filter(key => key.includes("/collage/"))).toEqual([
       "products/A-1001/collage/1080x1080.jpg", "products/A-1002/collage/1080x1080.jpg", "products/A-1001/collage/1080x1080.jpg",
     ]);
-    expect(fixture.image.transforms.slice(-4).map(item => item.key)).toEqual(products[0]!.orderedImageKeys.slice(0, 4));
+    const originalKeys = fixture.image.put.mock.calls.slice(0, 5).map(([key]) => key);
+    expect(fixture.image.transforms.slice(-4).map(item => item.key)).toEqual(originalKeys.reverse().slice(0, 4));
     const changedAfter = await getProductCache(env.DB, runId, "A-1001");
     expect(changedAfter.collageInputFingerprint).not.toBe(changedBefore.collageInputFingerprint);
     expect(changedAfter.captionsInputFingerprint).not.toBe(changedBefore.captionsInputFingerprint);
@@ -459,9 +463,11 @@ describe("publication acceptance", () => {
   it("places the first four Airtable-ordered images in the white 1080-square collage and reuses its private cache", async () => {
     const fixture = publicationFixture();
     await fixture.run();
-    const expectedKeys = ["third", "first", "fourth", "second"].map(name => `assets/A-1001-${name}.jpg`);
-    expect(fixture.image.get.mock.calls.map(([key]) => key)).toEqual(["assets/collage-base-1080.jpg", ...expectedKeys]);
-    expect(fixture.image.transforms).toEqual(expectedKeys.map(key => ({ key, options: {
+    const originalKeys = fixture.image.put.mock.calls.slice(0, 5).map(([key]) => key);
+    expect(new Set(originalKeys).size).toBe(5);
+    const expectedKeys = originalKeys.slice(0, 4);
+    expect(fixture.image.get.mock.calls.map(([key]) => key).slice(-5)).toEqual(["assets/collage-base-1080.jpg", ...expectedKeys]);
+    expect(fixture.image.transforms.slice(-4)).toEqual(expectedKeys.map(key => ({ key, options: {
       width: 540, height: 540, fit: "cover", background: "#FFFFFF",
     } })));
     expect(fixture.image.draws).toEqual([
@@ -470,9 +476,9 @@ describe("publication acceptance", () => {
       { base: "assets/collage-base-1080.jpg", key: expectedKeys[2], options: { top: 540, left: 0 } },
       { base: "assets/collage-base-1080.jpg", key: expectedKeys[3], options: { top: 540, left: 540 } },
     ]);
-    expect(fixture.image.output).toHaveBeenCalledExactlyOnceWith({ format: "image/jpeg", quality: 90 });
-    expect(fixture.image.put).toHaveBeenCalledExactlyOnceWith("products/A-1001/collage/1080x1080.jpg", new Uint8Array([1, 2, 3]), { httpMetadata: { contentType: "image/jpeg" } });
-    const patch = fixture.calls.find(c => c.url.endsWith("/tblProducts/rec-A-1001"))!;
+    expect(fixture.image.output.mock.calls.filter(([options]) => options.quality === 90)).toEqual([[{ format: "image/jpeg", quality: 90 }]]);
+    expect(fixture.image.put.mock.calls.filter(([key]) => key.includes("/collage/"))).toEqual([["products/A-1001/collage/1080x1080.jpg", new Uint8Array([1, 2, 3]), { httpMetadata: { contentType: "image/jpeg" } }]]);
+    const patch = fixture.calls.find(c => c.method === "PATCH" && c.url.endsWith("/tblProducts/rec-A-1001") && "4-in-1 Image" in (c.body.fields as object))!;
     const signedUrl = new URL((patch.body.fields as { "4-in-1 Image": Array<{ url: string }> })["4-in-1 Image"][0]!.url);
     expect(decodeURIComponent(signedUrl.pathname)).toBe("/assets/products/A-1001/collage/1080x1080.jpg");
     const expires = Number(signedUrl.searchParams.get("exp"));
@@ -480,7 +486,7 @@ describe("publication acceptance", () => {
     expect(await verifyAssetToken("products/A-1001/collage/1080x1080.jpg", expires, signedUrl.searchParams.get("sig")!, "test-secret", clock.now().getTime() / 1000)).toBe(true);
     expect(fixture.batches[0]!.filter(r => "insertInlineImage" in r).map(r => r.insertInlineImage.uri)).toEqual([signedUrl.toString()]);
     await fixture.run();
-    expect(fixture.image.put).toHaveBeenCalledTimes(1);
+    expect(fixture.image.put.mock.calls.filter(([key]) => key.includes("/collage/"))).toHaveLength(1);
   });
 
   it("caches exactly three Thai captions per ID for 22 products in one generation request", async () => {
@@ -580,7 +586,10 @@ describe("publication acceptance", () => {
     const duplicate = await handleDocsRoute(docsRequest(), triggerEnv, clock);
     expect(duplicate.status).toBe(200);
     expect(await duplicate.json()).toEqual({ status: "already_running", publicationRunId: runId });
-    expect(binding.create).toHaveBeenCalledExactlyOnceWith({ id: "publication-rec-run-1", params: { publicationRunId: runId, trigger: "admin" } });
+    const saved = await env.DB.prepare("SELECT settings_context_json FROM publication_jobs WHERE publication_run_id = ?").bind(runId).first<{ settings_context_json: string }>();
+    const context = JSON.parse(saved!.settings_context_json);
+    expect(context).toMatchObject({ replyGroupId: null, settings: { revision: 0, schemaVersion: 1, config: { airtableBaseId: config.airtableBaseId, googleTemplateDocId: config.googleTemplateDocId } } });
+    expect(binding.create).toHaveBeenCalledExactlyOnceWith({ id: "publication-rec-run-1", params: { publicationRunId: runId, trigger: "admin", context } });
     await fixture.run();
     // Even if Airtable is stale or staff marks it Ready again, D1 owns the result.
     fixture.state.status = "Ready";
@@ -638,12 +647,12 @@ describe("publication acceptance", () => {
       expect(await getProductCache(env.DB, runId, "A-1001")).toEqual(cached);
       expect(workflowStatus === "errored" ? binding.restart : binding.create).toHaveBeenCalledTimes(1);
       fixture.state.batchFailureStatus = 0;
-      const result = await fixture.run();
+      const result = await fixture.run(1, 2);
       expect(result!.googleDocId).toBe("temp-doc-2");
       expect(fixture.state.docs.size).toBe(1);
       expect(fixture.state.docs.get("temp-doc-2")!.name).toBe("Publication 2026-09-02");
       expect(fixture.create).toHaveBeenCalledTimes(1);
-      expect(fixture.image.put).toHaveBeenCalledTimes(1);
+      expect(fixture.image.put.mock.calls.filter(([key]) => key.includes("/collage/"))).toHaveLength(1);
       expect(await job()).toMatchObject({ state: "succeeded", google_doc_id: "temp-doc-2", google_doc_url: result!.googleDocUrl });
       expect(fixture.state.status).toBe("Generated");
       expect(fixture.notify).toHaveBeenCalledTimes(2);
