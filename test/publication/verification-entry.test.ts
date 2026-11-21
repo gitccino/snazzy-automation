@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { testEnv } from '../helpers/env';
+import { createTestEnv, testEnv } from '../helpers/env';
 import { claimPublicationVerification } from '../../src/db/publication-repository';
 import { PublicationWorkflow } from '../../src/publication/workflow';
 import { createWorkflowFeedbackRepository } from '../../src/db/workflow-feedback';
@@ -7,6 +7,43 @@ import { createLineReplyRepository } from '../../src/db/line-reply-repository';
 import { deliverEventReply } from '../../src/line/reply-delivery';
 import { createLineClient } from '../../src/line/client';
 import { fixedClock } from '../helpers/fakes';
+import { handleDocsTrigger } from '../../src/publication/trigger';
+import { publicationWorkflowId } from '../../src/publication/types';
+import { captureOperationContext } from '../../src/settings/runtime';
+
+it('checks a stopped owned publication when Airtable saved success before D1', async () => {
+  const runId = crypto.randomUUID(), groupId = crypto.randomUUID(), dispatched: any[] = [];
+  const env = {...testEnv(), ...createTestEnv(), AIRTABLE_TOKEN:'test', GOOGLE_OAUTH_CLIENT_ID:'client', GOOGLE_OAUTH_CLIENT_SECRET:'secret', GOOGLE_REFRESH_TOKEN:'refresh', PUBLICATION_WORKFLOW:{get:async()=>({status:async()=>({status:'terminated'})}), create:async (item:any)=>{dispatched.push(item); return {id:item.id};}}} as any;
+  const captured = await captureOperationContext(env,null);
+  const context = {...captured,replyGroupId:groupId,settings:{...captured.settings,config:{...captured.settings.config,airtableBaseId:'base',airtablePublicationRunsTableId:'table',googleDriveFolderId:'folder',googleTemplateDocId:'template'}}};
+  const intent = {generation:1,publicationDate:'2026-11-20',thaiDate:'date',docId:'doc',docUrl:'https://docs.google.com/document/d/doc/edit',title:'title',productIds:['A-1'],generatedAt:'2026-11-20T00:00:00.000Z'};
+  await env.DB.prepare("INSERT INTO publication_jobs(publication_run_id,publication_date,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json,finalization_json) VALUES (?,?,'generating',?,'x','x',1,1,?,?)").bind(runId,intent.publicationDate,publicationWorkflowId(runId,1),JSON.stringify(context),JSON.stringify(intent)).run();
+  const requests: string[] = [];
+  const mock = vi.spyOn(globalThis,'fetch').mockImplementation(async (input,init) => {
+    const url = String(input), method = init?.method ?? 'GET'; requests.push(`${method} ${url}`);
+    if (url.includes('oauth2.googleapis.com')) return Response.json({access_token:'token',expires_in:3600});
+    if (url.includes('api.airtable.com')) {
+      const record = {id:runId,fields:{'Publication Date':intent.publicationDate,Status:'Generated',Products:[],'Google Doc URL':intent.docUrl,'Generated At':intent.generatedAt}};
+      return Response.json(url.includes(`/${runId}`) ? record : {records:[record]});
+    }
+    if (url.includes('docs.googleapis.com')) return Response.json({body:{content:[{paragraph:{elements:[{textRun:{content:'Product ID: A-1\n'}}]}}]}});
+    if (url.includes('googleapis.com/drive')) return Response.json({id:'doc',name:'title',parents:['folder'],trashed:false});
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    expect(await handleDocsTrigger(env,'line',fixedClock('2026-11-20T00:00:00Z'),intent.publicationDate,fetch,{...context,replyGroupId:'other'} as any)).toEqual({status:'busy'});
+    expect(await handleDocsTrigger(env,'line',fixedClock('2026-11-20T00:00:00Z'),intent.publicationDate,fetch,context as any)).toEqual({status:'checking',publicationRunId:runId});
+    expect(dispatched).toHaveLength(1);
+    const item = dispatched[0];
+    await PublicationWorkflow.prototype.run.call({env} as any,{payload:item.params,instanceId:item.id} as any,{do:async (_:string,cb:()=>Promise<unknown>)=>cb()} as any);
+    const claim = await env.DB.prepare('SELECT result_json FROM publication_verification_claims WHERE publication_run_id=?').bind(runId).first();
+    expect(JSON.parse(claim.result_json)).toMatchObject({outcome:'success',messages:[{text:expect.stringContaining(intent.docUrl)}]});
+    const outbox = await env.DB.prepare('SELECT group_id,result_json FROM line_result_outbox WHERE group_id=?').bind(groupId).all();
+    expect(outbox.results).toHaveLength(1);
+    expect(await env.DB.prepare('SELECT state,successful_generation FROM publication_jobs WHERE publication_run_id=?').bind(runId).first()).toEqual({state:'generating',successful_generation:0});
+    expect(requests.filter(request=>!request.includes('oauth2.googleapis.com')).every(request=>request.startsWith('GET '))).toBe(true);
+  } finally { mock.mockRestore(); }
+});
 
 it('fences verification entries and holds the current attempt without starting business work', async () => {
   const env = {...testEnv(), PUBLICATION_WORKFLOW: {get: vi.fn(async () => ({status: async () => ({status: 'terminated'})}))}} as unknown as ReturnType<typeof testEnv>, runId = crypto.randomUUID(), groupId = crypto.randomUUID();
@@ -106,7 +143,7 @@ it.each([
   } finally { fetchMock.mockRestore(); }
 });
 
-it.each(['match','conflict','unavailable','changed'])('verifies saved finalization evidence: %s', async mode => {
+it.each(['match','conflict','unavailable','changed','generating'])('verifies saved finalization evidence: %s', async mode => {
   const env = {...testEnv(), AIRTABLE_TOKEN:'test-airtable-token', GOOGLE_OAUTH_CLIENT_ID:'client', GOOGLE_OAUTH_CLIENT_SECRET:'secret', GOOGLE_REFRESH_TOKEN:'refresh', PUBLICATION_WORKFLOW:{get:vi.fn(async()=>({status:async()=>({status:'terminated'})}))}} as any;
   const runId = crypto.randomUUID(), groupId = crypto.randomUUID();
   const context = JSON.stringify({replyGroupId:groupId,settings:{config:{airtableBaseId:'original-base',airtablePublicationRunsTableId:'original-table',googleDriveFolderId:'folder',googleTemplateDocId:'template'}}});
@@ -118,7 +155,7 @@ it.each(['match','conflict','unavailable','changed'])('verifies saved finalizati
     const u = String(url);
     if (u.includes('oauth2.googleapis.com')) return Response.json({access_token:'token',expires_in:3600});
     expect(init?.method ?? 'GET').toBe('GET');
-    if (u.includes('api.airtable.com')) { if (mode === 'unavailable') throw new Error('offline'); if (mode === 'changed') await env.DB.prepare('UPDATE publication_jobs SET finalization_json=? WHERE publication_run_id=?').bind(JSON.stringify({...intent,title:'changed'}),runId).run(); expect(u).toContain('/original-base/original-table/'); expect((init?.headers as any).Authorization).toBe('Bearer test-airtable-token'); return Response.json({id:runId,fields:{Status:'Generated','Google Doc URL':mode === 'conflict' ? 'https://example.com' : intent.docUrl,'Generated At':intent.generatedAt}}); }
+    if (u.includes('api.airtable.com')) { if (mode === 'unavailable') throw new Error('offline'); if (mode === 'changed') await env.DB.prepare('UPDATE publication_jobs SET finalization_json=? WHERE publication_run_id=?').bind(JSON.stringify({...intent,title:'changed'}),runId).run(); expect(u).toContain('/original-base/original-table/'); expect((init?.headers as any).Authorization).toBe('Bearer test-airtable-token'); return Response.json({id:runId,fields:mode === 'generating' ? {Status:'Generating'} : {Status:'Generated','Google Doc URL':mode === 'conflict' ? 'https://example.com' : intent.docUrl,'Generated At':intent.generatedAt}}); }
     if (u.includes('docs.googleapis.com')) return Response.json({body:{content:[{paragraph:{elements:[{textRun:{content:'Product ID: A-1\n'}}]}}]}});
     if (u.includes('googleapis.com/drive')) return Response.json({id:'doc',name:'title',parents:['folder'],trashed:false});
     throw new Error(`unexpected ${u}`);

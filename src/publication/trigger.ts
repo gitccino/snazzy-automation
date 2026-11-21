@@ -104,13 +104,16 @@ export async function handleDocsTrigger(
     publicationDate ?? todayBangkokDate(clock),
   );
   if (!run || (run.status !== "Ready" && run.status !== "Failed")) {
-    if (run && trigger === "line" && run.status === "Generated")
+    const job = run && trigger === "line" && (run.status === "Generated" || run.status === "Generating")
+      ? await readPublicationJob(env.DB, run.airtableRunId) : null;
+    const needsVerification = run?.status === "Generating" ||
+      (run?.status === "Generated" && job?.state !== "succeeded" && !!job?.finalizationJson);
+    if (run && trigger === "line" && run.status === "Generated" && !needsVerification)
       return {
         status: "already_generated",
         publicationRunId: run.airtableRunId,
       };
-    if (run && trigger === "line" && run.status === "Generating") {
-      const job = await readPublicationJob(env.DB, run.airtableRunId);
+    if (run && trigger === "line" && needsVerification) {
       const owner = job && await readPublicationContext(env.DB, run.airtableRunId);
       if (!job || !owner?.replyGroupId || owner.replyGroupId !== trustedGroupId)
         return { status: "busy" };

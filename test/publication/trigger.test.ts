@@ -498,6 +498,23 @@ describe("handleDocsTrigger", () => {
     },
   );
 
+  it('checks an owned unfinished job even when Airtable already says Generated', async () => {
+    mockRun('Generated');
+    const h = makeTriggerEnv('terminated');
+    const { captureOperationContext } = await import('../../src/settings/runtime');
+    const { savePublicationAttemptContext } = await import('../../src/db/execution-context-repository');
+    const context = { ...await captureOperationContext(h.env, null), replyGroupId: 'owner' };
+    await acquireOrResumeJob(h.env.DB, clock, 'rec-run-1', 'publication-rec-run-1');
+    await savePublicationAttemptContext(h.env.DB, 'rec-run-1', 1, context);
+    await h.env.DB.prepare("UPDATE publication_jobs SET finalization_json='{}' WHERE publication_run_id='rec-run-1'").run();
+    expect(await handleDocsTrigger(h.env, 'line', clock, undefined, fetch, {...context, replyGroupId:'other'})).toEqual({status:'busy'});
+    expect(await handleDocsTrigger(h.env, 'line', clock, undefined, fetch, context)).toEqual({status:'checking', publicationRunId:'rec-run-1'});
+    expect(h.create).toHaveBeenCalledOnce();
+    expect(h.create.mock.calls[0]![0].params).toMatchObject({kind:'verification', groupId:'owner'});
+    expect(h.restart).not.toHaveBeenCalled();
+    await h.env.DB.exec("DELETE FROM publication_verification_claims WHERE publication_run_id='rec-run-1'");
+  });
+
   it('dispatches a saved claim when its verifier was never created', async () => {
     mockRun("Generating");
     const h = makeTriggerEnv("errored");
