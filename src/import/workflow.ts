@@ -312,6 +312,8 @@ export class ImportWorkflow extends WorkflowEntrypoint<
     const notificationDate=await step.do('terminal-display-date',()=>Promise.resolve(bangkokDateTimeThai(clock)));
     const enqueue=async(outcome:'success'|'partial'|'failed'|'unconfirmed',messages:import('../line/reply-types').LineReplyMessage[])=>{
       if(!context.replyGroupId)return;
+      const legacy = await this.env.DB.prepare("SELECT 1 FROM line_result_outbox WHERE result_key=? AND group_id=? AND json_extract(result_json, '$.outcome')='unconfirmed'").bind(JSON.stringify(['import',payload.importRunId,1,1,'terminal']),context.replyGroupId).first();
+      if (legacy) return;
       await outbox.enqueueResult({groupId:context.replyGroupId,resultKey:JSON.stringify(['import',payload.importRunId,1,1,'interrupted']),result:{schemaVersion:1,kind:'import',runId:payload.importRunId,generation:1,notificationCycle:1,outcome,messages}});
     };
     const resultKey = JSON.stringify(['import',payload.importRunId,1,1,'terminal']);
@@ -352,8 +354,9 @@ export class ImportWorkflow extends WorkflowEntrypoint<
         notify: async (result, orphanRange) => {
           if (!context.replyGroupId) return;
           // Replays of the old finalization step still need to persist their summary.
-          const existing = await this.env.DB.prepare('SELECT 1 FROM line_result_outbox WHERE result_key=?').bind(resultKey).first();
-          if (!existing) await outbox.enqueueResult({ groupId: context.replyGroupId, resultKey, result: summaryResult(result, orphanRange) });
+          const existing = await this.env.DB.prepare('SELECT result_json FROM line_result_outbox WHERE result_key=? AND group_id=?').bind(resultKey, context.replyGroupId).first<{result_json:string}>();
+          const summaryKey = existing && JSON.parse(existing.result_json).outcome === 'unconfirmed' ? JSON.stringify(['import',payload.importRunId,1,1,'terminal-summary']) : resultKey;
+          if (!existing || summaryKey !== resultKey) await outbox.enqueueResult({ groupId: context.replyGroupId, resultKey: summaryKey, result: summaryResult(result, orphanRange) });
         },
         notifyFailure: async outcome => {
           const committed = await this.env.DB.prepare("SELECT 1 FROM import_runs WHERE id=? AND status IN ('completed','completed_with_failures')").bind(payload.importRunId).first();

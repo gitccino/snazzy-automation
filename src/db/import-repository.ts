@@ -233,7 +233,9 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
         validateReplyMessages(value.messages);
         if (!notice.groupId.trim() || value.schemaVersion !== 1 || value.kind !== "import" || value.runId !== input.id || value.generation !== 1 || value.notificationCycle !== 1 || value.outcome !== (input.status === "completed" ? "success" : "partial")) throw new Error("import_invalid_result");
       }
-      const key = JSON.stringify(["import", input.id, 1, 1, "terminal"]);
+      const terminalKey = JSON.stringify(["import", input.id, 1, 1, "terminal"]);
+      const legacy = notice && await db.prepare("SELECT 1 FROM line_result_outbox WHERE result_key=? AND group_id=? AND json_extract(result_json, '$.outcome')='unconfirmed'").bind(terminalKey, notice.groupId).first();
+      const key = legacy ? JSON.stringify(["import", input.id, 1, 1, "terminal-summary"]) : terminalKey;
       const json = notice ? JSON.stringify(notice.result) : null;
       const results = await db.batch([
         db.prepare(

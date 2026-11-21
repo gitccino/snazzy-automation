@@ -354,7 +354,8 @@ describe("import acceptance", () => {
   });
 
 
-  it.each([false, true])("delivers a mixed upload summary with interruption: %s", async (interrupt) => {
+  it.each(["none", "recording", "legacy", "finalization"])("delivers a mixed upload summary with interruption: %s", async (mode) => {
+    const interrupt = mode !== "none";
     const id = crypto.randomUUID(), group = `Cimport-${id}`, other = `Cother-${id}`, token = `token-${id}`;
     const album = await deriveSourceAlbumId(token);
     const harness = await buildHarness(album, [...productGroupOf(9, 1), { id: "ignored", markerKind: "ignore_start" }, { id: "ignored-photo" }, ...productGroupOf(9, 2), ...productGroupOf(3, 3)], { idPrefix: id, createProduct: async payload => { if (payload.productId === "A-502") throw new OperationalError("airtable_response_lost", "lost", true); return { recordId: `rec-${payload.productId}` }; } });
@@ -374,7 +375,7 @@ describe("import acceptance", () => {
     const step = { async do(name: string, options: any, callback?: any) {
       if (completed.has(name)) return completed.get(name);
       if (failed.has(name)) throw failed.get(name);
-      if (interrupt && !interrupted && name.startsWith("record-failed-group-")) { interrupted = true; throw new Error("recording interrupted"); }
+      if (interrupt && !interrupted && (mode === "finalization" ? name === "finalize-checkpoint" : name.startsWith("record-failed-group-"))) { interrupted = true; throw new Error("recording interrupted"); }
       try {
         const result = await underlyingStep.do(name, options, callback);
         completed.set(name, result);
@@ -409,6 +410,18 @@ describe("import acceptance", () => {
       if (interrupt) {
         await expect(runImport()).rejects.toThrow("recording interrupted");
         expect(await local.DB.prepare("SELECT COUNT(*) AS count FROM line_result_outbox WHERE group_id=?").bind(group).first()).toEqual({ count: 1 });
+        if (mode === "finalization") {
+          expect(await local.DB.prepare("SELECT last_position FROM import_checkpoints WHERE source_album_id=?").bind(album).first()).toBeNull();
+          expect(await groupStates(business[0].params.importRunId)).toHaveLength(3);
+        }
+        if (mode === "legacy") {
+          const runId = business[0].params.importRunId;
+          await local.DB.prepare("UPDATE line_result_outbox SET result_key=? WHERE group_id=?").bind(JSON.stringify(["import", runId, 1, 1, "terminal"]), group).run();
+          completed.delete("persist-import-failure");
+          interrupted = false;
+          await expect(runImport()).rejects.toThrow("recording interrupted");
+          expect(await local.DB.prepare("SELECT COUNT(*) AS count FROM line_result_outbox WHERE group_id=?").bind(group).first()).toEqual({ count: 1 });
+        }
       }
       const result = await runImport() as ImportRunResult;
       await runImport();
@@ -423,6 +436,10 @@ describe("import acceptance", () => {
         { product_id: null, state: "failed", attempt_count: 0, failure_reason: "insufficient_product_photos" },
       ]);
       expect(harness.created.size).toBe(1);
+      const checkpoint = await local.DB.prepare("SELECT last_position FROM import_checkpoints WHERE source_album_id=?").bind(album).first<{last_position:number}>();
+      expect(checkpoint?.last_position).toBeGreaterThanOrEqual(0);
+      const unresolved = await local.DB.prepare("SELECT group_hash FROM product_groups WHERE id=?").bind(result.failedGroups[0]!.groupId).first<{group_hash:string}>();
+      expect(await harness.deps.repo.findGroupByHash(unresolved!.group_hash)).toMatchObject({ state: "failed", productId: "A-502" });
       expect(createProduct).toHaveBeenCalledTimes(2);
       expect((await auditActions(business[0].params.importRunId)).filter(action => action === "product_id_allocated")).toHaveLength(2);
       expect(await local.DB.prepare("SELECT status FROM import_runs WHERE id=?").bind(business[0].params.importRunId).first()).toEqual({ status: "completed_with_failures" });
