@@ -13,7 +13,9 @@ import {
   preparePublicationOutputs, type PublicationServiceDeps, type ValidatedPublication,
 } from "../../src/publication/service";
 import { publicationWorkflowId, type PublicationProduct, type PublicationRunStatus } from "../../src/publication/types";
-import { runPublicationWorkflow } from "../../src/publication/workflow";
+import { PublicationWorkflow, runPublicationWorkflow } from "../../src/publication/workflow";
+import { handleLineRoute } from "../../src/routes/line";
+import { LineCommandWorkflow } from "../../src/line/command-workflow";
 import { handleDocsTrigger } from "../../src/publication/trigger";
 import { handleDocsRoute } from "../../src/routes/docs";
 import { createTestEnv, testEnv } from "../helpers/env";
@@ -302,6 +304,60 @@ describe("publication acceptance", () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network forbidden in acceptance tests"));
   });
   afterEach(() => vi.restoreAllMocks());
+
+  it("delivers the generated publication after a lost signed start reply", async () => {
+    const fixture = publicationFixture();
+    const id = crypto.randomUUID(), group = "CtestGroup", other = "Cother";
+    const commands: any[] = [], business: any[] = [], replies: any[] = [];
+    const local = { ...env, ...configEnv, LINE_CHANNEL_SECRET: "secret", IMAGES_BUCKET: fixture.image.bucket, IMAGES: fixture.image.images,
+      LINE_COMMAND_WORKFLOW: { createBatch: async (items: any[]) => { commands.push(...items); return []; } },
+      PUBLICATION_WORKFLOW: { create: async (item: any) => { business.push(item); return { id: item.id }; }, get: async () => { if (!business.length) throw new Error("instance.not_found"); return { status: async () => ({ status: "running" }) }; } },
+    } as unknown as Env;
+    const step = { do: async (_name: string, a: any, b?: any) => (b ?? a)() } as unknown as WorkflowStep;
+    vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+      const request = new Request(input, init), url = new URL(request.url);
+      if (url.pathname.includes("/member/")) return Response.json({ userId: "U1", displayName: "Tester" });
+      if (url.pathname.endsWith("/message/reply")) {
+        replies.push(await request.json());
+        if (replies.length === 1) throw new Error("reply accepted but response lost");
+        return Response.json({});
+      }
+      if (url.hostname === "api.anthropic.com") return Response.json(url.pathname.endsWith("count_tokens") ? { input_tokens: 12000 } : toolResponse([{ productId: "A-1001", drafts: drafts("A-1001") }]));
+      return fixture.deps.fetcher(request);
+    });
+    const admit = async (eventId: string, text: string, groupId = group) => {
+      const body = JSON.stringify({ events: [{ type: "message", webhookEventId: eventId, replyToken: `token-${eventId}`, source: { type: "group", groupId, userId: "U1" }, message: { type: "text", id: `m-${eventId}`, text } }] });
+      const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const signature = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)))));
+      expect((await handleLineRoute(new Request("https://app/line/webhook", { method: "POST", headers: { "x-line-signature": signature }, body }), local, {} as ExecutionContext)).status).toBe(200);
+    };
+    const runCommand = (item: any) => LineCommandWorkflow.prototype.run.call({ env: local } as unknown as LineCommandWorkflow, { payload: item.params, instanceId: item.id } as any, step);
+    await admit(id, "/docs 2/9/2026");
+    expect(await runCommand(commands[0])).toEqual({ status: "uncertain" });
+    await admit(id, "/docs 2/9/2026");
+    expect(await runCommand(commands[1])).toEqual({ status: "duplicate" });
+    expect(business).toHaveLength(1);
+    expect(await local.DB.prepare("SELECT phase FROM line_reply_dispatches WHERE event_id=?").bind(id).first()).toEqual({ phase: "uncertain" });
+    const result = await PublicationWorkflow.prototype.run.call({ env: local } as unknown as PublicationWorkflow, { payload: business[0].params, instanceId: business[0].id } as any, step);
+    expect(result?.googleDocUrl).toContain("temp-doc-1");
+    expect(fixture.state.docs.size).toBe(1);
+    expect(fixture.calls.filter(call => new URL(call.url).pathname.endsWith("/copy"))).toHaveLength(1);
+    const otherConfig = JSON.parse(configEnv.APP_CONFIG_JSON); otherConfig.LINE_ALLOWED_GROUP_ID = other;
+    local.APP_CONFIG_JSON = JSON.stringify(otherConfig);
+    await admit(crypto.randomUUID(), "hello", other);
+    await runCommand(commands[2]);
+    local.APP_CONFIG_JSON = configEnv.APP_CONFIG_JSON;
+    expect(replies).toHaveLength(1);
+    const fresh = crypto.randomUUID();
+    await admit(fresh, "hello");
+    expect(await runCommand(commands[3])).toEqual({ status: "accepted" });
+    expect(replies).toHaveLength(2);
+    expect(JSON.stringify(replies[1])).toContain(result!.googleDocUrl);
+    expect(replies[1].replyToken).toBe(`token-${fresh}`);
+    await runCommand(commands[3]);
+    expect(replies).toHaveLength(2);
+    expect(business).toHaveLength(1);
+  });
 
   it.each([false, true])("preserves old Docs through replacement and saved-finalization retry (lost response: %s)", async (loseResponse) => {
     const fixture = publicationFixture();
