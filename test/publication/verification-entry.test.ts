@@ -201,3 +201,29 @@ it('does not access Drive when replaying an acknowledged cleanup receipt', async
     expect(mock).not.toHaveBeenCalled();
   } finally { mock.mockRestore(); }
 });
+
+it('repairs the original Airtable row after acknowledged cleanup and records a Thai correction', async () => {
+  const env = {...testEnv(), PUBLICATION_WORKFLOW:{get:async()=>({status:async()=>({status:'terminated'})})}} as any;
+  const runId = crypto.randomUUID(), groupId = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:groupId,settings:{config:{airtableBaseId:'original-base',airtablePublicationRunsTableId:'original-table'}}});
+  await env.DB.prepare("INSERT INTO publication_jobs(publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json,temp_doc_id) VALUES (?,'failed','original','x','x',1,1,?,'doc')").bind(runId,context).run();
+  const claim = await claimPublicationVerification(env.DB,{runId,generation:1,notificationCycle:1,groupId});
+  if (claim.status !== 'claimed') throw new Error('missing claim');
+  await env.DB.prepare("INSERT INTO publication_cleanup_intents (publication_run_id,generation,notification_cycle,origin_workflow_id,context_json,doc_id,saved_temp_doc,dispatch_verifier_id,deletion_acknowledged) VALUES (?,1,1,'original',?,'doc',1,?,1)").bind(runId,context,claim.verifierId).run();
+  await env.DB.prepare("INSERT INTO workflow_feedback(kind,run_id,generation,notification_cycle,group_id,context_json,stage,failure_code) VALUES ('publication',?,1,1,?,?,'prepare outputs','anthropic_failed')").bind(runId,groupId,context).run();
+  await env.DB.prepare("INSERT INTO workflow_feedback_results(kind,run_id,generation,notification_cycle,revision,result_key,outcome_json,group_id) VALUES ('publication',?,1,1,0,?,?,?)").bind(runId,runId,JSON.stringify({stage:'prepare outputs',failureCode:'anthropic_failed',outcome:'unconfirmed'}),groupId).run();
+  let status = 'Generating', patches = 0;
+  const mock = vi.spyOn(globalThis,'fetch').mockImplementation(async (url,init) => {
+    expect(String(url)).toBe(`https://api.airtable.com/v0/original-base/original-table/${runId}`);
+    if (init?.method === 'PATCH') { patches++; status = 'Failed'; expect(JSON.parse(String(init.body))).toEqual({fields:{Status:'Failed'}}); }
+    return Response.json({id:runId,fields:{Status:status}});
+  });
+  try {
+    const payload = {kind:'verification',publicationRunId:runId,generation:1,notificationCycle:1,groupId,verifierId:claim.verifierId};
+    const run = () => PublicationWorkflow.prototype.run.call({env} as any,{payload,instanceId:claim.verifierId} as any,{do:async (_:string,cb:()=>Promise<unknown>)=>cb()} as any);
+    await run(); await run();
+    expect(patches).toBe(1);
+    const row = await env.DB.prepare('SELECT outcome_json FROM workflow_feedback_results WHERE run_id=? AND revision=1').bind(runId).first();
+    expect(JSON.parse(row.outcome_json)).toMatchObject({outcome:'failed',result:{messages:[{text:expect.stringContaining('ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed')}]}});
+  } finally { mock.mockRestore(); }
+});

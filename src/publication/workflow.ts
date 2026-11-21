@@ -17,7 +17,7 @@ import type { OperationContext } from "../settings/schema";
 import type { Env } from "../env";
 import { createAssetStore } from "../import/asset-store";
 import { createLineReplyRepository } from '../db/line-reply-repository';
-import { readPublicationJob, completePublicationVerification, readPreGoogleFailure, readFinalizationCandidate, readPublicationCleanupCandidate, readPublicationCleanupReceipt, claimPublicationCleanupDispatch, recordPublicationCleanupReceipt } from '../db/publication-repository';
+import { readPublicationJob, completePublicationVerification, readPreGoogleFailure, readFinalizationCandidate, readPublicationCleanupCandidate, readPublicationCleanupReceipt, readPublicationCleanupFailure, claimPublicationCleanupDispatch, recordPublicationCleanupReceipt } from '../db/publication-repository';
 import { createWorkflowFeedbackRepository } from '../db/workflow-feedback';
 import { docsUnconfirmedCard } from '../line/docs-summary-card';
 import type { TerminalResultV1 } from '../line/reply-types';
@@ -367,10 +367,15 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
           } catch { /* Missing or conflicting evidence remains unconfirmed. */ }
         }
         const preGoogleFailure = await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId);
+        const cleanupFailure = await readPublicationCleanupFailure(this.env.DB, attempt, payload.verifierId);
+        const failure = preGoogleFailure ?? cleanupFailure;
+        const sameFailure = async () => preGoogleFailure
+          ? !!await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId)
+          : JSON.stringify(await readPublicationCleanupFailure(this.env.DB, attempt, payload.verifierId)) === JSON.stringify(cleanupFailure);
         let confirmedFailed = false;
-        if (preGoogleFailure) {
+        if (failure) {
           try {
-            const context = JSON.parse(preGoogleFailure.context_json) as OperationContext;
+            const context = JSON.parse(failure.context_json) as OperationContext;
             const config = context.settings.config;
             const url = `https://api.airtable.com/v0/${encodeURIComponent(config.airtableBaseId)}/${encodeURIComponent(config.airtablePublicationRunsTableId)}/${encodeURIComponent(attempt.runId)}`;
             const headers = {Authorization:`Bearer ${this.env.AIRTABLE_TOKEN}`};
@@ -381,20 +386,20 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
             };
             const eligibleRecord = (record: Awaited<ReturnType<typeof read>>, status: string) => record.id === attempt.runId && record.fields.Status === status && !record.fields['Google Doc URL'] && !record.fields['Generated At'];
             let record = await read();
-            if (eligibleRecord(record, 'Generating') && await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId)) {
+            if (eligibleRecord(record, 'Generating') && await sameFailure()) {
               record = await read();
-              if (eligibleRecord(record, 'Generating') && await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId)) {
+              if (eligibleRecord(record, 'Generating') && await sameFailure()) {
                 // Airtable has no conditional PATCH: a manual edit between this read and write can still be overwritten.
                 try { await fetch(url, {method:'PATCH', headers:{...headers, 'Content-Type':'application/json'}, body:JSON.stringify({fields:{Status:'Failed'}})}); } catch { /* The write may have succeeded despite a lost response. */ }
                 record = await read();
               }
             }
-            confirmedFailed = record.id === attempt.runId && record.fields.Status === 'Failed' && !record.fields['Google Doc URL'] && !record.fields['Generated At'] && !!await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId);
+            confirmedFailed = record.id === attempt.runId && record.fields.Status === 'Failed' && !record.fields['Google Doc URL'] && !record.fields['Generated At'] && await sameFailure();
           } catch { /* An unavailable or inconsistent record cannot confirm the outcome. */ }
         }
         await completePublicationVerification(this.env.DB, attempt, payload.verifierId, {
-          originWorkflowId:claim.origin_workflow_id, contextJson:claim.context_json, candidate: candidate ?? undefined,
-          result:{schemaVersion:1, kind:'publication', runId:attempt.runId, generation:attempt.generation, notificationCycle:attempt.notificationCycle, outcome:confirmedSuccess ? 'success' : confirmedFailed ? 'failed' : 'unconfirmed', messages:[{type:'text', text:confirmedSuccess ? `ตรวจสอบแล้ว สร้างเอกสารสำเร็จ\n${candidate!.intent.docUrl}` : confirmedFailed ? `ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed และไม่มีเอกสารที่บันทึกไว้\n${attempt.runId}` : preGoogleFailure ? `⚠️ กรุณาตรวจสอบสถานะงานเดิมใน Airtable ก่อนส่ง /docs ซ้ำ\n${attempt.runId}` : `⚠️ ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${attempt.runId}`}]},
+          originWorkflowId:claim.origin_workflow_id, contextJson:claim.context_json, candidate: candidate ?? undefined, cleanupFailure: confirmedFailed && !preGoogleFailure ? cleanupFailure ?? undefined : undefined,
+          result:{schemaVersion:1, kind:'publication', runId:attempt.runId, generation:attempt.generation, notificationCycle:attempt.notificationCycle, outcome:confirmedSuccess ? 'success' : confirmedFailed ? 'failed' : 'unconfirmed', messages:[{type:'text', text:confirmedSuccess ? `ตรวจสอบแล้ว สร้างเอกสารสำเร็จ\n${candidate!.intent.docUrl}` : confirmedFailed ? `ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed และไม่มีเอกสารที่บันทึกไว้\n${attempt.runId}` : failure ? `⚠️ กรุณาตรวจสอบสถานะงานเดิมใน Airtable ก่อนส่ง /docs ซ้ำ\n${attempt.runId}` : `⚠️ ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${attempt.runId}`}]},
         });
       });
       return null;
