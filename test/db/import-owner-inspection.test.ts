@@ -1,0 +1,30 @@
+import { expect, it } from 'vitest';
+import { testEnv } from '../helpers/env';
+import { inspectImportGroup } from '../../src/db/import-owner-inspection';
+
+it('inspects only the exact owned run and current group without writing', async () => {
+  const db = testEnv().DB, run = crypto.randomUUID(), other = crypto.randomUUID(), group = crypto.randomUUID(), album = crypto.randomUUID();
+  const context = JSON.stringify({replyGroupId:'owner', settings:{config:{airtableBaseId:'base', airtableProductsTableId:'table', token:'secret'}}});
+  await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json) VALUES(?,?,'line','completed_with_failures','2026-11-20T00:00:00Z',?)").bind(run,album,context).run();
+  await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json) VALUES(?,?,'line','completed','2026-11-20T00:00:00Z',?)").bind(other,album,context).run();
+  await db.prepare("INSERT INTO product_groups(id,import_run_id,ordinal,group_hash,state,first_photo_id,last_photo_id,created_at,updated_at) VALUES(?,?,0,?,'failed','a','b','now','now')").bind(group,run,crypto.randomUUID()).run();
+  await db.prepare("INSERT INTO product_group_image_members VALUES(?,0,'a','original/a'),(?,1,'b',NULL)").bind(group,group).run();
+  const snapshot = async () => Promise.all(['import_runs', 'product_groups', 'product_group_image_members', 'import_checkpoints'].map(table => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all().then(result => result.results)));
+  const beforeTables = await snapshot();
+  const before = await db.prepare('SELECT * FROM product_groups WHERE id=?').bind(group).first();
+  const inspect = (r = run, owner = 'owner', g = group) => inspectImportGroup(db, r, owner, g);
+  const result = await inspect();
+  expect(result).toMatchObject({runId:run, sourceAlbumId:album, airtableBaseId:'base', airtableTableId:'table', group:{id:group,state:'failed'}, originals:[{ordinal:0,applePhotoId:'a',r2Key:'original/a'},{ordinal:1,applePhotoId:'b',r2Key:null}]});
+  expect(JSON.stringify(result)).not.toContain('secret');
+  expect(await inspect(run,'foreign')).toBeNull();
+  expect(await inspect(other)).toBeNull();
+  expect(await inspect(run,'owner',crypto.randomUUID())).toBeNull();
+  expect(await db.prepare('SELECT * FROM product_groups WHERE id=?').bind(group).first()).toEqual(before);
+  expect(await snapshot()).toEqual(beforeTables);
+  await db.prepare("UPDATE product_groups SET import_run_id=? WHERE id=?").bind(other,group).run();
+  expect(await inspect()).toBeNull();
+  await db.prepare("UPDATE import_runs SET settings_context_json='{' WHERE id=?").bind(other).run();
+  expect(await inspect(other)).toBeNull();
+  await db.prepare("UPDATE import_runs SET settings_context_json=? WHERE id=?").bind(JSON.stringify({replyGroupId:'owner',settings:{config:{airtableBaseId:'https://private',airtableProductsTableId:'table'}}}),other).run();
+  expect(await inspect(other)).toBeNull();
+});
