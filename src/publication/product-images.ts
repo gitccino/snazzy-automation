@@ -1,5 +1,5 @@
 import jpeg from "jpeg-js";
-import { z } from "zod";
+import { imageFailureGuidance, parseImageDiagnostic, type ImageDiagnostic } from "./image-diagnostic";
 import { publicationWorkflowId } from "./types";
 import type { WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
@@ -241,24 +241,14 @@ export async function replaceProductImagePreviews(deps: ImagePreparationDeps, co
   return preparedProduct(deps, product);
 }
 
-const reasons: Record<string, string> = {
-  product_image_source_changed: "รูปใน Airtable เปลี่ยนระหว่างเตรียม กรุณาตรวจสอบรูปแล้วลอง /docs อีกครั้ง",
-  product_image_unresolved_preview: "รูปตัวอย่างยังจับคู่ต้นฉบับไม่ได้ กรุณาคืนรูปต้นฉบับใน Airtable แล้วลอง /docs อีกครั้ง",
-  product_image_original_missing: "ไม่พบรูปต้นฉบับใน R2 กรุณาตรวจสอบรูปสินค้า",
-  product_image_too_large: "ไฟล์รูปใหญ่เกิน 20 MB กรุณาใช้ JPEG ขนาดไม่เกิน 20 MB",
-  product_image_format_invalid: "ไฟล์รูปต้องเป็น JPEG",
-  product_image_preview_invalid: "สร้างรูปตัวอย่างไม่ได้ กรุณาตรวจสอบไฟล์ JPEG",
-  product_image_busy: "มีงานอื่นกำลังเตรียมรูปสินค้า กรุณาลอง /docs อีกครั้ง",
-  product_image_owner_unknown: "ตรวจสอบสถานะงานเตรียมรูปไม่ได้ กรุณาลอง /docs อีกครั้ง",
-};
-
 export class ProductImagePreparationFailure extends Error {
-  constructor(reason: string) { super(reason); this.name = "ProductImagePreparationFailure"; }
+  constructor(reason: string, readonly diagnostic?: ImageDiagnostic) { super(reason); this.name = "ProductImagePreparationFailure"; }
 }
 
 export async function preparePublicationImages(deps: ImagePreparationDeps, validated: RawValidatedPublication, workflowId: string, step: WorkflowStep): Promise<ValidatedPublication> {
   const retry = { retries: { limit: deps.config.publicationRetryLimit, delay: "10 seconds" as const, backoff: "exponential" as const }, timeout: "5 minutes" as const };
   const products: PublicationProduct[] = [];
+  let diagnostic: ImageDiagnostic | undefined;
   let safeFailure = "เตรียมรูปสินค้าไม่สำเร็จ กรุณาตรวจสอบ Airtable แล้วลอง /docs อีกครั้ง";
   try {
     for (const validatedProduct of validated.run.products as Array<RawPublicationProduct | PublicationProduct>) {
@@ -285,12 +275,13 @@ export async function preparePublicationImages(deps: ImagePreparationDeps, valid
         catch (failure) {
           const code = failure instanceof OperationalError ? failure.code : "product_image_preparation_failed";
           const retryable = failure instanceof OperationalError ? failure.retryable : true;
-          const safe = `${product.productId}${position === undefined ? "" : `: รูปที่ ${position + 1}`} — ${reasons[code] ?? "เตรียมรูปไม่สำเร็จ กรุณาตรวจสอบ Airtable แล้วลอง /docs อีกครั้ง"}`;
+          diagnostic = parseImageDiagnostic({ productId: product.productId, position: position ?? null, code });
+          const safe = imageFailureGuidance(diagnostic) ?? safeFailure;
           safeFailure = safe;
           try {
             await deps.db.prepare(`UPDATE publication_jobs SET image_error_json = ? WHERE publication_run_id = ? AND generation = ?
               AND correlation_id = ? AND state NOT IN ('succeeded','failed')`)
-              .bind(JSON.stringify({ productId: product.productId, position: position ?? null, code }), validated.run.airtableRunId,
+              .bind(diagnostic ? JSON.stringify(diagnostic) : null, validated.run.airtableRunId,
                 validated.generation ?? 1, publicationWorkflowId(validated.run.airtableRunId, validated.generation ?? 1)).run();
           } catch { /* Keep a diagnostic storage failure from replacing the original stage error. */ }
           if (context && !retryable) {
@@ -314,10 +305,11 @@ export async function preparePublicationImages(deps: ImagePreparationDeps, valid
       const stored = await deps.db.prepare("SELECT image_error_json FROM publication_jobs WHERE publication_run_id = ? AND generation = ? AND correlation_id = ?")
         .bind(validated.run.airtableRunId, validated.generation ?? 1, publicationWorkflowId(validated.run.airtableRunId, validated.generation ?? 1)).first<{ image_error_json: string | null }>();
       if (stored?.image_error_json) {
-        const diagnostic = z.object({ productId: z.string().regex(/^A-\d+$/), position: z.number().int().nonnegative().nullable(), code: z.string() }).parse(JSON.parse(stored.image_error_json));
-        safeFailure = `${diagnostic.productId}${diagnostic.position === null ? "" : `: รูปที่ ${diagnostic.position + 1}`} — ${reasons[diagnostic.code] ?? "เตรียมรูปไม่สำเร็จ กรุณาตรวจสอบ Airtable แล้วลอง /docs อีกครั้ง"}`;
+        const saved: unknown = JSON.parse(stored.image_error_json);
+        const guidance = imageFailureGuidance(saved);
+        if (guidance) { diagnostic = parseImageDiagnostic(saved); safeFailure = guidance; }
       }
     } catch { /* The locally constructed fallback remains safe on diagnostic read failure. */ }
-    throw new ProductImagePreparationFailure(safeFailure);
+    throw new ProductImagePreparationFailure(safeFailure, diagnostic);
   }
 }

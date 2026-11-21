@@ -100,7 +100,7 @@ it('repairs a committed publication intent using its original display facts',asy
  await db.prepare(`INSERT INTO publication_jobs(publication_run_id,publication_date,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,?,'generating',?,'x','x',2,1,?)`).bind(runId,'2026-11-19',runId,JSON.stringify({replyGroupId:groupId})).run();
  const {createWorkflowFeedbackRepository}=await import('../../src/db/workflow-feedback');
  const feedback=createWorkflowFeedbackRepository(db), resultKey=crypto.randomUUID();
- await feedback.commitOutcome({kind:'publication',runId,generation:2,notificationCycle:1,groupId},{stage:'prepare outputs',action:'verify',outcome:'unconfirmed',resultKey,references:{thaiDate:'19 พฤศจิกายน 2569',airtableRunUrl:`https://airtable.com/oldBase/oldTable/${runId}`,publicBaseUrl:'https://old-worker.test'}});
+ await feedback.commitOutcome({kind:'publication',runId,generation:2,notificationCycle:1,groupId},{stage:'prepare product images',failureCode:'product_image_too_large',action:'verify',outcome:'unconfirmed',resultKey,references:{imageDiagnostic:{productId:'A-1001',position:1,code:'product_image_too_large'},thaiDate:'19 พฤศจิกายน 2569',airtableRunUrl:`https://airtable.com/oldBase/oldTable/${runId}`,publicBaseUrl:'https://old-worker.test'}});
  const requests:any[]=[]; const repo=createLineReplyRepository(db,clock);
  const line=createLineClient({channelAccessToken:'x',fetch:async(_url,init)=>{requests.push(JSON.parse(String(init?.body)));return Response.json({});}});
  const input={eventId:crypto.randomUUID(),groupId,workflowId:'wf',receivedAt:clock.now().toISOString(),replyToken:'fresh',commandReply:null,drainQueue:true,publicBaseUrl:'https://new-worker.test'};
@@ -108,6 +108,7 @@ it('repairs a committed publication intent using its original display facts',asy
  await deliverEventReply(input,deps);
  await deliverEventReply({...input,eventId:crypto.randomUUID()},deps);
  expect(requests).toHaveLength(1); expect(JSON.stringify(requests)).toContain(`https://airtable.com/oldBase/oldTable/${runId}`); expect(JSON.stringify(requests)).toContain('19 พฤศจิกายน 2569');
+ expect(JSON.stringify(requests)).toContain('A-1001'); expect(JSON.stringify(requests)).toContain('รูปที่ 2'); expect(JSON.stringify(requests)).toContain('20 MB'); expect(JSON.stringify(requests)).toContain('ยังยืนยัน');
  expect(await feedback.pendingByGroup(groupId,10)).toHaveLength(0);
  expect(await db.prepare('SELECT group_id FROM line_reply_dispatches WHERE event_id=?').bind(input.eventId).first()).toEqual({group_id:groupId});
 });

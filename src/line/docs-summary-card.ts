@@ -1,3 +1,4 @@
+import { imageFailureGuidance } from "../publication/image-diagnostic";
 import type { SearchCardReply } from "./search-card";
 import { buildPublicationSuccessMessage, buildPublicationValidationFailureMessage, buildPublicationWorkflowFailureMessage } from "./messages";
 
@@ -63,7 +64,11 @@ export function docsWorkflowFailureCard(input: Parameters<typeof buildPublicatio
   ) };
 }
 
-export function publicationFailureGuidance(stage: string, code?: string | null): string {
+export function publicationFailureGuidance(stage: string, code?: string | null, imageDiagnostic?: unknown): string {
+  if (stage === "prepare product images") {
+    const guidance = imageFailureGuidance(imageDiagnostic);
+    if (guidance) return guidance;
+  }
   if (code === 'anthropic_auth_failed') return 'เชื่อมต่อ Claude ไม่สำเร็จ ให้ผู้ดูแลตรวจสอบการเชื่อมต่อ Claude';
   if (code === 'anthropic_model_failed') return 'ไม่พบหรือเข้าถึงโมเดล Claude ไม่ได้ ให้ผู้ดูแลตรวจสอบโมเดลที่ตั้งค่า';
   if (code === 'google_auth_failed') return 'เชื่อมต่อ Google ไม่สำเร็จ ให้ผู้ดูแลตรวจสอบการเชื่อมต่อบัญชี Google';

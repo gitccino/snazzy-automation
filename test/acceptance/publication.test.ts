@@ -360,11 +360,13 @@ describe("publication acceptance", () => {
   });
 
   it.each([
+    { provider: "image", status: 200, code: "product_image_format_invalid", stage: "prepare product images", notice: "ไฟล์รูปต้องเป็น JPEG" },
     { provider: "claude", status: 401, code: "anthropic_auth_failed", stage: "prepare outputs", notice: "Claude" },
     { provider: "claude", status: 404, code: "anthropic_model_failed", stage: "prepare outputs", notice: "โมเดล" },
     { provider: "google", status: 400, code: "google_auth_failed", stage: "ensure temporary document", notice: "Google" },
     { provider: "google", status: 503, code: "google_token_exchange_failed", stage: "ensure temporary document", notice: "สร้างเอกสาร" },
     { provider: "copy", status: 403, code: "google_drive_copy_failed", stage: "ensure temporary document", notice: "สร้างเอกสาร" },
+    { provider: "mismatch", status: 200, code: "publication_stage_failed", stage: "fill and verify document", notice: "เขียนและตรวจสอบเอกสาร" },
     { provider: "verification", status: 403, code: "google_docs_get_failed", stage: "fill and verify document", notice: "เขียนและตรวจสอบเอกสาร" },
     { provider: "fill", status: 400, code: "google_docs_batch_update_failed", stage: "fill and verify document", notice: "เขียนและตรวจสอบเอกสาร" },
   ])("delivers sanitized $provider $status failure only to its group", async ({ provider, status, code, stage, notice }) => {
@@ -386,12 +388,17 @@ describe("publication acceptance", () => {
 
         return Response.json({});
       }
+      if (provider === "image" && url.hostname === "fixtures.airtableusercontent.com") return new Response("SECRET invalid image https://private.example/token", { headers: { "content-type": "image/jpeg" } });
       if (url.hostname === "api.anthropic.com") {
         if (provider === "claude") return Response.json({ type: "error", error: { type: status === 401 ? "authentication_error" : "not_found_error", message: "SECRET provider response" } }, { status });
         return Response.json(url.pathname.endsWith("count_tokens") ? { input_tokens: 12000 } : toolResponse([{ productId: "A-1001", drafts: drafts("A-1001") }]));
       }
       if (url.hostname === "oauth2.googleapis.com" && provider === "google") return Response.json({ error: "invalid_grant", error_description: "SECRET refresh token" }, { status });
       if (provider === "copy" && url.pathname.endsWith("/copy")) return new Response("SECRET copy error", { status });
+      if (provider === "mismatch" && url.hostname === "docs.googleapis.com" && request.method === "GET" && fixture.batches.length) {
+        const doc = fixture.state.docs.get(url.pathname.split("/").at(-1)!)!;
+        doc.text = doc.text.replaceAll("A-1001", "missing");
+      }
       if (provider === "verification" && url.hostname === "docs.googleapis.com" && request.method === "GET" && fixture.batches.length) return new Response("SECRET verification error", { status });
       return fixture.deps.fetcher(request);
     });
@@ -408,8 +415,15 @@ describe("publication acceptance", () => {
     await expect(PublicationWorkflow.prototype.run.call({ env: local } as unknown as PublicationWorkflow, { payload: business[0].params, instanceId: business[0].id } as any, step)).rejects.toBeDefined();
     expect(await local.DB.prepare("SELECT stage, failure_code FROM workflow_feedback WHERE run_id=?").bind(fixtureId).first()).toEqual({ stage, failure_code: code });
     expect(fixture.state.docs.size).toBe(0);
+    if (provider === "mismatch") expect(fixture.batches.length).toBeGreaterThan(0);
     const persisted = await local.DB.prepare("SELECT outcome_json FROM workflow_feedback_results WHERE run_id=?").bind(fixtureId).all();
-    expect(JSON.stringify(persisted)).not.toMatch(/SECRET|refresh token/i);
+    expect(JSON.stringify(persisted)).not.toMatch(/SECRET|private\.example|refresh token/i);
+    if (provider === "image") {
+      expect(JSON.parse(String(persisted.results[0]!.outcome_json))).toMatchObject({ outcome: "unconfirmed", references: { imageDiagnostic: { productId: "A-1001", position: 0, code } } });
+      const outbox = await local.DB.prepare("SELECT result_json FROM line_result_outbox WHERE group_id=?").bind(group).all();
+      expect(JSON.stringify(outbox)).toContain("ไฟล์รูปต้องเป็น JPEG");
+      expect(JSON.stringify(outbox)).not.toMatch(/SECRET|private\.example/i);
+    }
     const otherConfig = JSON.parse(configEnv.APP_CONFIG_JSON); otherConfig.LINE_ALLOWED_GROUP_ID = other;
     local.APP_CONFIG_JSON = JSON.stringify(otherConfig);
     await admit(crypto.randomUUID(), "hello", other);
@@ -422,7 +436,11 @@ describe("publication acceptance", () => {
     expect(replies).toHaveLength(2);
     expect(JSON.stringify(replies[1])).toContain(notice);
     expect(JSON.stringify(replies[1])).toContain("ผู้ดูแล");
-    expect(JSON.stringify(replies[1])).not.toMatch(/SECRET|หมดอายุ|expired/i);
+    expect(JSON.stringify(replies[1])).not.toMatch(/SECRET|private\.example|หมดอายุ|expired/i);
+    if (provider === "image") {
+      expect(JSON.stringify(replies[1])).toContain("A-1001");
+      expect(JSON.stringify(replies[1])).toContain("รูปที่ 1");
+    }
     expect(replies[1].replyToken).toBe(`token-${fresh}`);
     await runCommand(commands[2]);
     expect(replies).toHaveLength(2);

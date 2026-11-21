@@ -107,7 +107,7 @@ function depsFor(
 }
 
 function publicationErrorCode(error:unknown,fallback:string):string {
-  const code=error instanceof OperationalError ? error.code : error instanceof Error ? error.name : '';
+  const code=error instanceof ProductImagePreparationFailure ? error.diagnostic?.code ?? "" : error instanceof OperationalError ? error.code : error instanceof Error ? error.name : '';
   return /^[a-z][a-z0-9_]{0,99}$/.test(code)?code:fallback;
 }
 
@@ -172,6 +172,7 @@ export async function runPublicationWorkflow(
     if(notice)await step.do(name,persistenceOptions,()=>deps.notify(notice.text,notice.contents,notice.outcome));
   }
   async function recordFailure(stage:string,reason:string,displayDate:string|null,originalError:unknown) {
+    const imageDiagnostic = originalError instanceof ProductImagePreparationFailure ? originalError.diagnostic : undefined;
     if (params.trigger === "line" && feedbackIdentity) {
       await step.do("persist primary publication failure",persistenceOptions,async()=>{
         const job=await readPublicationJob(deps.db,runId);
@@ -179,7 +180,7 @@ export async function runPublicationWorkflow(
           throw new NonRetryableError("Publication identity unavailable","publication_generation_stale");
         if (job.state === "succeeded") return;
         const attempt={kind:"publication" as const,runId,generation,...feedbackIdentity};
-        const committed=await createWorkflowFeedbackRepository(deps.db).commitOutcome(attempt,{stage,failureCode:publicationErrorCode(originalError,"publication_stage_failed"),action:"verify",outcome:"unconfirmed",references:{thaiDate:displayDate??"ไม่สามารถอ่านวันที่รายการได้",airtableRunUrl:`https://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`,publicBaseUrl:deps.config.publicBaseUrl},resultKey:JSON.stringify(["publication",runId,generation,feedbackIdentity.notificationCycle,"terminal"])});
+        const committed=await createWorkflowFeedbackRepository(deps.db).commitOutcome(attempt,{stage,failureCode:publicationErrorCode(originalError,"publication_stage_failed"),action:"verify",outcome:"unconfirmed",references:{thaiDate:displayDate??"ไม่สามารถอ่านวันที่รายการได้",airtableRunUrl:`https://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`,publicBaseUrl:deps.config.publicBaseUrl,...(imageDiagnostic ? {imageDiagnostic} : {})},resultKey:JSON.stringify(["publication",runId,generation,feedbackIdentity.notificationCycle,"terminal"])});
         if (!committed) throw new NonRetryableError("Publication identity unavailable","publication_generation_stale");
       });
     }
@@ -189,7 +190,7 @@ export async function runPublicationWorkflow(
       noticeJson=await step.do('record exhausted publication failure',retries,()=>workflowCall('Unable to record the publication failure.',async()=>{
         let intent:Notice|null=null;
         await failPublicationAfterExhaustion({...deps,notify:async()=>{
-          const card=docsWorkflowFailureCard({thaiDate:displayDate ?? 'ไม่สามารถอ่านวันที่รายการได้',reason:publicationFailureGuidance(stage,publicationErrorCode(originalError,'publication_stage_failed')),airtableRunUrl:`https://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`},deps.config.publicBaseUrl);
+          const card=docsWorkflowFailureCard({thaiDate:displayDate ?? 'ไม่สามารถอ่านวันที่รายการได้',reason:publicationFailureGuidance(stage,publicationErrorCode(originalError,'publication_stage_failed'),imageDiagnostic),airtableRunUrl:`https://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`},deps.config.publicBaseUrl);
           intent={text:card.text,contents:card.contents,outcome:'failed'};
         }},runId,reason,displayDate,...generationArgs);
         return JSON.stringify(intent);
@@ -202,8 +203,8 @@ export async function runPublicationWorkflow(
           const saved=await deps.db.prepare(`SELECT outcome_json FROM workflow_feedback_results WHERE kind='publication' AND run_id=? AND generation=? AND notification_cycle=? AND group_id=? AND result_key=?`)
             .bind(runId,generation,feedbackIdentity.notificationCycle,feedbackIdentity.groupId,JSON.stringify(['publication',runId,generation,feedbackIdentity.notificationCycle,'terminal'])).first<{outcome_json:string}>();
           if (saved) {
-            const fact=JSON.parse(saved.outcome_json) as {stage:string;failureCode?:string};
-            const guidance = publicationFailureGuidance(fact.stage, fact.failureCode);
+            const fact=JSON.parse(saved.outcome_json) as {stage:string;failureCode?:string;references?:{imageDiagnostic?:unknown}};
+            const guidance = publicationFailureGuidance(fact.stage, fact.failureCode, fact.references?.imageDiagnostic);
             return JSON.stringify({text:`วันที่: ${displayDate ?? "ไม่สามารถอ่านวันที่รายการได้"}\n${guidance}\nสถานะการล้างข้อมูลหรือบันทึก Airtable ยังไม่แน่นอน\nให้ผู้ดูแลตรวจสอบงานเดิมก่อนดำเนินการต่อ\nhttps://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`,outcome:'unconfirmed'} satisfies Notice);
           }
         }
