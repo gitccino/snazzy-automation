@@ -393,22 +393,13 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
               if (!response.ok) throw new Error('airtable_read_failed');
               return z.object({id:z.string(), fields:z.object({Status:z.string(), 'Google Doc URL':z.string().optional(), 'Generated At':z.string().optional()})}).parse(await response.json());
             };
-            const eligibleRecord = (record: Awaited<ReturnType<typeof read>>, status: string) => record.id === attempt.runId && record.fields.Status === status && !record.fields['Google Doc URL'] && !record.fields['Generated At'];
-            let record = await read();
-            if (eligibleRecord(record, 'Generating') && await sameFailure()) {
-              record = await read();
-              if (eligibleRecord(record, 'Generating') && await sameFailure()) {
-                // Airtable has no conditional PATCH: a manual edit between this read and write can still be overwritten.
-                try { await fetch(url, {method:'PATCH', headers:{...headers, 'Content-Type':'application/json'}, body:JSON.stringify({fields:{Status:'Failed'}})}); } catch { /* The write may have succeeded despite a lost response. */ }
-                record = await read();
-              }
-            }
+            const record = await read();
             confirmedFailed = record.id === attempt.runId && record.fields.Status === 'Failed' && !record.fields['Google Doc URL'] && !record.fields['Generated At'] && await sameFailure();
           } catch { /* An unavailable or inconsistent record cannot confirm the outcome. */ }
         }
         await completePublicationVerification(this.env.DB, attempt, payload.verifierId, {
           originWorkflowId:claim.origin_workflow_id, contextJson:claim.context_json, candidate: candidate ?? undefined, verifiedDocument, cleanupFailure: confirmedFailed && !preGoogleFailure ? cleanupFailure ?? undefined : undefined,
-          result:{schemaVersion:1, kind:'publication', runId:attempt.runId, generation:attempt.generation, notificationCycle:attempt.notificationCycle, outcome:confirmedSuccess ? 'success' : confirmedFailed ? 'failed' : 'unconfirmed', messages:[{type:'text', text:confirmedSuccess ? `ตรวจสอบแล้ว สร้างเอกสารสำเร็จ\n${candidate!.intent.docUrl}` : confirmedFailed ? `ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed และไม่มีเอกสารที่บันทึกไว้\n${attempt.runId}` : verifiedDocument ? `ตรวจสอบเอกสารแล้ว แต่สถานะ Airtable ยังไม่ยืนยัน กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${candidate!.intent.docUrl}\n${attempt.runId}` : failure ? `⚠️ กรุณาตรวจสอบสถานะงานเดิมใน Airtable ก่อนส่ง /docs ซ้ำ\n${attempt.runId}` : `⚠️ ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${attempt.runId}`}]},
+          result:{schemaVersion:1, kind:'publication', runId:attempt.runId, generation:attempt.generation, notificationCycle:attempt.notificationCycle, outcome:confirmedSuccess ? 'success' : confirmedFailed ? 'failed' : 'unconfirmed', messages:[{type:'text', text:confirmedSuccess ? `ตรวจสอบแล้ว สร้างเอกสารสำเร็จ\n${candidate!.intent.docUrl}` : confirmedFailed ? `ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed และไม่มีเอกสารที่บันทึกไว้\n${attempt.runId}` : verifiedDocument ? `ตรวจสอบเอกสารแล้ว แต่สถานะ Airtable ยังไม่ยืนยัน ให้ผู้ดูแลตรวจสอบก่อนส่ง /docs ซ้ำ\n${candidate!.intent.docUrl}\n${attempt.runId}` : failure ? `⚠️ ให้ผู้ดูแลตรวจสอบสถานะงานเดิมใน Airtable ก่อนส่ง /docs ซ้ำ\n${attempt.runId}` : `⚠️ ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${attempt.runId}`}]},
         });
       });
       return null;

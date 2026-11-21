@@ -362,13 +362,14 @@ describe("publication acceptance", () => {
     }
   });
 
-  it("delivers the generated publication after a lost signed start reply", async () => {
-    const fixture = publicationFixture();
-    const id = crypto.randomUUID(), group = "CtestGroup", other = "Cother";
+  it.each([false, true])("delivers the generated publication after a lost signed start reply (lost create: %s)", async (lostCreate) => {
+    const id = crypto.randomUUID(), group = `C${id}`, other = `Cother-${id}`;
+    const fixture = publicationFixture([product("A-1001")], id);
+    const originalConfig = JSON.parse(configEnv.APP_CONFIG_JSON); originalConfig.LINE_ALLOWED_GROUP_ID = group;
     const commands: any[] = [], business: any[] = [], replies: any[] = [];
-    const local = { ...env, ...configEnv, LINE_CHANNEL_SECRET: "secret", IMAGES_BUCKET: fixture.image.bucket, IMAGES: fixture.image.images,
+    const local = { ...env, ...configEnv, APP_CONFIG_JSON: JSON.stringify(originalConfig), LINE_CHANNEL_SECRET: "secret", IMAGES_BUCKET: fixture.image.bucket, IMAGES: fixture.image.images,
       LINE_COMMAND_WORKFLOW: { createBatch: async (items: any[]) => { commands.push(...items); return []; } },
-      PUBLICATION_WORKFLOW: { create: async (item: any) => { business.push(item); return { id: item.id }; }, get: async () => { if (!business.length) throw new Error("instance.not_found"); return { status: async () => ({ status: "running" }) }; } },
+      PUBLICATION_WORKFLOW: { create: async (item: any) => { business.push(item); if (lostCreate) throw new Error("creation response lost"); return { id: item.id }; }, get: async () => { if (!business.length) throw new Error("instance.not_found"); return { status: async () => ({ status: "running" }) }; } },
     } as unknown as Env;
     const step = { do: async (_name: string, a: any, b?: any) => (b ?? a)() } as unknown as WorkflowStep;
     vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
@@ -399,11 +400,11 @@ describe("publication acceptance", () => {
     expect(result?.googleDocUrl).toContain("temp-doc-1");
     expect(fixture.state.docs.size).toBe(1);
     expect(fixture.calls.filter(call => new URL(call.url).pathname.endsWith("/copy"))).toHaveLength(1);
-    const otherConfig = JSON.parse(configEnv.APP_CONFIG_JSON); otherConfig.LINE_ALLOWED_GROUP_ID = other;
+    const otherConfig = { ...originalConfig }; otherConfig.LINE_ALLOWED_GROUP_ID = other;
     local.APP_CONFIG_JSON = JSON.stringify(otherConfig);
     await admit(crypto.randomUUID(), "hello", other);
     await runCommand(commands[2]);
-    local.APP_CONFIG_JSON = configEnv.APP_CONFIG_JSON;
+    local.APP_CONFIG_JSON = JSON.stringify(originalConfig);
     expect(replies).toHaveLength(1);
     const fresh = crypto.randomUUID();
     await admit(fresh, "hello");

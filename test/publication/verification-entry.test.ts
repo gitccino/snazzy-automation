@@ -92,11 +92,7 @@ it.each([
   ['foreign record', 'foreign', 'unconfirmed'],
   ['conflicting document', 'conflict', 'unconfirmed'],
   ['lost read', 'lost', 'unconfirmed'],
-  ['generating repaired', 'repair', 'failed'],
-  ['lost update response', 'lost update', 'failed'],
-  ['manual conflict before update', 'manual', 'unconfirmed'],
-  ['conflict after update', 'after', 'unconfirmed'],
-  ['eligibility changed before update', 'eligibility', 'unconfirmed'],
+  ['generating held', 'repair', 'unconfirmed'],
 ])('verifies a %s Airtable read once and queues its result', async (_label, mode, outcome) => {
   const env = {...testEnv(), PUBLICATION_WORKFLOW: {get: vi.fn(async () => ({status: async () => ({status: 'terminated'})}))}} as any;
   const runId = crypto.randomUUID(), groupId = crypto.randomUUID();
@@ -108,18 +104,10 @@ it.each([
   await env.DB.prepare("INSERT INTO publication_google_write_evidence VALUES (?,1,1,'tracking',1)").bind(runId).run();
   await env.DB.prepare("INSERT INTO workflow_feedback(kind,run_id,generation,notification_cycle,group_id,context_json,stage,failure_code) VALUES ('publication',?,1,1,?,?,'prepare outputs','anthropic_failed')").bind(runId,groupId,context).run();
   await env.DB.prepare("INSERT INTO workflow_feedback_results(kind,run_id,generation,notification_cycle,revision,result_key,outcome_json,group_id) VALUES ('publication',?,1,1,0,?,?,?)").bind(runId,runId,JSON.stringify({stage:'prepare outputs',failureCode:'anthropic_failed',action:'verify',outcome:'unconfirmed',references:{thaiDate:'19 พฤศจิกายน 2569',airtableRunUrl:`https://airtable.com/base/table/${runId}`,publicBaseUrl:'https://original.test'}}),groupId).run();
-  let reads = 0;
   const fetchMock = vi.spyOn(globalThis,'fetch').mockImplementation(async (_url, init) => {
+    expect(init?.method).not.toBe('PATCH');
     if (mode === 'lost') throw new Error('lost');
-    if (init?.method === 'PATCH') {
-      expect(JSON.parse(String(init.body))).toEqual({fields:{Status:'Failed'}});
-      if (mode === 'lost update') throw new Error('lost');
-      return Response.json({});
-    }
-    reads++;
-    if (mode === 'eligibility' && reads === 2) await env.DB.prepare("UPDATE publication_google_write_evidence SET state='unknown' WHERE publication_run_id=?").bind(runId).run();
-    const generating = ['repair','lost update','manual','after','eligibility'].includes(mode) && reads <= 2;
-    return Response.json({id:mode === 'foreign' ? 'other' : runId,fields:{Status:mode === 'manual' && reads === 2 ? 'Ready' : generating ? 'Generating' : 'Failed', ...((mode === 'conflict' || (mode === 'after' && reads === 3)) ? {'Google Doc URL':'https://example.com'} : {})}});
+    return Response.json({id:mode === 'foreign' ? 'other' : runId,fields:{Status:mode === 'repair' ? 'Generating' : 'Failed', ...(mode === 'conflict' ? {'Google Doc URL':'https://example.com'} : {})}});
   });
   try {
     const payload = {kind:'verification',publicationRunId:runId,generation:1,notificationCycle:1,groupId,verifierId:claim.verifierId};
@@ -141,7 +129,7 @@ it.each([
     expect(requests.every(request=>request.replyToken==='fresh')).toBe(true);
     expect((await env.DB.prepare('SELECT group_id,phase,request_id FROM line_reply_dispatches WHERE group_id=?').bind(groupId).all()).results).toEqual(requests.map(()=>({group_id:groupId,phase:'accepted',request_id:'receipt'})));
     expect(await deps.feedback.pendingByGroup(groupId,10)).toHaveLength(0);
-    expect(fetchMock).toHaveBeenCalledTimes(['repair','lost update','after'].includes(mode) ? 4 : ['manual','eligibility'].includes(mode) ? 2 : 1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   } finally { fetchMock.mockRestore(); }
 });
 
@@ -258,7 +246,7 @@ it('does not access Drive when replaying an acknowledged cleanup receipt', async
   } finally { mock.mockRestore(); }
 });
 
-it.each(['success', 'lost response', 'manual conflict'])('repairs the original Airtable row after acknowledged cleanup: %s', async mode => {
+it.each(['Generating', 'Ready', 'Failed'])('holds or confirms the Airtable status after acknowledged cleanup: %s', async status => {
   const env = {...testEnv(), PUBLICATION_WORKFLOW:{get:async()=>({status:async()=>({status:'terminated'})})}} as any;
   const runId = crypto.randomUUID(), groupId = crypto.randomUUID();
   const context = JSON.stringify({replyGroupId:groupId,settings:{config:{airtableBaseId:'original-base',airtablePublicationRunsTableId:'original-table'}}});
@@ -268,27 +256,16 @@ it.each(['success', 'lost response', 'manual conflict'])('repairs the original A
   await env.DB.prepare("INSERT INTO publication_cleanup_intents (publication_run_id,generation,notification_cycle,origin_workflow_id,context_json,doc_id,saved_temp_doc,dispatch_verifier_id,deletion_acknowledged) VALUES (?,1,1,'original',?,'doc',1,?,1)").bind(runId,context,claim.verifierId).run();
   await env.DB.prepare("INSERT INTO workflow_feedback(kind,run_id,generation,notification_cycle,group_id,context_json,stage,failure_code) VALUES ('publication',?,1,1,?,?,'prepare outputs','anthropic_failed')").bind(runId,groupId,context).run();
   await env.DB.prepare("INSERT INTO workflow_feedback_results(kind,run_id,generation,notification_cycle,revision,result_key,outcome_json,group_id) VALUES ('publication',?,1,1,0,?,?,?)").bind(runId,runId,JSON.stringify({stage:'prepare outputs',failureCode:'anthropic_failed',outcome:'unconfirmed'}),groupId).run();
-  let status = 'Generating', patches = 0, reads = 0;
-  const mock = vi.spyOn(globalThis,'fetch').mockImplementation(async (url,init) => {
-    expect(String(url)).toBe(`https://api.airtable.com/v0/original-base/original-table/${runId}`);
-    if (init?.method === 'PATCH') { patches++; status = 'Failed'; expect(JSON.parse(String(init.body))).toEqual({fields:{Status:'Failed'}}); if (mode === 'lost response') throw new Error('lost'); }
-    else if (++reads === 2 && mode === 'manual conflict') status = 'Ready';
+  const mock = vi.spyOn(globalThis,'fetch').mockImplementation(async (_url,init) => {
+    expect(init?.method).not.toBe('PATCH');
     return Response.json({id:runId,fields:{Status:status}});
   });
   try {
     const payload = {kind:'verification',publicationRunId:runId,generation:1,notificationCycle:1,groupId,verifierId:claim.verifierId};
     const run = () => PublicationWorkflow.prototype.run.call({env} as any,{payload,instanceId:claim.verifierId} as any,{do:async (_:string,cb:()=>Promise<unknown>)=>cb()} as any);
     await run(); await run();
-    expect(patches).toBe(mode === 'manual conflict' ? 0 : 1);
-    const row = await env.DB.prepare('SELECT outcome_json FROM workflow_feedback_results WHERE run_id=? AND revision=1').bind(runId).first();
-    if (mode === 'manual conflict') {
-      expect(row).toBeNull();
-      const claimRow = await env.DB.prepare('SELECT result_json FROM publication_verification_claims WHERE publication_run_id=?').bind(runId).first();
-      expect(JSON.parse(claimRow.result_json).outcome).toBe('unconfirmed');
-    } else {
-      expect(status).toBe('Failed');
-      expect(JSON.parse(row.outcome_json)).toMatchObject({outcome:'failed',result:{messages:[{text:expect.stringContaining('ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed')}]}});
-    }
+    const claimRow = await env.DB.prepare('SELECT result_json FROM publication_verification_claims WHERE publication_run_id=?').bind(runId).first();
+    expect(JSON.parse(claimRow.result_json).outcome).toBe(status === 'Failed' ? 'failed' : 'unconfirmed');
   } finally { mock.mockRestore(); }
 });
 
@@ -302,7 +279,7 @@ it('delivers the primary failure and one truthful cleanup correction only to the
   await env.DB.prepare("INSERT INTO publication_cleanup_intents (publication_run_id,generation,notification_cycle,origin_workflow_id,context_json,doc_id,saved_temp_doc) VALUES (?,1,1,'original',?,'doc',1)").bind(runId,context).run();
   await env.DB.prepare("INSERT INTO workflow_feedback(kind,run_id,generation,notification_cycle,group_id,context_json,stage,failure_code) VALUES ('publication',?,1,1,?,?,'prepare outputs','anthropic_failed')").bind(runId,groupId,context).run();
   await env.DB.prepare("INSERT INTO workflow_feedback_results(kind,run_id,generation,notification_cycle,revision,result_key,outcome_json,group_id) VALUES ('publication',?,1,1,0,?,?,?)").bind(runId,runId,JSON.stringify({stage:'prepare outputs',failureCode:'anthropic_failed',action:'verify',outcome:'unconfirmed',references:{thaiDate:'19 พฤศจิกายน 2569',airtableRunUrl:`https://airtable.com/base/table/${runId}`,publicBaseUrl:'https://original.test'}}),groupId).run();
-  let status = 'Generating', patches = 0, deletes = 0;
+  let status = 'Failed', patches = 0, deletes = 0;
   const mock = vi.spyOn(globalThis,'fetch').mockImplementation(async (url,init) => {
     if (String(url).includes('oauth2.googleapis.com')) return Response.json({access_token:'token',expires_in:3600});
     if (String(url).includes('googleapis.com/drive')) {
@@ -335,7 +312,7 @@ it('delivers the primary failure and one truthful cleanup correction only to the
     const calls = mock.mock.calls.length;
     await run(); await deliver(groupId); await deliver(otherGroup);
     expect(requests).toHaveLength(2);
-    expect(patches).toBe(1);
+    expect(patches).toBe(0);
     expect(deletes).toBe(1);
     expect(mock).toHaveBeenCalledTimes(calls);
   } finally { mock.mockRestore(); }

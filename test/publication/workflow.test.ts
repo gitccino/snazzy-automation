@@ -124,7 +124,7 @@ describe("runPublicationWorkflow", () => {
     expect(fetcher.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(1);
     const claim = await claimPublicationVerification(env.DB, { runId, generation: 1, notificationCycle: 1, groupId });
     if (claim.status !== "claimed") throw new Error("missing claim");
-    let status = "Generating", deletes = 0;
+    let status = "Failed", deletes = 0;
     const mock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       if (String(url).includes("oauth2.googleapis.com")) return Response.json({ access_token: "token", expires_in: 3600 });
       if (String(url).includes("googleapis.com/drive")) {
