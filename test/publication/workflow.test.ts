@@ -1,5 +1,5 @@
 import { parseConfig } from "../../src/config";
-import { acquireOrResumeJob } from "../../src/db/publication-repository";
+import { claimPublicationVerification, acquireOrResumeJob } from "../../src/db/publication-repository";
 import { NonRetryableError } from "cloudflare:workflows";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import Anthropic from "@anthropic-ai/sdk";
@@ -33,6 +33,10 @@ import {
 import type { PublicationServiceDeps } from "../../src/publication/service";
 import type { PublicationWorkflowParams } from "../../src/publication/types";
 import { OperationalError } from "../../src/shared/errors";
+import { createWorkflowFeedbackRepository } from "../../src/db/workflow-feedback";
+import { createLineReplyRepository } from "../../src/db/line-reply-repository";
+import { deliverEventReply } from "../../src/line/reply-delivery";
+import { createLineClient } from "../../src/line/client";
 import { createTestEnv, testEnv } from "../helpers/env";
 
 const params = { publicationRunId: "rec-run-1", trigger: "admin" as const };
@@ -118,6 +122,39 @@ describe("runPublicationWorkflow", () => {
     expect(await env.DB.prepare("SELECT stage,failure_code FROM workflow_feedback WHERE run_id=?").bind(runId).first()).toEqual({ stage: "fill and verify document", failure_code: "document_fill_failed" });
     expect(await env.DB.prepare("SELECT generation,notification_cycle,origin_workflow_id,context_json,doc_id,saved_temp_doc FROM publication_cleanup_intents WHERE publication_run_id=?").bind(runId).first()).toEqual({ generation: 1, notification_cycle: 1, origin_workflow_id: "original", context_json: context, doc_id: "temp-doc-1", saved_temp_doc: 1 });
     expect(fetcher.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(1);
+    const claim = await claimPublicationVerification(env.DB, { runId, generation: 1, notificationCycle: 1, groupId });
+    if (claim.status !== "claimed") throw new Error("missing claim");
+    let status = "Generating", deletes = 0;
+    const mock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url).includes("oauth2.googleapis.com")) return Response.json({ access_token: "token", expires_in: 3600 });
+      if (String(url).includes("googleapis.com/drive")) {
+        if (init?.method === "DELETE") { deletes++; return new Response(null, { status: 204 }); }
+        return Response.json({ id: "temp-doc-1", parents: ["folder"], trashed: false, appProperties: { publicationRunId: runId } });
+      }
+      if (init?.method === "PATCH") status = "Failed";
+      return Response.json({ id: runId, fields: { Status: status } });
+    });
+    try {
+      const verificationEnv = { ...env, GOOGLE_OAUTH_CLIENT_ID: "client", GOOGLE_OAUTH_CLIENT_SECRET: "secret", GOOGLE_REFRESH_TOKEN: "refresh", PUBLICATION_WORKFLOW: { get: async () => ({ status: async () => ({ status: "terminated" }) }) } };
+      const payload = { kind: "verification", publicationRunId: runId, generation: 1, notificationCycle: 1, groupId, verifierId: claim.verifierId };
+      const verify = () => PublicationWorkflow.prototype.run.call({ env: verificationEnv } as any, { payload, instanceId: claim.verifierId } as any, { do: async (_name: string, callback: () => Promise<unknown>) => callback() } as any);
+      await verify();
+      expect(deletes).toBe(1);
+      expect(await env.DB.prepare("SELECT dispatch_verifier_id,deletion_acknowledged FROM publication_cleanup_intents WHERE publication_run_id=?").bind(runId).first()).toEqual({ dispatch_verifier_id: claim.verifierId, deletion_acknowledged: 1 });
+      const clock = { now: () => new Date("2026-11-20T08:00:00Z") }, requests: any[] = [];
+      const line = createLineClient({ channelAccessToken: "test", fetch: async (_url, init) => { requests.push(JSON.parse(String(init?.body))); return Response.json({}, { headers: { "x-line-request-id": "receipt" } }); } });
+      const delivery = { clock, repo: createLineReplyRepository(env.DB, clock), feedback: createWorkflowFeedbackRepository(env.DB), isGroupAllowed: async () => true, line };
+      const deliver = (target: string) => deliverEventReply({ groupId: target, workflowId: "eligible", receivedAt: clock.now().toISOString(), replyToken: "fresh", commandReply: null, drainQueue: true, publicBaseUrl: "https://new.test", eventId: crypto.randomUUID() }, delivery);
+      await deliver(crypto.randomUUID());
+      expect(requests).toHaveLength(0);
+      await deliver(groupId); await deliver(groupId);
+      expect(requests).toHaveLength(2);
+      expect(JSON.stringify(requests[0])).toContain("ยังยืนยันสถานะงานเอกสารไม่ได้");
+      expect(JSON.stringify(requests[1])).toContain("ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed");
+      await verify(); await deliver(groupId);
+      expect(requests).toHaveLength(2);
+      expect(deletes).toBe(1);
+    } finally { mock.mockRestore(); }
   });
 
   it("runs seven named durable stages with five exponential retries after the initial call", async () => {
