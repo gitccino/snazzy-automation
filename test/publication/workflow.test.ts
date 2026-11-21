@@ -101,6 +101,25 @@ describe("runPublicationWorkflow", () => {
     stages.failPublicationAfterExhaustion.mockResolvedValue(undefined);
   });
 
+  it("persists the primary failure and cleanup intent before a lost delete response", async () => {
+    const env = testEnv(), groupId = crypto.randomUUID(), runId = crypto.randomUUID();
+    const config = { ...deps.config, publicationRetryLimit: 0, googleDriveFolderId: "folder" };
+    const context = JSON.stringify({ replyGroupId: groupId, settings: { config } });
+    await env.DB.prepare("INSERT INTO publication_jobs(publication_run_id,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json,temp_doc_id) VALUES (?,'generating','original','x','x',1,1,?,'temp-doc-1')").bind(runId, context).run();
+    const fetcher = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === "DELETE") throw new Error("lost response");
+      return Response.json({ access_token: "token", expires_in: 3600 });
+    });
+    const real = await vi.importActual<typeof import("../../src/publication/service")>("../../src/publication/service");
+    stages.failPublicationAfterExhaustion.mockImplementation(real.failPublicationAfterExhaustion);
+    stages.fillAndVerifyDocument.mockRejectedValue(new OperationalError("document_fill_failed", "private failure", false));
+    const actualDeps = { ...deps, db: env.DB, config, fetcher, clock: { now: () => new Date() }, googleOAuthCredentials: { clientId: "client", clientSecret: "secret", refreshToken: "refresh" }, copyOwner: { workflowId: "original", notificationCycle: 1 } } as PublicationServiceDeps;
+    await expect(runPublicationWorkflow({ publicationRunId: runId, trigger: "line" }, retryingStep() as unknown as WorkflowStep, actualDeps, "original", { groupId, notificationCycle: 1 })).rejects.toMatchObject({ name: "document_fill_failed" });
+    expect(await env.DB.prepare("SELECT stage,failure_code FROM workflow_feedback WHERE run_id=?").bind(runId).first()).toEqual({ stage: "fill and verify document", failure_code: "document_fill_failed" });
+    expect(await env.DB.prepare("SELECT generation,notification_cycle,origin_workflow_id,context_json,doc_id,saved_temp_doc FROM publication_cleanup_intents WHERE publication_run_id=?").bind(runId).first()).toEqual({ generation: 1, notification_cycle: 1, origin_workflow_id: "original", context_json: context, doc_id: "temp-doc-1", saved_temp_doc: 1 });
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(1);
+  });
+
   it("runs seven named durable stages with five exponential retries after the initial call", async () => {
     const step = retryingStep();
 
