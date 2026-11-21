@@ -5,10 +5,10 @@ import { parseConfig } from '../../src/config';
 import { createTestEnv } from '../helpers/env';
 import type { PublicationServiceDeps } from '../../src/publication/service';
 
-type Params = { runId: string; groupId: string; status: number };
+type Params = { runId: string; groupId: string; status: number; mode?: string };
 export class BoundaryWorkflow extends WorkflowEntrypoint<{DB:D1Database}, Params> {
   async run(event: WorkflowEvent<Params>, step: WorkflowStep) {
-    const {runId, groupId, status} = event.payload;
+    const {runId, groupId, status, mode} = event.payload;
     const clock = {now: () => new Date()};
     const config = {...parseConfig(createTestEnv().APP_CONFIG_JSON), publicationRetryLimit: 5 as const};
     const deps = {
@@ -19,7 +19,8 @@ export class BoundaryWorkflow extends WorkflowEntrypoint<{DB:D1Database}, Params
       }}},
       fetcher: async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes('oauth2.googleapis.com')) return Response.json({access_token:'test',expires_in:3600});
+        if (url.includes('oauth2.googleapis.com')) { if (mode === 'google' && !(await this.env.DB.prepare('SELECT 1 FROM boundary_attempts WHERE run_id=?').bind(runId).first())) { await this.env.DB.prepare('INSERT INTO boundary_attempts(run_id) VALUES (?)').bind(runId).run(); return new Response('private', {status: 401}); } return Response.json({access_token:'test',expires_in:3600}); }
+        if (mode === 'image' && url.includes('rec-product')) { await this.env.DB.prepare('INSERT INTO boundary_attempts(run_id) VALUES (?)').bind(runId).run(); return Response.json({id:'rec-product',fields:{'Product ID':'A-1001','Product Images':[]}}); }
         if (url.includes('googleapis.com/drive')) return Response.json({files:[]});
         return Response.json({id:runId,fields:{}});
       },
@@ -31,7 +32,7 @@ export class BoundaryWorkflow extends WorkflowEntrypoint<{DB:D1Database}, Params
     const imageProduct = {airtableRecordId:'rec-product',productId:'A-1001',brandName:'Nike',modelName:'Air',conditionType:'Used',size:'42',description:'test',lineSquarePrice:1,igPrice:1,orderedImageKeys:['1','2','3','4']};
     const harnessStep = new Proxy(step, {get(target, key) {
       if (key !== 'do') return Reflect.get(target,key,target);
-      return (name: string, ...args: unknown[]) => name.startsWith('images ') ? Promise.resolve(name.endsWith('replace') ? imageProduct : {}) : target.do(name, args[0] as any, args[1] as any);
+      return (name: string, ...args: unknown[]) => mode !== 'image' && name.startsWith('images ') ? Promise.resolve(name.endsWith('replace') ? imageProduct : {}) : target.do(name, args[0] as any, args[1] as any);
     }});
     return runPublicationWorkflow({publicationRunId:runId,trigger:'line'},harnessStep,deps,event.instanceId,{groupId,notificationCycle:1});
   }

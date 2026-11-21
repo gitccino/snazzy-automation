@@ -20,3 +20,9 @@ describe("image failure guidance", () => {
     expect(imageFailureGuidance({ productId: "A-1001", position: 0, code: "constructor" })).toContain("เตรียมรูปไม่สำเร็จ");
   });
 });
+
+it('does not instruct a retry before owner review', () => {
+  for (const code of ['product_image_source_changed','product_image_unresolved_preview','product_image_busy','product_image_owner_unknown','unknown']) {
+    expect(imageFailureGuidance({productId:'A-1001',position:0,code})).not.toContain('/docs');
+  }
+});

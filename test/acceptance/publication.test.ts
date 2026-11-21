@@ -583,7 +583,7 @@ describe("publication acceptance", () => {
     expect(fixture.state.docs.get("temp-doc-3")!.name).toBe("Publication 2026-09-02 (v3)");
     expect(fixture.state.docUrl).toBe(v3!.googleDocUrl);
     expect(fixture.state.docs.get("temp-doc-3")!.text).not.toContain("A-1001");
-    await expect(fixture.run(1)).rejects.toMatchObject({ name: "publication_generation_stale" });
+    await expect(fixture.run(1)).rejects.toThrow('"code":"publication_generation_stale"');
     const rows = await env.DB.prepare("SELECT generation, successful_generation FROM publication_jobs WHERE publication_date='2026-09-02'").all();
     expect(rows.results).toEqual([{ generation: 3, successful_generation: 3 }]);
   });
@@ -675,7 +675,7 @@ describe("publication acceptance", () => {
     const response = await handleDocsRoute(docsRequest(), { ...env, ...configEnv, PUBLICATION_WORKFLOW: binding } as unknown as Env, clock);
     expect(await response.json()).toEqual({ status: "restarted", publicationRunId: runId });
     fixture.state.batchFailureStatus = 0;
-    await expect(fixture.run(1, 1)).rejects.toMatchObject({ name: "publication_generation_stale" });
+    await expect(fixture.run(1, 1)).rejects.toThrow('"code":"publication_generation_stale"');
     expect(fixture.state.docs.size).toBe(0);
     await fixture.run(1, 2);
     expect(fixture.create).toHaveBeenCalledTimes(2);

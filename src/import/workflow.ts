@@ -13,7 +13,7 @@ import { createImportRepository, readImportVerificationEvidence, readImportVerif
 import { createSequenceRepository } from "../db/sequence-repository";
 import type { Env } from "../env";
 import { createICloudClient } from "../icloud/client";
-import { isRetryable, OperationalError } from "../shared/errors";
+import { isRetryable, OperationalError, workflowFailureCode, workflowFailureMessage } from "../shared/errors";
 import { newCorrelationId } from "../shared/ids";
 import { bangkokDateTimeThai, todayBangkokDate } from "../shared/time";
 import { createAirtableProductsClient } from "./airtable-products";
@@ -73,6 +73,8 @@ interface ImportWorkflowOperations {
 
 function durableErrorCode(error: unknown, fallback: string): string {
   if (error instanceof OperationalError) return error.code;
+  const decoded = workflowFailureCode(error);
+  if (decoded) return decoded;
   return error instanceof Error && /^[a-z][a-z0-9_]*$/.test(error.name)
     ? error.name
     : fallback;
@@ -97,26 +99,19 @@ export async function runImportWorkflow(
       try {
         return await operations.downloadAndGroup();
       } catch (error) {
-        const code = durableErrorCode(error, "non_retryable_download_error");
-        if (!isRetryable(error)) {
-          const message =
-            error instanceof Error
-              ? error.message
-              : "Non-retryable download error";
-          throw new NonRetryableError(message, code);
-        }
-        if (error instanceof Error) error.name = code;
-        throw error;
+        const code = error instanceof OperationalError ? error.code : "download_and_group_failed";
+        const message = workflowFailureMessage(code, "Unable to download and group photos.");
+        if (!isRetryable(error)) throw new NonRetryableError(message);
+        throw new Error(message);
       }
     });
   } catch (error) {
     const errorCode = durableErrorCode(error, "download_and_group_failed");
     let outcome:'failed'|'unconfirmed'='failed';
-    let recordingFailure:unknown;
     try { await step.do('record-download-and-group-failure', retries, () => operations.recordRunFailure(errorCode)); }
-    catch(failure) { outcome='unconfirmed'; recordingFailure=failure; }
-    if(operations.notifyFailure)await step.do('persist-import-failure',{retries:{limit:2,delay:'1 second'}},()=>operations.notifyFailure!(outcome));
-    throw recordingFailure ?? error;
+    catch { outcome='unconfirmed'; }
+    if(operations.notifyFailure) try { await step.do('persist-import-failure',{retries:{limit:2,delay:'1 second'}},()=>operations.notifyFailure!(outcome)); } catch { /* Preserve the original failure. */ }
+    throw error;
   }
   const { pendingGroups, orphanRange, checkpointPosition } = downloadOutcome;
   const succeededProductIds: string[] = [];
@@ -137,18 +132,10 @@ export async function runImportWorkflow(
               payload.importRunId,
             );
           } catch (error) {
-            if (!isRetryable(error)) {
-              const code =
-                error instanceof OperationalError
-                  ? error.code
-                  : "non_retryable_group_error";
-              const message =
-                error instanceof Error
-                  ? error.message
-                  : "Non-retryable group error";
-              throw new NonRetryableError(message, code);
-            }
-            throw error;
+            const code = error instanceof OperationalError ? error.code : "non_retryable_group_error";
+            const message = workflowFailureMessage(code, "Unable to import product group.");
+            if (!isRetryable(error)) throw new NonRetryableError(message);
+            throw new Error(message);
           }
         },
       );

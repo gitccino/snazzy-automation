@@ -31,6 +31,8 @@ export function buildPublicationValidationFailureMessage(input: {
   ].join("\n");
 }
 
+export const publicationOwnerReviewInstruction = 'ให้ผู้ดูแลตรวจสอบงานเดิมก่อนส่ง /docs ซ้ำ';
+
 export function buildPublicationWorkflowFailureMessage(input: {
   thaiDate: string;
   reason: string;
@@ -41,7 +43,7 @@ export function buildPublicationWorkflowFailureMessage(input: {
     "การดำเนินการ: สร้างเอกสารเผยแพร่ล้มเหลว",
     `สาเหตุ: ${input.reason}`,
     `ลิงก์ Airtable: ${input.airtableRunUrl}`,
-    "ให้ผู้ดูแลตรวจสอบงานเดิมก่อนส่ง /docs ซ้ำ",
+    publicationOwnerReviewInstruction,
   ].join("\n");
 }
 

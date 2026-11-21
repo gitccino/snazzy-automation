@@ -69,3 +69,15 @@ it('repairs an interrupted setup notice through a later eligible LINE event', as
     expect((await env.DB.prepare('SELECT * FROM line_result_outbox WHERE group_id=? AND result_key=?').bind(group,JSON.stringify(['publication',runId,1,1,'terminal'])).all()).results).toHaveLength(1);
   } finally { fetcher.mockRestore(); }
 });
+
+it('uses trusted binding to record an identity lookup failure', async () => {
+  const env=testEnv(), runId=crypto.randomUUID(), group=crypto.randomUUID(), eventId=crypto.randomUUID();
+  const workflowId=publicationWorkflowId(runId,1), operation=JSON.stringify({type:'docs'});
+  await env.DB.prepare("INSERT INTO publication_jobs(publication_run_id,state,correlation_id,created_at,updated_at,notification_cycle,settings_context_json) VALUES (?,'locked',?,'now','now',1,?)").bind(runId,workflowId,JSON.stringify({replyGroupId:group})).run();
+  await env.DB.prepare('INSERT INTO line_command_ingress VALUES (?,?,?,?,?)').bind(eventId,group,operation,await lineCommandWorkflowId(eventId),'now').run();
+  await env.DB.prepare("INSERT INTO publication_regeneration_events(event_id,publication_run_id,generation,notification_cycle,workflow_id,action,job_json,group_id,ingress_operation) VALUES (?,?,1,1,?,'restart','{}',?,?)").bind(eventId,runId,workflowId,group,operation).run();
+  const error=new Error('identity lookup failed');
+  const step={do:async(name:string,...args:any[])=>name==='settings-context'?{}:name==='notification-identity'?Promise.reject(error):args.at(-1)()};
+  await expect(PublicationWorkflow.prototype.run.call({env} as any,{instanceId:workflowId,payload:{publicationRunId:runId,trigger:'line'}} as any,step as any)).rejects.toBe(error);
+  expect(await env.DB.prepare('SELECT group_id FROM line_result_outbox WHERE group_id=?').bind(group).first()).toEqual({group_id:group});
+});

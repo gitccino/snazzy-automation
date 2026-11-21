@@ -3,7 +3,7 @@ import type { ImportRepository } from "../db/import-repository";
 import type { SequenceRepository } from "../db/sequence-repository";
 import type { AuditLog } from "../db/audit";
 import type { AlbumSnapshot, ImageSource, SourcePhoto } from "../icloud/types";
-import { OperationalError } from "../shared/errors";
+import { workflowFailureCode, OperationalError } from "../shared/errors";
 import { sha256Hex } from "../shared/ids";
 import { todayBangkokDate } from "../shared/time";
 import { AIRTABLE_PREVIEW_VARIANT, type AssetStore } from "./asset-store";
@@ -441,11 +441,11 @@ export async function recordExhaustedGroupFailure(
 ): Promise<{ productId: string | null; errorCode: string }> {
   const current = await deps.repo.findGroupByHash(group.groupId);
   const errorCode =
-    error instanceof OperationalError
+    workflowFailureCode(error) ?? (error instanceof OperationalError
       ? error.code
       : error instanceof Error && /^[a-z][a-z0-9_]*$/.test(error.name)
         ? error.name
-        : "unknown_error";
+        : "unknown_error");
   if (current?.state === "succeeded") {
     return { productId: current.productId, errorCode };
   }

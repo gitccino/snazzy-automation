@@ -249,7 +249,7 @@ export async function preparePublicationImages(deps: ImagePreparationDeps, valid
   const retry = { retries: { limit: deps.config.publicationRetryLimit, delay: "10 seconds" as const, backoff: "exponential" as const }, timeout: "5 minutes" as const };
   const products: PublicationProduct[] = [];
   let diagnostic: ImageDiagnostic | undefined;
-  let safeFailure = "เตรียมรูปสินค้าไม่สำเร็จ กรุณาตรวจสอบ Airtable แล้วลอง /docs อีกครั้ง";
+  let safeFailure = "เตรียมรูปสินค้าไม่สำเร็จ กรุณาตรวจสอบ Airtable";
   try {
     for (const validatedProduct of validated.run.products as Array<RawPublicationProduct | PublicationProduct>) {
     // Existing workflow instances may replay a pre-upgrade validated product with only R2 keys.
@@ -287,7 +287,7 @@ export async function preparePublicationImages(deps: ImagePreparationDeps, valid
           if (context && !retryable) {
             try { await failImagePreparation(deps.db, deps.clock, context.owner, code === "product_image_source_changed" ? "conflicted" : "failed", safe); } catch { /* Preserve the original failure if ownership changed. */ }
           }
-          if (!retryable) throw new NonRetryableError(safe, code);
+          if (!retryable) throw new NonRetryableError(safe);
           throw new Error(safe);
         }
       };

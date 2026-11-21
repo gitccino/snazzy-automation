@@ -647,3 +647,12 @@ it('preserves a safe provider code when durable serialization discards error nam
   expect(JSON.stringify(notice.mock.calls)).toContain('เชื่อมต่อ Claude');
   expect(JSON.stringify(notice.mock.calls)).not.toContain('SECRET');
 });
+
+it('preserves the original failure if primary feedback persistence fails', async () => {
+  vi.clearAllMocks();
+  stages.recoverPublicationFinalization.mockResolvedValue(null);
+  stages.validatePublication.mockRejectedValue(new OperationalError('airtable_read_failed','private',true));
+  const step = retryingStep();
+  const db = {prepare: () => { throw new Error('database unavailable'); }} as unknown as D1Database;
+  await expect(runPublicationWorkflow({publicationRunId:'run',trigger:'line'},step as unknown as WorkflowStep,{...deps,db,config:{...deps.config,publicationRetryLimit:0}},'publication-run',{groupId:'group',notificationCycle:1})).rejects.toThrow('airtable_read_failed');
+});

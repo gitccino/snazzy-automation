@@ -1,4 +1,5 @@
 import { docsWorkflowFailureCard, publicationFailureGuidance } from '../line/docs-summary-card';
+import { publicationOwnerReviewInstruction } from '../line/messages';
 import { earlySetupResult } from '../line/early-setup-notice';
 import {
   preparePublicationImages,
@@ -23,7 +24,7 @@ import { readPublicationJob, completePublicationVerification, readPreGoogleFailu
 import { createWorkflowFeedbackRepository } from '../db/workflow-feedback';
 import { docsUnconfirmedCard } from '../line/docs-summary-card';
 import type { TerminalResultV1 } from '../line/reply-types';
-import { OperationalError } from "../shared/errors";
+import { OperationalError, workflowFailureCode, workflowFailureMessage } from "../shared/errors";
 import type { Clock } from "../shared/time";
 import {
   ensureTemporaryDocument,
@@ -107,16 +108,8 @@ function depsFor(
 }
 
 function publicationErrorCode(error:unknown,fallback:string):string {
-  const message = error instanceof Error ? error.message.replace(/^NonRetryableError: (?=workflow-failure-v1:)/, '') : '';
-  if (message.startsWith('workflow-failure-v1:')) {
-    try {
-      const fact: unknown = JSON.parse(message.slice('workflow-failure-v1:'.length));
-      if (typeof fact === 'object' && fact !== null && Object.keys(fact).sort().join(',') === 'code,reason' &&
-          typeof (fact as {code?:unknown}).code === 'string' && /^[a-z][a-z0-9_]{0,99}$/.test((fact as {code:string}).code) &&
-          typeof (fact as {reason?:unknown}).reason === 'string') return (fact as {code:string}).code;
-    } catch { /* Invalid envelopes use the safe fallback. */ }
-    return fallback;
-  }
+  const decoded = workflowFailureCode(error);
+  if (decoded) return decoded;
   const code=error instanceof ProductImagePreparationFailure ? error.diagnostic?.code ?? "" : error instanceof OperationalError ? error.code : error instanceof Error ? error.name : '';
   return /^[a-z][a-z0-9_]{0,99}$/.test(code)?code:fallback;
 }
@@ -129,7 +122,7 @@ async function workflowCall<T>(
     return await call();
   } catch (error) {
     const code = error instanceof OperationalError || error instanceof ProductImagePreparationFailure ? publicationErrorCode(error, 'publication_stage_failed') : 'publication_stage_failed';
-    const message = `workflow-failure-v1:${JSON.stringify({code, reason})}`;
+    const message = workflowFailureMessage(code, reason);
     if (error instanceof NonRetryableError || (error instanceof OperationalError && !error.retryable)) throw new NonRetryableError(message);
     throw new Error(message);
   }
@@ -178,11 +171,11 @@ export async function runPublicationWorkflow(
       await step.do("persist primary publication failure",persistenceOptions,async()=>{
         const job=await readPublicationJob(deps.db,runId);
         if (!job || job.generation!==generation || job.notificationCycle!==feedbackIdentity.notificationCycle || job.correlationId!==instanceId)
-          throw new NonRetryableError("Publication identity unavailable","publication_generation_stale");
+          throw new NonRetryableError("Publication identity unavailable");
         if (job.state === "succeeded") return;
         const attempt={kind:"publication" as const,runId,generation,...feedbackIdentity};
         const committed=await createWorkflowFeedbackRepository(deps.db).commitOutcome(attempt,{stage,failureCode:publicationErrorCode(originalError,"publication_stage_failed"),action:"verify",outcome:"unconfirmed",references:{thaiDate:displayDate??"ไม่สามารถอ่านวันที่รายการได้",airtableRunUrl:`https://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`,publicBaseUrl:deps.config.publicBaseUrl,...(imageDiagnostic ? {imageDiagnostic} : {})},resultKey:JSON.stringify(["publication",runId,generation,feedbackIdentity.notificationCycle,"terminal"])});
-        if (!committed) throw new NonRetryableError("Publication identity unavailable","publication_generation_stale");
+        if (!committed) throw new NonRetryableError("Publication identity unavailable");
       });
     }
     type Notice={text:string;contents?:Record<string,unknown>;outcome:TerminalResultV1['outcome']};
@@ -206,7 +199,7 @@ export async function runPublicationWorkflow(
           if (saved) {
             const fact=JSON.parse(saved.outcome_json) as {stage:string;failureCode?:string;references?:{imageDiagnostic?:unknown}};
             const guidance = publicationFailureGuidance(fact.stage, fact.failureCode, fact.references?.imageDiagnostic);
-            return JSON.stringify({text:`วันที่: ${displayDate ?? "ไม่สามารถอ่านวันที่รายการได้"}\n${guidance}\nสถานะการล้างข้อมูลหรือบันทึก Airtable ยังไม่แน่นอน\nให้ผู้ดูแลตรวจสอบงานเดิมก่อนดำเนินการต่อ\nhttps://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`,outcome:'unconfirmed'} satisfies Notice);
+            return JSON.stringify({text:`วันที่: ${displayDate ?? "ไม่สามารถอ่านวันที่รายการได้"}\n${guidance}\nสถานะการล้างข้อมูลหรือบันทึก Airtable ยังไม่แน่นอน\n${publicationOwnerReviewInstruction}\nhttps://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`,outcome:'unconfirmed'} satisfies Notice);
           }
         }
         const card=docsUnconfirmedCard({thaiDate:displayDate??'ไม่สามารถอ่านวันที่รายการได้',airtableRunUrl:`https://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`},deps.config.publicBaseUrl);
@@ -225,7 +218,7 @@ export async function runPublicationWorkflow(
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
-    await recordFailure("recover finalization","Unable to finalize the publication.",null,error);
+    try { await recordFailure("recover finalization","Unable to finalize the publication.",null,error); } catch { console.error('publication_failure_feedback_unavailable', {runId,generation}); }
     throw error;
   }
   if (recovered) {
@@ -246,7 +239,7 @@ export async function runPublicationWorkflow(
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
-    await recordFailure("validate publication","Unable to read or validate publication data.",null,error);
+    try { await recordFailure("validate publication","Unable to read or validate publication data.",null,error); } catch { console.error('publication_failure_feedback_unavailable', {runId,generation}); }
     throw error;
   }
   if (validation.kind === "already_succeeded") return validation.result;
@@ -307,7 +300,7 @@ export async function runPublicationWorkflow(
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
-    await recordFailure(failureStage,failureReason,validation.value.thaiDate,error);
+    try { await recordFailure(failureStage,failureReason,validation.value.thaiDate,error); } catch { console.error('publication_failure_feedback_unavailable', {runId,generation}); }
     throw error;
   }
   // Notification failure must not delete or downgrade a completed document.
@@ -414,18 +407,23 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
         event.instanceId !==
           publicationWorkflowId(event.payload.publicationRunId, generation))
     ) {
-      throw new NonRetryableError(
-        "Invalid publication generation owner",
-        "publication_generation_stale",
-      );
+      throw new NonRetryableError("Invalid publication generation owner");
     }
     let context;
+    let identity: {runId:string;generation:number;notificationCycle:number};
+    let setupStage = 'settings-context';
     try {
       context = await step.do(
         "settings-context",
         { retries: { limit: 0, delay: "1 second" } },
         () => resolvePublicationContext(this.env, payload),
       );
+      setupStage = 'notification-identity';
+      identity = await step.do('notification-identity',{retries:{limit:0,delay:'1 second'}},async()=>{
+        const job=await readPublicationJob(this.env.DB,event.payload.publicationRunId);
+        if(!job || job.generation!==generation || job.correlationId!==event.instanceId)throw new NonRetryableError('Publication identity unavailable');
+        return {runId:event.payload.publicationRunId,generation,notificationCycle:job.notificationCycle};
+      });
     } catch (error) {
       try {
         await step.do('setup-failure-notice', async () => {
@@ -438,18 +436,13 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
           const binding = bindings.results[0];
           const attempt = {kind:'publication' as const, runId, generation, notificationCycle:job.notificationCycle, groupId:binding.group_id!};
           const resultKey = JSON.stringify(['publication',runId,generation,job.notificationCycle,'terminal']);
-          const committed = await createWorkflowFeedbackRepository(this.env.DB).commitOutcome(attempt, {stage:'settings-context', failureCode:'setup_failed', action:'verify', outcome:'unconfirmed', resultKey, eventId:binding.event_id, references:{notice:'early_setup'}}, binding.event_id);
+          const committed = await createWorkflowFeedbackRepository(this.env.DB).commitOutcome(attempt, {stage:setupStage, failureCode:'setup_failed', action:'verify', outcome:'unconfirmed', resultKey, eventId:binding.event_id, references:{notice:'early_setup'}}, binding.event_id);
           if (!committed) return;
           await createLineReplyRepository(this.env.DB,{now:()=>new Date()}).enqueueResult({groupId:attempt.groupId,resultKey,result:earlySetupResult(attempt)});
         });
       } catch { /* Preserve the setup failure. */ }
       throw error;
     }
-    const identity=await step.do('notification-identity',{retries:{limit:0,delay:'1 second'}},async()=>{
-      const job=await readPublicationJob(this.env.DB,event.payload.publicationRunId);
-      if(!job || job.generation!==generation || job.correlationId!==event.instanceId)throw new NonRetryableError('Publication identity unavailable','publication_generation_stale');
-      return {runId:event.payload.publicationRunId,generation,notificationCycle:job.notificationCycle};
-    });
     return runPublicationWorkflow(
       event.payload,
       step,

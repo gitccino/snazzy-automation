@@ -1,6 +1,6 @@
 import { imageFailureGuidance } from "../publication/image-diagnostic";
 import type { SearchCardReply } from "./search-card";
-import { buildPublicationSuccessMessage, buildPublicationValidationFailureMessage, buildPublicationWorkflowFailureMessage } from "./messages";
+import { buildPublicationSuccessMessage, buildPublicationValidationFailureMessage, buildPublicationWorkflowFailureMessage, publicationOwnerReviewInstruction } from "./messages";
 
 const text = (value: string, muted = false) => ({ type: "text", text: value, color: muted ? "#949494" : "#2C2C2C", size: "sm", wrap: true });
 
@@ -59,7 +59,7 @@ export function docsValidationFailureCard(input: Parameters<typeof buildPublicat
 export function docsWorkflowFailureCard(input: Parameters<typeof buildPublicationWorkflowFailureMessage>[0], publicBaseUrl: string): SearchCardReply {
   return { kind: "flex", text: buildPublicationWorkflowFailureMessage(input), contents: summaryCard(
     "สร้างเอกสารไม่สำเร็จ", "alert-v1", input.thaiDate,
-    [{ ...text("สาเหตุ"), weight: "bold" }, { ...text(input.reason, true), size: "xs" }, { ...text("ให้ผู้ดูแลตรวจสอบงานเดิมก่อนส่ง /docs ซ้ำ", true), size: "xs" }],
+    [{ ...text("สาเหตุ"), weight: "bold" }, { ...text(input.reason, true), size: "xs" }, { ...text(publicationOwnerReviewInstruction, true), size: "xs" }],
     "เปิดใน Airtable", input.airtableRunUrl, publicBaseUrl,
   ) };
 }
@@ -77,7 +77,7 @@ export function publicationFailureGuidance(stage: string, code?: string | null, 
 }
 
 export function docsUnconfirmedCard(input:{thaiDate:string;airtableRunUrl:string;reason?:string},publicBaseUrl:string):SearchCardReply {
-  const guidance='กรุณาตรวจสอบสถานะงานและเอกสารก่อนส่ง /docs ซ้ำ';
+  const guidance=publicationOwnerReviewInstruction;
   return {kind:'flex',text:[`วันที่: ${input.thaiDate}`,'ยังยืนยันสถานะงานเอกสารไม่ได้',...(input.reason ? [input.reason] : []),guidance,`ลิงก์ Airtable: ${input.airtableRunUrl}`].join('\n'),contents:summaryCard(
     'ยังยืนยันสถานะงานเอกสารไม่ได้','alert-v1',input.thaiDate,
     [...(input.reason ? [text(input.reason)] : []),{...text(guidance,true),size:'xs'}],'เปิดใน Airtable',input.airtableRunUrl,publicBaseUrl,
