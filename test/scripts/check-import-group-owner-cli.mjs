@@ -21,6 +21,16 @@ test('owner CLI repairs only the matching local D1 notice and holds replay and c
     writeFileSync(join(dir,'seed.sql'),sql);
     command(['d1','execute','snazzy-automation-local','--local','--file',join(dir,'seed.sql')]);
     const input={runId:run,ownerGroupId:group,baseId:'base',tableId:'table',actor:'operator',reason:'reviewed'};
+    const inspect=(value)=>spawnSync(join(root,'node_modules/.bin/tsx'),[join(root,'scripts/import-group-owner.ts'),'local','inspect-run'],{cwd:dir,input:JSON.stringify(value),encoding:'utf8'});
+    const inspected=inspect({...input,kind:'import'}); assert.equal(inspected.status,0,inspected.stderr); assert.equal(JSON.parse(inspected.stdout).result.feedback.failureCode,'setup_failed');
+    assert.equal(inspect({...input,kind:'import',ownerGroupId:'foreign'}).status,1);
+    const pubContext=JSON.stringify({replyGroupId:group,settings:{config:{airtableBaseId:'base',airtablePublicationRunsTableId:'runs',googleDriveFolderId:'folder'}}});
+    writeFileSync(join(dir,'publication.sql'),`INSERT INTO publication_jobs(publication_run_id,state,correlation_id,created_at,updated_at,settings_context_json,generation,notification_cycle) VALUES('pub_cli','failed','workflow','now','now',${quote(pubContext)},2,3);`);
+    command(['d1','execute','snazzy-automation-local','--local','--file',join(dir,'publication.sql')]);
+    const publication=inspect({kind:'publication',runId:'pub_cli',ownerGroupId:group,baseId:'base',tableId:'runs',generation:2,notificationCycle:3});
+    assert.equal(publication.status,0,publication.stderr); assert.equal(JSON.parse(publication.stdout).result.execution.notificationCycle,3);
+
+
     const cli=(value)=>spawnSync(join(root,'node_modules/.bin/tsx'),[join(root,'scripts/import-group-owner.ts'),'local','repair-notice'],{cwd:dir,input:JSON.stringify(value),encoding:'utf8'});
     assert.equal(cli({...input,baseId:'wrong'}).status,1);
     assert.equal(cli({...input,ownerGroupId:'other'}).status,1);

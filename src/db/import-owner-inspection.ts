@@ -25,14 +25,12 @@ export async function inspectImportGroup(db: D1Database, runId: string, ownerGro
   const feedbackRows = (await db.prepare(`SELECT stage, failure_code FROM workflow_feedback WHERE kind='import' AND run_id=? AND generation=1 AND notification_cycle=1 AND group_id=? AND context_json=?`).bind(runId,ownerGroupId,row.settings_context_json).all<{stage:string;failure_code:string|null}>()).results;
   const saved = feedbackRows[0];
   const safeCode = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value) ? value : null;
-  const heads = (await db.prepare(`SELECT sequence,state,owner_event_id FROM line_result_outbox o WHERE group_id=? AND state!='accepted' AND NOT EXISTS(SELECT 1 FROM line_reply_owner_dispositions d WHERE d.sequence=o.sequence) ORDER BY sequence LIMIT 1`).bind(ownerGroupId).all<{sequence:number;state:string;owner_event_id:string|null}>()).results;
-  const head = heads[0];
-  const dispatches = head ? (await db.prepare(`SELECT event_id,workflow_id,phase,request_id,http_status,disposition,rejection_proven FROM line_reply_dispatches WHERE group_id=? AND candidate_sequence=? ORDER BY updated_at,event_id`).bind(ownerGroupId,head.sequence).all<{event_id:string;workflow_id:string;phase:string;request_id:string|null;http_status:number|null;disposition:string|null;rejection_proven:number}>()).results : [];
+  const queueHead = await inspectOwnerQueue(db, ownerGroupId);
   const claims = (await db.prepare(`SELECT product_id,base_id,table_id FROM airtable_create_claims WHERE group_id=?`).bind(groupId).all<{product_id:string;base_id:string;table_id:string}>()).results;
   const claim = claims[0];
   const verification = (await db.prepare(`SELECT origin_workflow_id,verifier_id,completed FROM import_verification_claims WHERE import_run_id=? AND group_id=? AND context_json=?`).bind(runId,ownerGroupId,row.settings_context_json).all<{origin_workflow_id:string;verifier_id:string;completed:number|null}>()).results[0];
   return {feedback:saved ? {stage:safeCode(saved.stage),failureCode:safeCode(saved.failure_code)} : null,
-    queueHead:head ? {sequence:head.sequence,state:safeCode(head.state),ownerEventId:safeCode(head.owner_event_id),dispatches:dispatches.map(d => ({eventId:safeCode(d.event_id),workflowId:safeCode(d.workflow_id),phase:safeCode(d.phase),requestId:safeCode(d.request_id),httpStatus:d.http_status,disposition:safeCode(d.disposition),rejectionProven:d.rejection_proven === 1}))} : null,
+    queueHead,
     createClaim:claim && reference(claim.product_id) && id(claim.base_id) && id(claim.table_id) ? claim : null,
     verification:verification ? {originWorkflowId:safeCode(verification.origin_workflow_id),verifierId:safeCode(verification.verifier_id),completed:verification.completed} : null,
     runFailure:safeCode(row.run_failure), groupFailure:safeCode(row.group_failure), checkpointPosition:row.checkpoint_position,
@@ -42,4 +40,12 @@ export async function inspectImportGroup(db: D1Database, runId: string, ownerGro
     group:{id:row.group_id, state:row.state, hash:row.group_hash, productId:row.product_id, airtableRecordId:row.airtable_record_id,
       firstPhotoId:row.first_photo_id, lastPhotoId:row.last_photo_id, attemptCount:row.attempt_count},
     originals:rows.filter(m => m.ordinal !== null).map(m => ({ordinal:m.ordinal, applePhotoId:m.apple_photo_id, r2Key:m.r2_key}))};
+}
+
+export async function inspectOwnerQueue(db: D1Database, ownerGroupId: string) {
+  const safeCode = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value) ? value : null;
+  const heads = (await db.prepare(`SELECT sequence,state,owner_event_id FROM line_result_outbox o WHERE group_id=? AND state!='accepted' AND NOT EXISTS(SELECT 1 FROM line_reply_owner_dispositions d WHERE d.sequence=o.sequence) ORDER BY sequence LIMIT 1`).bind(ownerGroupId).all<{sequence:number;state:string;owner_event_id:string|null}>()).results;
+  const head = heads[0];
+  const dispatches = head ? (await db.prepare(`SELECT event_id,workflow_id,phase,request_id,http_status,disposition,rejection_proven FROM line_reply_dispatches WHERE group_id=? AND candidate_sequence=? ORDER BY updated_at,event_id`).bind(ownerGroupId,head.sequence).all<{event_id:string;workflow_id:string;phase:string;request_id:string|null;http_status:number|null;disposition:string|null;rejection_proven:number}>()).results : [];
+  return head ? {sequence:head.sequence,state:safeCode(head.state),ownerEventId:safeCode(head.owner_event_id),dispatches:dispatches.map(d => ({eventId:safeCode(d.event_id),workflowId:safeCode(d.workflow_id),phase:safeCode(d.phase),requestId:safeCode(d.request_id),httpStatus:d.http_status,disposition:safeCode(d.disposition),rejectionProven:d.rejection_proven === 1}))} : null;
 }
