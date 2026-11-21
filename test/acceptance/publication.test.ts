@@ -512,8 +512,10 @@ describe("publication acceptance", () => {
     fixture.state.status = "Ready";
     vi.mocked(globalThis.fetch).mockImplementation(fixture.deps.fetcher as typeof fetch);
     const binding = workflowBinding();
+    let v2Created = false;
     binding.get.mockImplementation(async (id: string) => {
-      if (id.endsWith("-v2") || id.endsWith("-v3")) throw new Error("instance.not_found");
+      if ((id.endsWith("-v2") && !v2Created) || id.endsWith("-v3")) throw new Error("instance.not_found");
+      if (id.endsWith("-v2")) return { status: async () => ({ status: "errored" }), restart: binding.restart, resume: vi.fn() };
       return { status: async () => ({ status: "complete" }), restart: binding.restart, resume: vi.fn() };
     });
     const triggerEnv = { ...env, ...configEnv, PUBLICATION_WORKFLOW: binding } as unknown as Env;
@@ -524,6 +526,7 @@ describe("publication acceptance", () => {
     expect(triggers.some(value => value.status === "regenerating")).toBe(true);
     expect(binding.create).toHaveBeenCalledTimes(1);
     expect(binding.create.mock.calls.every(([value]) => value.id === "publication-rec-run-1-v2")).toBe(true);
+    v2Created = true;
     fixture.state.publishFailure = loseResponse;
     if (loseResponse) {
       await expect(fixture.run(2)).rejects.toThrow("Unable to finalize");
@@ -805,8 +808,8 @@ describe("publication acceptance", () => {
     for (const call of queries) expect(new URL(call.url).searchParams.get("filterByFormula")).toBe("DATESTR({Publication Date})='2026-09-02'");
   });
 
-  it.each([[503, "errored", "restarted"], [429, "missing", "started"]] as const)
-    ("exhausts six Google %s attempts before cleanup, then restarts a %s Workflow using cached products", async (httpStatus, workflowStatus, triggerStatus) => {
+  it.each([[503, "errored", "restarted"], [429, "missing", "restarted"]] as const)
+    ("exhausts six Google %s attempts before cleanup, then handles a %s Workflow with cached products", async (httpStatus, workflowStatus, triggerStatus) => {
       const fixture = publicationFixture();
       fixture.state.batchFailureStatus = httpStatus;
       await expect(fixture.run()).rejects.toThrow("Unable to fill or verify the Google document.");
@@ -841,12 +844,23 @@ describe("publication acceptance", () => {
       const binding = workflowBinding();
       binding.setStatus(workflowStatus);
       const triggerEnv = { ...env, ...configEnv, PUBLICATION_WORKFLOW: binding } as unknown as Env;
-      const response = await handleDocsRoute(docsRequest(), triggerEnv, clock);
+      let response = await handleDocsRoute(docsRequest(), triggerEnv, clock);
+      if (workflowStatus === "missing") {
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ status: "owner_review", publicationRunId: runId });
+        expect(await job()).toMatchObject({ state: "failed", correlation_id: "publication-rec-run-1" });
+        expect(await getProductCache(env.DB, runId, "A-1001")).toEqual(cached);
+        expect(binding.create).not.toHaveBeenCalled();
+        expect(binding.restart).not.toHaveBeenCalled();
+        binding.setStatus("errored");
+        response = await handleDocsRoute(docsRequest(), triggerEnv, clock);
+      }
       expect(response.status).toBe(202);
       expect(await response.json()).toEqual({ status: triggerStatus, publicationRunId: runId });
       expect(await job()).toMatchObject({ state: "locked", correlation_id: "publication-rec-run-1" });
       expect(await getProductCache(env.DB, runId, "A-1001")).toEqual(cached);
-      expect(workflowStatus === "errored" ? binding.restart : binding.create).toHaveBeenCalledTimes(1);
+      expect(binding.restart).toHaveBeenCalledTimes(1);
+      expect(binding.create).not.toHaveBeenCalled();
       fixture.state.batchFailureStatus = 0;
       const result = await fixture.run(1, 2);
       expect(result!.googleDocId).toBe("temp-doc-2");
