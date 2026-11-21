@@ -100,7 +100,7 @@ describe("handleDocsTrigger", () => {
     expect(fixture.restart).not.toHaveBeenCalled();
   });
 
-  it("keeps an allocated v2 resumable after Workflow creation fails", async () => {
+  it("holds an allocated v2 after Workflow creation is unconfirmed", async () => {
     mockRun();
     const fixture = makeTriggerEnv("complete");
     await completed(fixture);
@@ -126,9 +126,8 @@ describe("handleDocsTrigger", () => {
     });
     await expect(
       handleDocsTrigger(fixture.env, "line", clock),
-    ).resolves.toMatchObject({ status: "started" });
+    ).resolves.toMatchObject({ status: "owner_review" });
     expect(fixture.create.mock.calls.map(([value]) => value.id)).toEqual([
-      "publication-rec-run-1-v2",
       "publication-rec-run-1-v2",
     ]);
   });
@@ -325,12 +324,30 @@ describe("handleDocsTrigger", () => {
     ).toBe("failed");
   });
 
-  it.each(["errored", "terminated", "complete", "missing"])(
+  it("holds a saved failed attempt when its Workflow lookup reports missing", async () => {
+    mockRun("Failed");
+    const fixture = makeTriggerEnv("unknown");
+    const { captureOperationContext } = await import("../../src/settings/runtime");
+    const { savePublicationAttemptContext } = await import("../../src/db/execution-context-repository");
+    const context = {...await captureOperationContext(fixture.env, null), replyGroupId:"owner"};
+    await acquireOrResumeJob(fixture.env.DB, clock, "rec-run-1", "publication-rec-run-1");
+    await savePublicationAttemptContext(fixture.env.DB, "rec-run-1", 1, context);
+    await putProductCollage(fixture.env.DB, clock, "rec-run-1", "A-1001", "cached", "input");
+    await setJobState(fixture.env.DB, clock, "rec-run-1", "failed");
+    const saved = await fixture.env.DB.prepare("SELECT state,settings_context_json FROM publication_jobs WHERE publication_run_id=?").bind("rec-run-1").first();
+    fixture.get.mockRejectedValue(new Error("instance.not_found"));
+    for (let i=0;i<2;i++) expect(await handleDocsTrigger(fixture.env,"line",clock,undefined,fetch,context)).toEqual({status:"owner_review",publicationRunId:"rec-run-1"});
+    expect(fixture.create).not.toHaveBeenCalled();
+    expect(fixture.restart).not.toHaveBeenCalled();
+    expect(await fixture.env.DB.prepare("SELECT state,settings_context_json FROM publication_jobs WHERE publication_run_id=?").bind("rec-run-1").first()).toEqual(saved);
+    expect((await getProductCache(fixture.env.DB, "rec-run-1", "A-1001"))?.collageR2Key).toBe("cached");
+  });
+
+  it.each(["errored", "terminated", "complete"])(
     "reopens a failed job with its cached products before the %s Workflow is started again",
     async (statusValue) => {
       mockRun("Failed");
       const fixture = makeTriggerEnv(statusValue);
-      if (statusValue === "missing") fixture.get.mockRejectedValue(new Error("instance.not_found"));
       await acquireOrResumeJob(
         fixture.env.DB,
         clock,
@@ -367,8 +384,7 @@ describe("handleDocsTrigger", () => {
         ).toBe("failed");
         return { status: statusValue };
       });
-      const start =
-        statusValue === "missing" ? fixture.create : fixture.restart;
+      const start = fixture.restart;
       start.mockImplementation(async () => {
         const { job } = await acquireOrResumeJob(
           fixture.env.DB,
@@ -393,87 +409,13 @@ describe("handleDocsTrigger", () => {
       await expect(
         handleDocsTrigger(fixture.env, "admin", clock),
       ).resolves.toEqual({
-        status: statusValue === "missing" ? "started" : "restarted",
+        status: "restarted",
         publicationRunId: "rec-run-1",
       });
       expect(start).toHaveBeenCalledTimes(1);
-      expect(
-        statusValue === "missing" ? fixture.restart : fixture.create,
-      ).not.toHaveBeenCalled();
+      expect(fixture.create).not.toHaveBeenCalled();
     },
   );
-
-  it("keeps a reopened failed job and its cache resumable if recreating an expired Workflow fails", async () => {
-    mockRun("Failed");
-    const fixture = makeTriggerEnv("unknown");
-    fixture.get.mockRejectedValue(new Error("instance.not_found"));
-    await acquireOrResumeJob(
-      fixture.env.DB,
-      clock,
-      "rec-run-1",
-      "previous-owner",
-    );
-    await putProductCollage(
-      fixture.env.DB,
-      clock,
-      "rec-run-1",
-      "A-1001",
-      "products/A-1001/collage/1080x1080.jpg",
-      "collage-input",
-    );
-    await putProductCaptions(
-      fixture.env.DB,
-      clock,
-      "rec-run-1",
-      "A-1001",
-      '["หนึ่ง","สอง","สาม"]',
-      "caption-input",
-    );
-    await setJobState(fixture.env.DB, clock, "rec-run-1", "failed");
-    fixture.create.mockRejectedValueOnce(
-      new Error("Workflow creation unavailable"),
-    );
-
-    await expect(
-      handleDocsTrigger(fixture.env, "admin", clock),
-    ).rejects.toThrow("Workflow creation unavailable");
-    expect(
-      (await acquireOrResumeJob(fixture.env.DB, clock, "rec-run-1", "other"))
-        .job,
-    ).toMatchObject({
-      state: "locked",
-      correlationId: "publication-rec-run-1",
-    });
-    expect(
-      await getProductCache(fixture.env.DB, "rec-run-1", "A-1001"),
-    ).toEqual({
-      collageR2Key: "products/A-1001/collage/1080x1080.jpg",
-      captionsJson: '["หนึ่ง","สอง","สาม"]',
-      collageInputFingerprint: "collage-input",
-      captionsInputFingerprint: "caption-input",
-    });
-
-    await expect(
-      handleDocsTrigger(fixture.env, "admin", clock),
-    ).resolves.toEqual({
-      status: "started",
-      publicationRunId: "rec-run-1",
-    });
-    expect(fixture.create).toHaveBeenCalledTimes(2);
-    expect(
-      fixture.create.mock.calls.every(
-        ([options]) => options.id === "publication-rec-run-1",
-      ),
-    ).toBe(true);
-    expect(
-      await getProductCache(fixture.env.DB, "rec-run-1", "A-1001"),
-    ).toEqual({
-      collageR2Key: "products/A-1001/collage/1080x1080.jpg",
-      captionsJson: '["หนึ่ง","สอง","สาม"]',
-      collageInputFingerprint: "collage-input",
-      captionsInputFingerprint: "caption-input",
-    });
-  });
 
   it.each(["Draft", "Generating", "Generated"] as const)(
     "does not reopen or start a run returned with ineligible %s status",

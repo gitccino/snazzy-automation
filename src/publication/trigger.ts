@@ -199,6 +199,8 @@ export async function handleDocsTrigger(
   let workflow = await lookupWorkflow(env, id);
   if (workflow && activeStatuses.includes(workflow.state.status))
     return { status: "already_running", publicationRunId };
+  if (!workflow && !acquired.ownsLock && !replacing)
+    return { status: "owner_review", publicationRunId };
   if (replacing) {
     const replacement = await reopenSuccessfulJobForRegeneration(
       env.DB,
