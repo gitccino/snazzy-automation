@@ -22,6 +22,20 @@ it('admits one verifier only for the captured running album owner', async () => 
   expect(await db.prepare('SELECT count(*) AS n FROM import_verification_claims WHERE import_run_id=?').bind(runId).first('n')).toBe(1);
 });
 
+it('holds a completed historical group when the running-import verifier is requested', async () => {
+  const db = testEnv().DB, runId = crypto.randomUUID(), albumId = crypto.randomUUID(), groupId = crypto.randomUUID();
+  const contextJson = JSON.stringify({replyGroupId:'owner', settings:{config:{airtableBaseId:'original-base', airtableProductsTableId:'original-table'}}});
+  await db.prepare("INSERT INTO import_runs (id,source_album_id,trigger,status,started_at,settings_context_json) VALUES (?,?,'line','completed_with_failures','x',?)").bind(runId, albumId, contextJson).run();
+  await db.prepare("INSERT INTO product_groups (id,import_run_id,ordinal,group_hash,state,first_photo_id,last_photo_id,created_at,updated_at) VALUES (?,?,0,?,'failed','missing','missing','x','x')").bind(groupId,runId,crypto.randomUUID()).run();
+  await db.prepare("INSERT INTO import_checkpoints (source_album_id,last_position,updated_at) VALUES (?,42,'x')").bind(albumId).run();
+  const input = {runId, albumId, workflowId:`import-${runId}`, groupId:'owner', contextJson};
+  expect(await claimImportVerification(db, input)).toBe(false);
+  expect(await claimImportVerification(db, input)).toBe(false);
+  expect(await db.prepare('SELECT state,product_id FROM product_groups WHERE id=?').bind(groupId).first()).toEqual({state:'failed',product_id:null});
+  expect(await db.prepare('SELECT last_position FROM import_checkpoints WHERE source_album_id=?').bind(albumId).first('last_position')).toBe(42);
+  expect(await db.prepare('SELECT count(*) AS n FROM import_verification_claims WHERE import_run_id=?').bind(runId).first('n')).toBe(0);
+});
+
 it('atomically completes and queues one result, rolling back on outbox failure', async () => {
   const { completeImportVerification } = await import('../../src/db/import-repository');
   const db = testEnv().DB;
