@@ -77,6 +77,18 @@ export function createWorkflowFeedbackRepository(db: D1Database) {
     if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('invalid_limit');
     return (await db.prepare('SELECT * FROM workflow_feedback_results WHERE group_id=? AND materialized=0 ORDER BY rowid LIMIT ?').bind(groupId,limit).all()).results;
   }
+  async function ownsPublicationResult(runId: string, generation: number, cycle: number, groupId: string) {
+    return !!await db.prepare(`SELECT 1 FROM workflow_feedback f JOIN publication_jobs j ON j.publication_run_id=f.run_id
+      WHERE f.kind='publication' AND f.run_id=? AND f.generation=? AND f.notification_cycle=? AND f.group_id=?
+      AND j.generation=f.generation AND j.notification_cycle=f.notification_cycle AND j.settings_context_json=f.context_json
+      AND json_extract(j.settings_context_json,'$.replyGroupId')=f.group_id`).bind(runId,generation,cycle,groupId).first();
+  }
+  async function earlierHead(groupId: string, sequence: number, resultKey: string) {
+    return !!await db.prepare(`SELECT 1 FROM line_result_outbox o JOIN workflow_feedback_results older ON older.result_key=o.result_key AND older.group_id=o.group_id
+      JOIN workflow_feedback_results pending ON pending.result_key=? AND pending.group_id=o.group_id
+      WHERE o.group_id=? AND o.sequence=? AND older.kind=pending.kind AND older.run_id=pending.run_id
+      AND older.generation=pending.generation AND older.notification_cycle=pending.notification_cycle AND older.revision<pending.revision`).bind(resultKey,groupId,sequence).first();
+  }
   async function publicationHead(groupId: string) {
     return db.prepare(`SELECT o.sequence,o.result_json,f.run_id,f.generation,f.notification_cycle,f.result_key,f.outcome_json
       FROM line_result_outbox o JOIN workflow_feedback_results f ON f.result_key=o.result_key AND f.group_id=o.group_id
@@ -99,11 +111,23 @@ export function createWorkflowFeedbackRepository(db: D1Database) {
       AND ((state='pending' AND owner_event_id IS NULL) OR (state='blocked' AND EXISTS(SELECT 1 FROM line_reply_dispatches WHERE event_id=line_result_outbox.owner_event_id AND candidate_sequence=line_result_outbox.sequence AND group_id=line_result_outbox.group_id AND phase='rejected' AND disposition='blocked_payload')))`)
       .bind(JSON.stringify(result),groupId,sequence,raw,groupId).run();
   }
-  async function markMaterialized(resultKey: string, groupId: string) {
-    await db.prepare(`UPDATE workflow_feedback_results SET materialized=1 WHERE result_key=? AND group_id=? AND EXISTS (SELECT 1 FROM line_result_outbox WHERE result_key=? AND group_id=?)`).bind(resultKey,groupId,resultKey,groupId).run();
+  async function enqueueCorrection(resultKey: string, groupId: string, outcomeJson: string, result: unknown) {
+    const json=JSON.stringify(result);
+    await db.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at)
+      SELECT f.result_key,f.group_id,?,datetime('now') FROM workflow_feedback_results f
+      JOIN workflow_feedback w ON w.kind=f.kind AND w.run_id=f.run_id AND w.generation=f.generation AND w.notification_cycle=f.notification_cycle AND w.group_id=f.group_id
+      JOIN publication_jobs j ON j.publication_run_id=f.run_id AND j.generation=f.generation AND j.notification_cycle=f.notification_cycle AND j.settings_context_json=w.context_json
+      WHERE f.result_key=? AND f.group_id=? AND f.outcome_json=? AND f.materialized=0 AND json_extract(j.settings_context_json,'$.replyGroupId')=f.group_id
+      AND NOT EXISTS(SELECT 1 FROM line_result_outbox o WHERE o.group_id=f.group_id AND o.state!='accepted' AND NOT EXISTS(SELECT 1 FROM line_reply_owner_dispositions d WHERE d.sequence=o.sequence))
+      ON CONFLICT(result_key) DO NOTHING`).bind(json,resultKey,groupId,outcomeJson).run();
+    const saved=await db.prepare('SELECT group_id,result_json FROM line_result_outbox WHERE result_key=?').bind(resultKey).first<{group_id:string;result_json:string}>();
+    if(!saved || saved.group_id!==groupId || saved.result_json!==json) throw new Error('outbox_result_conflict_or_order');
+  }
+  async function markMaterialized(resultKey: string, groupId: string, expected?: string, outcomeJson?: string) {
+    await db.prepare(`UPDATE workflow_feedback_results SET materialized=1 WHERE result_key=? AND group_id=? AND (? IS NULL OR outcome_json=?) AND EXISTS (SELECT 1 FROM line_result_outbox WHERE result_key=? AND group_id=? AND (? IS NULL OR result_json=?))`).bind(resultKey,groupId,outcomeJson ?? null,outcomeJson ?? null,resultKey,groupId,expected ?? null,expected ?? null).run();
   }
   async function hasOutbox(resultKey: string, groupId: string) {
     return !!await db.prepare('SELECT 1 FROM line_result_outbox WHERE result_key=? AND group_id=?').bind(resultKey,groupId).first();
   }
-  return { publicationHead, replaceUnsentHead, replaceRejectedHead, markMaterialized, hasOutbox, lookupTrustedEarlyFailure, recordStage, commitOutcome, upsertEvidence, readEvidence, pendingByGroup };
+  return { enqueueCorrection, earlierHead, ownsPublicationResult, publicationHead, replaceUnsentHead, replaceRejectedHead, markMaterialized, hasOutbox, lookupTrustedEarlyFailure, recordStage, commitOutcome, upsertEvidence, readEvidence, pendingByGroup };
 }

@@ -43,6 +43,7 @@ export function createLineReplyRepository(db: D1Database, clock: Clock) {
         db.prepare(`INSERT INTO line_reply_dispatches(event_id,group_id,workflow_id,received_at,candidate_sequence,messages_json,phase,updated_at)
           SELECT ?,?,?,?,?,?,'prepared',? WHERE ? IS NULL OR EXISTS(
             SELECT 1 FROM line_result_outbox WHERE sequence=? AND group_id=? AND state='pending'
+              AND NOT EXISTS(SELECT 1 FROM workflow_feedback_results f WHERE f.group_id=line_result_outbox.group_id AND f.materialized=0 AND NOT EXISTS(SELECT 1 FROM workflow_feedback_results older WHERE older.result_key=line_result_outbox.result_key AND older.group_id=f.group_id AND older.kind=f.kind AND older.run_id=f.run_id AND older.generation=f.generation AND older.notification_cycle=f.notification_cycle AND older.revision<f.revision))
               AND sequence=(SELECT MIN(sequence) FROM line_result_outbox WHERE group_id=? AND state!='accepted' AND NOT EXISTS(SELECT 1 FROM line_reply_owner_dispositions d WHERE d.sequence=line_result_outbox.sequence)))
           ON CONFLICT(event_id) DO NOTHING`)
           .bind(eventId, groupId, workflowId, receivedAt, candidateSequence, JSON.stringify(messages), now(), candidateSequence, candidateSequence, groupId, groupId),

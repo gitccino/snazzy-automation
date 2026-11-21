@@ -37,29 +37,56 @@ export async function deliverEventReply(input: {
   const fresh=()=>Number.isFinite(Date.parse(input.receivedAt)) && deps.clock.now().getTime()-Date.parse(input.receivedAt)<=45000;
   if(!input.replyToken.trim() || !fresh() || !await deps.isGroupAllowed(input.groupId))return 'ignored';
   const normal=input.commandReply ? renderCommandReply(input.commandReply,input.publicBaseUrl):[];
+  let repairBlocked=false;
   if(input.drainQueue && deps.feedback) {
     try {
       const rows=await deps.feedback.pendingByGroup(input.groupId,1);
-      const row=rows[0] as {kind:string;run_id:string;generation:number;notification_cycle:number;result_key:string;outcome_json:string}|undefined;
+      const row=rows[0] as {kind:string;run_id:string;generation:number;notification_cycle:number;result_key:string;outcome_json:string;revision:number}|undefined;
       if(row) {
-        if(!await deps.feedback.hasOutbox(row.result_key,input.groupId)) {
-          const outcome=JSON.parse(row.outcome_json) as {outcome?:string;result?:{messages:{type:string;text?:string}[]};references?:{thaiDate?:string;airtableRunUrl?:string;publicBaseUrl?:string;notice?:string}};
-          const facts=outcome.references;
-          if ((row.kind==='import' || row.kind==='publication') && facts?.notice==='early_setup') {
-            await deps.repo.enqueueResult({resultKey:row.result_key,groupId:input.groupId,result:earlySetupResult({kind:row.kind,runId:row.run_id,generation:row.generation,notificationCycle:row.notification_cycle,groupId:input.groupId})});
+        repairBlocked=true;
+        if(row.kind==='publication' && row.revision>0) {
+          if(!await deps.feedback.ownsPublicationResult(row.run_id,row.generation,row.notification_cycle,input.groupId)) throw new Error('invalid_notice_owner');
+          const outcome=JSON.parse(row.outcome_json) as {action?:string;outcome?:string;result?:TerminalResultV1};
+          const saved=outcome.result;
+          if(outcome.action!=='verified' || !saved || saved.schemaVersion!==1 || saved.kind!==row.kind || saved.runId!==row.run_id || saved.generation!==row.generation || saved.notificationCycle!==row.notification_cycle || saved.outcome!==outcome.outcome || !['success','failed','unconfirmed'].includes(saved.outcome)) throw new Error('invalid_verified_result');
+          let messages:TerminalResultV1['messages'];
+          try { messages=[{type:'text',text:'ผลการตรวจสอบเปลี่ยนจากข้อความก่อนหน้า'},...saved.messages]; validateReplyMessages(messages); }
+          catch { messages=[{type:'text',text:`ผลการตรวจสอบเปลี่ยนจากข้อความก่อนหน้า\n${saved.outcome==='success' ? 'ตรวจสอบแล้ว สร้างเอกสารสำเร็จ' : saved.outcome==='failed' ? 'ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed และไม่มีเอกสารที่บันทึกไว้' : 'ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ'}\nอ้างอิง: ${row.run_id.slice(0,200)}`}]; }
+          const result={...saved,messages};
+          const exists=await deps.feedback.hasOutbox(row.result_key,input.groupId);
+          const head=await deps.repo.head(input.groupId);
+          if(!exists && head) {
+            if(await deps.feedback.earlierHead(input.groupId,head.sequence,row.result_key)) repairBlocked=false;
+            else throw new Error('notice_order_unresolved');
+          } else {
+            await deps.feedback.enqueueCorrection(row.result_key,input.groupId,row.outcome_json,result);
+            await deps.feedback.markMaterialized(row.result_key,input.groupId,JSON.stringify(result),row.outcome_json);
           }
-          if(row.kind==='publication' && outcome.result) {
-            const result=outcome.result;
-            result.messages=[{type:'text',text:'ผลการตรวจสอบเปลี่ยนจากข้อความก่อนหน้า'},...result.messages];
-            await deps.repo.enqueueResult({resultKey:row.result_key,groupId:input.groupId,result:result as Parameters<LineReplyRepository['enqueueResult']>[0]['result']});
+        } else {
+          if(!await deps.feedback.hasOutbox(row.result_key,input.groupId)) {
+            const outcome=JSON.parse(row.outcome_json) as {outcome?:string;result?:{messages:{type:string;text?:string}[]};references?:{thaiDate?:string;airtableRunUrl?:string;publicBaseUrl?:string;notice?:string}};
+            const facts=outcome.references;
+            if ((row.kind==='import' || row.kind==='publication') && facts?.notice==='early_setup') {
+              await deps.repo.enqueueResult({resultKey:row.result_key,groupId:input.groupId,result:earlySetupResult({kind:row.kind,runId:row.run_id,generation:row.generation,notificationCycle:row.notification_cycle,groupId:input.groupId})});
+            }
+            if(row.kind==='publication' && outcome.result) {
+              const result=outcome.result;
+              result.messages=[{type:'text',text:'ผลการตรวจสอบเปลี่ยนจากข้อความก่อนหน้า'},...result.messages];
+              await deps.repo.enqueueResult({resultKey:row.result_key,groupId:input.groupId,result:result as Parameters<LineReplyRepository['enqueueResult']>[0]['result']});
+            }
+            if(row.kind==='publication' && outcome.outcome==='unconfirmed' && facts?.thaiDate && facts.airtableRunUrl && facts.publicBaseUrl) {
+              await deps.repo.enqueueResult({resultKey:row.result_key,groupId:input.groupId,result:unconfirmedPublicationResult(row,facts as {thaiDate:string;airtableRunUrl:string;publicBaseUrl:string})});
+            }
           }
-          if(row.kind==='publication' && outcome.outcome==='unconfirmed' && facts?.thaiDate && facts.airtableRunUrl && facts.publicBaseUrl) {
-            await deps.repo.enqueueResult({resultKey:row.result_key,groupId:input.groupId,result:unconfirmedPublicationResult(row,facts as {thaiDate:string;airtableRunUrl:string;publicBaseUrl:string})});
-          }
+          await deps.feedback.markMaterialized(row.result_key,input.groupId);
         }
-        await deps.feedback.markMaterialized(row.result_key,input.groupId);
+        if(repairBlocked) {
+          const pending=(await deps.feedback.pendingByGroup(input.groupId,1))[0] as {result_key:string}|undefined;
+          const head=pending ? await deps.repo.head(input.groupId) : null;
+          repairBlocked=!!pending && !(head && await deps.feedback.earlierHead(input.groupId,head.sequence,pending.result_key));
+        }
       }
-    } catch(error) { console.error('workflow_feedback_repair_failed',error); }
+    } catch(error) { repairBlocked=true; console.error('workflow_feedback_repair_failed',error); }
   }
   if(input.drainQueue && deps.feedback) {
     try {
@@ -80,7 +107,7 @@ export async function deliverEventReply(input: {
     } catch(error) { console.error('workflow_feedback_repair_failed',error); }
   }
   let head:Awaited<ReturnType<LineReplyRepository['head']>>=null;
-  try { if(input.drainQueue) head=await deps.repo.head(input.groupId); }
+  try { if(input.drainQueue && !repairBlocked) head=await deps.repo.head(input.groupId); }
   catch(error) { if(!(error instanceof SyntaxError))throw error; }
   let candidate:typeof head=null;
   if(head?.state==='pending') {

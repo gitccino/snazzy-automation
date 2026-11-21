@@ -211,3 +211,34 @@ it('repairs only a head with exclusively proven rejected dispatches', async () =
  await feedback.replaceRejectedHead(groupId,sequence!,'{',{fixed:true});
  expect(await db.prepare('SELECT result_json FROM line_result_outbox WHERE sequence=?').bind(sequence).first('result_json')).toBe('{');
 });
+
+it.each(['invalid', 'conflict'] as const)('holds a %s correction and later results while preserving command replies', async problem => {
+ const db=testEnv().DB, groupId=crypto.randomUUID(), runId=crypto.randomUUID(), clock=fixedClock('2026-11-20T08:00:00Z');
+ await db.prepare(`INSERT INTO publication_jobs(publication_run_id,publication_date,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,?,'generating',?,'x','x',2,1,?)`).bind(runId,runId,runId,JSON.stringify({replyGroupId:groupId})).run();
+ const {createWorkflowFeedbackRepository}=await import('../../src/db/workflow-feedback');
+ const feedback=createWorkflowFeedbackRepository(db), repo=createLineReplyRepository(db,clock), key=JSON.stringify(['publication',runId,2,1,'terminal']);
+ await feedback.commitOutcome({kind:'publication',runId,generation:2,notificationCycle:1,groupId},{stage:'prepare',action:'verify',outcome:'unconfirmed',resultKey:key});
+ await db.prepare("INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at,state) VALUES (?,?,?,'x','accepted')").bind(key,groupId,'{}').run();
+ await feedback.markMaterialized(key,groupId);
+ const correction=key+':revision:1', result={schemaVersion:1 as const,kind:'publication',runId,generation:2,notificationCycle:1,outcome:'failed',messages:[{type:'text',text:problem==='invalid'?'': 'verified'}]};
+ await db.prepare("INSERT INTO workflow_feedback_results(kind,run_id,generation,notification_cycle,revision,result_key,outcome_json,group_id) VALUES ('publication',?,2,1,1,?,?,?)").bind(runId,correction,JSON.stringify({action:'verified',outcome:'failed',result}),groupId).run();
+ if(problem==='conflict') await repo.enqueueResult({resultKey:correction,groupId,result:{...result,kind:'publication',outcome:'failed',messages:[{type:'text',text:'conflicting'}]}});
+ await repo.enqueueResult({resultKey:groupId+'later',groupId,result:{schemaVersion:1,kind:'import',runId:'later',generation:1,notificationCycle:1,outcome:'success',messages:[{type:'text',text:'later'}]}});
+ const requests:LineReplyMessage[][]=[];
+ const input={eventId:crypto.randomUUID(),groupId,workflowId:'wf',receivedAt:clock.now().toISOString(),replyToken:'fresh',commandReply:{kind:'text' as const,text:'command'},drainQueue:true,publicBaseUrl:'https://app.test'};
+ const deps={repo,feedback,clock,isGroupAllowed:async()=>true,line:{sendReplyMessages:async (_token:string,messages:LineReplyMessage[])=>{requests.push(messages);return {requestId:null};}}};
+ await deliverEventReply(input,deps);
+ await deliverEventReply({...input,eventId:crypto.randomUUID()},deps);
+ expect(requests).toEqual([[{type:'text',text:'command'}],[{type:'text',text:'command'}]]);
+ expect(await feedback.pendingByGroup(groupId,10)).toHaveLength(1);
+ expect((await repo.head(groupId))?.state).toBe('pending');
+ if(problem==='invalid') {
+  await db.prepare('DELETE FROM line_result_outbox WHERE result_key=?').bind(groupId+'later').run();
+  await deliverEventReply({...input,eventId:crypto.randomUUID()},deps);
+  expect(JSON.stringify(requests[2])).toContain('ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed');
+  expect(JSON.stringify(requests[2])).toContain(runId);
+  await deliverEventReply({...input,eventId:crypto.randomUUID(),commandReply:null},deps);
+  expect(requests).toHaveLength(3);
+  expect(await feedback.pendingByGroup(groupId,10)).toHaveLength(0);
+ }
+});
