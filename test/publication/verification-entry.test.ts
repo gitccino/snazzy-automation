@@ -113,6 +113,7 @@ it.each([
     const payload = {kind:'verification',publicationRunId:runId,generation:1,notificationCycle:1,groupId,verifierId:claim.verifierId};
     const run = () => PublicationWorkflow.prototype.run.call({env} as any, {payload,instanceId:claim.verifierId} as any, {do: async (_:string, cb:()=>Promise<unknown>)=>cb()} as any);
     await run(); await run();
+    expect(fetchMock.mock.calls.every(([, init]) => init?.method !== 'PATCH')).toBe(true);
     const claimRow = await env.DB.prepare('SELECT result_json FROM publication_verification_claims WHERE publication_run_id=?').bind(runId).first();
     const verified = JSON.parse(claimRow.result_json);
     expect(verified.outcome).toBe(outcome);
@@ -264,6 +265,7 @@ it.each(['Generating', 'Ready', 'Failed'])('holds or confirms the Airtable statu
     const payload = {kind:'verification',publicationRunId:runId,generation:1,notificationCycle:1,groupId,verifierId:claim.verifierId};
     const run = () => PublicationWorkflow.prototype.run.call({env} as any,{payload,instanceId:claim.verifierId} as any,{do:async (_:string,cb:()=>Promise<unknown>)=>cb()} as any);
     await run(); await run();
+    expect(mock.mock.calls.every(([, init]) => init?.method !== 'PATCH')).toBe(true);
     const claimRow = await env.DB.prepare('SELECT result_json FROM publication_verification_claims WHERE publication_run_id=?').bind(runId).first();
     expect(JSON.parse(claimRow.result_json).outcome).toBe(status === 'Failed' ? 'failed' : 'unconfirmed');
   } finally { mock.mockRestore(); }
