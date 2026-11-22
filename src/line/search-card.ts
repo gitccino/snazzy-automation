@@ -9,7 +9,7 @@ export interface SearchCardReply {
 }
 
 export function searchCard(product: InventoryProduct, publicBaseUrl: string, album?: AlbumLookup): SearchCardReply {
-  return productCard(product, publicBaseUrl, searchText(product), undefined, false, album);
+  return productCard(product, publicBaseUrl, searchText(product), undefined, false, album, true);
 }
 
 export function alreadyOutCard(product: InventoryProduct, publicBaseUrl: string): SearchCardReply {
@@ -37,7 +37,17 @@ function productCard(
   soldPrice?: number,
   alreadyOut = false,
   album?: AlbumLookup,
+  externalBrowser = false,
 ): SearchCardReply {
+  const actionUri = (value: string): string => {
+    if (!externalBrowser) return value;
+    try {
+      const url = new URL(value);
+      if (url.protocol !== "https:" && url.protocol !== "http:") return value;
+      url.searchParams.set("openExternalBrowser", "1");
+      return url.toString();
+    } catch { return value; }
+  };
   const isIn = product.inventoryStatus === "In";
   const ink = "#2C2C2C";
   const muted = "#949494";
@@ -64,7 +74,7 @@ function productCard(
     : albumText;
   const albumButtons = album?.status === "found" ? album.albums.map((a,index)=>a.url ? ({
     type: "button", style: "secondary", height: "sm",
-    action: {type: "uri", label: album.albums.length === 1 ? "เปิดบน iCloud.com" : `เปิดบน iCloud.com ${index+1}`, uri: a.url},
+    action: {type: "uri", label: album.albums.length === 1 ? "เปิดบน iCloud.com" : `เปิดบน iCloud.com ${index+1}`, uri: actionUri(a.url)},
   }) : null).filter(Boolean) : [];
   return {
     kind: "flex",
@@ -120,7 +130,7 @@ function productCard(
         contents: [
           ...(product.airtableUrl ? [{
             type: "button", style: "primary", color: ink, height: "sm",
-            action: { type: "uri", label: "เปิดใน Airtable", uri: product.airtableUrl },
+            action: { type: "uri", label: "เปิดใน Airtable", uri: actionUri(product.airtableUrl) },
           }] : []),
           ...albumButtons,
         ],

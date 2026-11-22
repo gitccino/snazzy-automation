@@ -220,7 +220,7 @@ it('enriches search with two album names, only available URLs and uncertainty', 
  const json=JSON.stringify(reply);
  expect(json).toContain('สินค้านี้อาจอยู่ในอัลบั้มใดอัลบั้มหนึ่ง');
  expect(json).toContain('Shared album 33');
- expect(json).toContain('https://www.icloud.com/sharedalbum/#B123');
+ expect(json).toContain('https://www.icloud.com/sharedalbum/?openExternalBrowser=1#B123');
  expect(json).toContain('เปิดใน Airtable');
  expect(typeof reply!=='string' && reply.text).toContain('Shared album 32');
 });

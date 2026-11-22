@@ -44,3 +44,7 @@ No schema migration is required. Deploy the automation Worker and compatible set
 Pending data verification: Shared album 32, 33, 34, 35, 36, 39, 40, 42, 43, 44, 45, 49, 50, 51, 52, 53, 54, 55, 56 and 57. The 20 date-added ranges were inspected in Photos Activity on 2026-11-22 and saved in `docs/research/2026-11-22-icloud-album-date-ranges.json`. Eleven existing public links were read from Photos sharing details and saved privately outside the repository at `/Users/gitccino/.t3/userdata/album-inspection/2026-11-22-icloud-album-links.json`. The remaining nine exposed no URL in this Mac account. These metadata inspections have not populated live registry settings.
 
 Mock albums can be registered by exact source ID with both dates null. This prevents synthetic test albums from contaminating historical date fallback when their observed sharing dates overlap real albums. Save the observed dates separately as evidence. Changing or removing a registry entry uses the same revision-checked connections API above; it does not change the active import album secret or import history.
+
+## External browser trial
+
+Fresh `/search` cards add LINE’s `openExternalBrowser=1` option to Airtable and iCloud button URLs, preserving existing query parameters and album fragments. The registry retains the original canonical URL; do not add the option to saved album links. Other command buttons are unchanged. Test both buttons on mobile before extending the trial. iOS may still hand supported album links to Photos; the option requests leaving LINE’s in-app browser.
