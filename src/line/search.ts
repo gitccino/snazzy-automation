@@ -1,3 +1,4 @@
+import type { AlbumLookup } from "./album-lookup";
 import { createLogger } from "../shared/logger";
 import { dailySalesReportCard } from "./report-card";
 import { todayBangkokDate, type Clock } from "../shared/time";
@@ -39,6 +40,7 @@ export type DocsTriggerResult =
 export interface ReadOnlyDeps {
   publicBaseUrl: string;
   retryTransientErrors?: boolean;
+  lookupAlbum?(product: InventoryProduct): Promise<AlbumLookup>;
   inventory: Pick<InventoryClient, "findByProductId" | "listSalesForDay">;
   clock: Clock;
   triggerUpload(trustedEventId?: string): Promise<UploadTriggerResult>;
@@ -291,7 +293,13 @@ export async function handleReadOnlyCommand(
   if (command.type === "help") return helpCard(deps.publicBaseUrl);
   if (command.type === "search") {
     const product = await deps.inventory.findByProductId(command.productId);
-    return product ? searchCard(product, deps.publicBaseUrl) : notFoundText(command.productId);
+    if (!product) return notFoundText(command.productId);
+    let album: AlbumLookup = {status: "unknown"};
+    if (deps.lookupAlbum) {
+      try { album = await deps.lookupAlbum(product); }
+      catch { album = {status: "unavailable"}; }
+    }
+    return searchCard(product, deps.publicBaseUrl, album);
   }
   if (command.type === "upload") {
     const result = await deps.triggerUpload(trustedEventId);

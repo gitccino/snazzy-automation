@@ -17,7 +17,7 @@ describe('settings contract', () => {
     expect(() => normalizeGroupIds('C1,,C2')).toThrow();
   });
   it('accepts allowed limits and rejects invalid or secret data', () => {
-    expect(parseStoredSettings(settings)).toEqual({ ...settings, CLAUDE_MODEL: "claude-opus-5", AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID:null, MESSENGER_COMPLETION_USER_IDS:[] });
+    expect(parseStoredSettings(settings)).toEqual({ ...settings, ICLOUD_ALBUMS: [], CLAUDE_MODEL: "claude-opus-5", AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID:null, MESSENGER_COMPLETION_USER_IDS:[] });
     for (const changes of [{ IMPORT_RETRY_LIMIT: 1 }, { IMPORT_RETRY_LIMIT: 0.5 }, { CLAUDE_REQUEST_INPUT_TOKEN_LIMIT: 150001 }, { FIRST_IMPORT_CUTOFF_DATE: 'invalid' }, { GOOGLE_REFRESH_TOKEN: 'secret' }]) {
       expect(() => parseStoredSettings({ ...settings, ...changes })).toThrow();
     }
@@ -47,4 +47,11 @@ it('defaults messenger off and validates a separate completion allowlist', () =>
 it('does not reset messenger settings during unrelated section edits', () => {
  expect(parseSaveSectionRequest({expectedRevision:1,section:'line',changes:{SOLDOUT_CONFIRMATION_ENABLED:false}}).changes).toEqual({SOLDOUT_CONFIRMATION_ENABLED:false});
  expect(parseSaveSectionRequest({expectedRevision:1,section:'connections',changes:{AIRTABLE_BASE_ID:'appOther'}}).changes).toEqual({AIRTABLE_BASE_ID:'appOther'});
+});
+
+it('accepts album registry updates only through connections and defaults historical settings to empty',()=>{
+ expect(parseStoredSettings(settings).ICLOUD_ALBUMS).toEqual([]);
+ const registry=[{sourceAlbumId:'source32',name:'Shared album 32',url:null,startDate:null,endDate:null}];
+ expect(parseSaveSectionRequest({expectedRevision:1,section:'connections',changes:{ICLOUD_ALBUMS:registry}}).changes).toEqual({ICLOUD_ALBUMS:registry});
+ expect(()=>parseSaveSectionRequest({expectedRevision:1,section:'line',changes:{ICLOUD_ALBUMS:registry}})).toThrow();
 });

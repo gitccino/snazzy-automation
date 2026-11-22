@@ -13,6 +13,7 @@ export function toRuntimeSettings(
   publicBaseUrl: string,
 ): RuntimeSettings {
   return {
+    icloudAlbums: s.ICLOUD_ALBUMS,
     airtableMessengerDeliveriesTableId: s.AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID,
     messengerCompletionUserIds: s.MESSENGER_COMPLETION_USER_IDS,
     timeZone: "Asia/Bangkok",

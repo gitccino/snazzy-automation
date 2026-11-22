@@ -1,3 +1,4 @@
+import type { AlbumLookup } from "./album-lookup";
 import type { InventoryProduct } from "./types";
 import { alreadyOutText, searchText, soldAtText } from "./messages";
 
@@ -7,8 +8,8 @@ export interface SearchCardReply {
   contents: Record<string, unknown>;
 }
 
-export function searchCard(product: InventoryProduct, publicBaseUrl: string): SearchCardReply {
-  return productCard(product, publicBaseUrl, searchText(product));
+export function searchCard(product: InventoryProduct, publicBaseUrl: string, album?: AlbumLookup): SearchCardReply {
+  return productCard(product, publicBaseUrl, searchText(product), undefined, false, album);
 }
 
 export function alreadyOutCard(product: InventoryProduct, publicBaseUrl: string): SearchCardReply {
@@ -35,6 +36,7 @@ function productCard(
   text: string,
   soldPrice?: number,
   alreadyOut = false,
+  album?: AlbumLookup,
 ): SearchCardReply {
   const isIn = product.inventoryStatus === "In";
   const ink = "#2C2C2C";
@@ -52,9 +54,17 @@ function productCard(
   const date = uploadDate
     ? `${Number(uploadDate[3])}/${Number(uploadDate[2])}/${uploadDate[1]}`
     : product.uploadDate ?? "ไม่พบข้อมูล";
+  const albumText = !album ? null : album.status === "found"
+    ? `${album.albums.length === 2 ? "สินค้านี้อาจอยู่ในอัลบั้มใดอัลบั้มหนึ่ง\n" : "อัลบั้ม iCloud\n"}${album.albums.map(a=>a.name).join("\n")}`
+    : album.status === "unavailable" ? "ตรวจสอบอัลบั้ม iCloud ไม่สำเร็จ กรุณาลอง /search อีกครั้ง"
+    : "ไม่สามารถระบุอัลบั้ม iCloud ของสินค้านี้ได้";
+  const albumButtons = album?.status === "found" ? album.albums.map((a,index)=>a.url ? ({
+    type: "button", style: "secondary", height: "sm",
+    action: {type: "uri", label: album.albums.length === 1 ? "เปิดอัลบั้ม iCloud" : `เปิดอัลบั้ม iCloud ${index+1}`, uri: a.url},
+  }) : null).filter(Boolean) : [];
   return {
     kind: "flex",
-    text,
+    text: albumText ? `${text}\n${albumText}`.slice(0,400).replace(/[\uD800-\uDBFF]$/, "") : text,
     contents: {
       type: "bubble", size: "mega",
       ...(product.imageUrl && !alreadyOut ? {
@@ -96,14 +106,19 @@ function productCard(
               ...(product.uploadDate !== undefined || soldPrice === undefined ? [row("วันที่อัปโหลด", date)] : []),
             ],
           },
+          ...(albumText ? [{type: "text", text: albumText, color: muted, size: "sm", wrap: true, margin: "lg"}] : []),
         ],
       },
-      ...(product.airtableUrl ? { footer: {
+      ...(product.airtableUrl || albumButtons.length ? { footer: {
         type: "box", layout: "vertical", paddingAll: "16px", paddingTop: "0px", backgroundColor: background,
-        contents: [{
-          type: "button", style: "primary", color: ink, height: "sm",
-          action: { type: "uri", label: "เปิดใน Airtable", uri: product.airtableUrl },
-        }],
+        ...(albumButtons.length ? {spacing: "sm"} : {}),
+        contents: [
+          ...(product.airtableUrl ? [{
+            type: "button", style: "primary", color: ink, height: "sm",
+            action: { type: "uri", label: "เปิดใน Airtable", uri: product.airtableUrl },
+          }] : []),
+          ...albumButtons,
+        ],
       } } : {}),
     },
   };

@@ -1,3 +1,4 @@
+import { lookupProductAlbum } from "../db/album-lookup";
 import { z } from "zod";
 import { sanitizeMessengerEvent } from "../messenger/parser";
 import { createMessengerAirtable } from "../messenger/airtable";
@@ -283,6 +284,9 @@ export async function createWebhookDeps(
     repo,
     audit: createAuditLog(env.DB, ids, clock),
     inventory,
+    lookupAlbum: product => lookupProductAlbum(env.DB, {
+      baseId: config.airtableBaseId, tableId: config.airtableProductsTableId,
+    }, product, config.icloudAlbums ?? []),
     async triggerUpload(trustedEventId) {
       const response = await handleUploadTrigger(
         env,

@@ -24,3 +24,12 @@ it('persists publication context for a selected non-Opus model before starting t
   expect(await savePublicationAttemptContext(db, runId, 1, context)).toBe(true);
   expect(await readPublicationContext(db, runId)).toEqual(context);
 });
+
+it('retains captured album mappings while preserving legacy contexts without the field',async()=>{
+ const {serializeContext,parseContext}=await import('../../src/db/execution-context-repository');
+ const settings=await loadSettingsSnapshot({...testEnv(),...createTestEnv(),CONFIGURATION_MODE:'legacy'});
+ const legacy={settings,replyGroupId:'C1'};
+ expect(parseContext(serializeContext(legacy))).toEqual(legacy);
+ const context={settings:{...settings,config:{...settings.config,icloudAlbums:[{sourceAlbumId:'album32',name:'Shared album 32',url:null,startDate:null,endDate:null}]}},replyGroupId:'C1'};
+ expect(parseContext(serializeContext(context))).toEqual(context);
+});
