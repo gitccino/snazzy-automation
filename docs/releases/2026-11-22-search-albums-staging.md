@@ -24,3 +24,15 @@ Source: `feature/search-icloud-albums`, code commit `b5e7626`.
 Before restoring older code, quiesce admissions and inspect/drain accepted Workflows; new captured contexts include the registry field. Retain D1 and dispatch evidence. Older strict settings schemas reject `ICLOUD_ALBUMS`, so restore the previous non-secret settings document using a revision-guarded update before running incompatible code. Do not erase provenance or queue rows. The private backup retains the pre-deployment settings and data; avoid wholesale restore over newer business writes. Revert the compatible settings Worker as needed only after considering its service binding and schema compatibility.
 
 Production was not changed. No source push, PR or merge was performed.
+
+## Staging mock album addition
+
+The user explicitly approved adding `Snazzy mock album II` to staging. Photos Activity showed sharing dates 2026-09-30 through 2026-11-22, and the owner sharing sheet supplied an existing `photos.icloud.com/shared/album/…` URL. No album sharing option was changed. The link and observed timestamps are retained privately outside Git in `.t3/userdata/album-inspection/mock-album-inspection.json`.
+
+The copied current-generation Apple URL was rejected by the original legacy-only validator. A regression failed first, then passed after supporting the exact `https://photos.icloud.com/shared/album/<URL-safe-token>` form, with the existing canonical URL, no credentials/port/query, length, and host/path guards retained. Lookalike hosts, extra path components, queries and fragments are rejected. Code commit: `271db43`.
+
+The deterministic source ID from that existing URL matches a saved staging import source. Its full observed date range overlaps real albums 55 and 56, so enabling it for historical date fallback would violate the maximum-two rule. Registered the mock album **by exact source ID only**, with both registry dates null; observed date evidence is kept separately. All original 20 registry entries and unrelated settings remain unchanged. Staging settings advanced atomically from revision 14 to 15: 21 entries and 12 links. Target-scoped saved product evidence includes `A-12686`, `A-12685`, and `A-12677` for this source. A fresh private D1 export was retained before this change.
+
+Latest automation version: `356cae6b-3a56-4135-951e-13b26f1803bd`. Latest compatible settings version: `74490f54-8e7b-44b1-9066-530562c312b6`. Both tagged `271db43`. Post-change health: HTTP 200, `ok: true`, `importRunning: false`. Pre-change active import/publication/queue counts were zero.
+
+Verification: 80 focused tests, 19 settings-site tests, typecheck, build and diff check passed. The root test command's owner CLI check passed; Vitest completed 1,393 passing and the same nine established baseline failures. No LINE search message was sent; user testing through fresh `/search` remains appropriate. Production and the active upload-album secret were not changed. Production has an independent registry and does not inherit this staging entry automatically.
