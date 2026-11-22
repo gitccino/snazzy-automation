@@ -13,6 +13,6 @@ it('preserves long confirmation details losslessly with its actions', () => {
 
 import baselineReplies from '../fixtures/line-reply-bundles.json';
 import type { CommandReply } from '../../src/line/soldout';
-it.each(baselineReplies)('matches pre-refactor message objects: $name',({reply,expected})=>{
+it.each(baselineReplies)('matches expected message objects: $name',({reply,expected})=>{
  expect(renderCommandReply(reply as CommandReply,'https://original-worker.test')).toEqual(expected);
 });

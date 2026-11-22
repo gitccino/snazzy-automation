@@ -34,10 +34,10 @@ it('requests an external browser for search actions while preserving query value
  validateReplyMessages([{type:'flex',altText:card.text,contents:card.contents}]);
 });
 
-it('does not change Airtable actions on soldout cards',async()=>{
+it('requests external opening for Airtable actions on soldout cards',async()=>{
  const {alreadyOutCard,saleSuccessCard}=await import('../../src/line/search-card');
  const product={recordId:'rec1',productId:'A-1',inventoryStatus:'Out' as const,soldPrice:100,soldAt:null,soldBy:null,uploadDate:null,airtableUrl:'https://airtable.com/app/tbl/rec'};
  for(const card of [alreadyOutCard(product,'https://worker.example'),saleSuccessCard('A-1',100,'https://worker.example',product)]) {
-  expect((card.contents.footer as {contents:{action:{uri:string}}[]}).contents[0]!.action.uri).toBe(product.airtableUrl);
+  expect((card.contents.footer as {contents:{action:{uri:string}}[]}).contents[0]!.action.uri).toBe(product.airtableUrl+"?openExternalBrowser=1");
  }
 });

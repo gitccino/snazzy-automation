@@ -228,7 +228,7 @@
                 "action": {
                   "type": "uri",
                   "label": "เปิดใน Airtable",
-                  "uri": "https://airtable.com/base/table/rec1"
+                  "uri": "https://airtable.com/base/table/rec1?openExternalBrowser=1"
                 }
               }
             ]
@@ -405,7 +405,7 @@
                 "action": {
                   "type": "uri",
                   "label": "เปิดใน Airtable",
-                  "uri": "https://airtable.com/base/table/rec1"
+                  "uri": "https://airtable.com/base/table/rec1?openExternalBrowser=1"
                 }
               }
             ]

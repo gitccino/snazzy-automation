@@ -45,6 +45,6 @@ Pending data verification: Shared album 32, 33, 34, 35, 36, 39, 40, 42, 43, 44, 
 
 Mock albums can be registered by exact source ID with both dates null. This prevents synthetic test albums from contaminating historical date fallback when their observed sharing dates overlap real albums. Save the observed dates separately as evidence. Changing or removing a registry entry uses the same revision-checked connections API above; it does not change the active import album secret or import history.
 
-## External browser trial
+## Default external browser behavior
 
-Fresh `/search` cards add LINE’s `openExternalBrowser=1` option to Airtable and iCloud button URLs, preserving existing query parameters and album fragments. The registry retains the original canonical URL; do not add the option to saved album links. Other command buttons are unchanged. Test both buttons on mobile before extending the trial. iOS may still hand supported album links to Photos; the option requests leaving LINE’s in-app browser.
+Following the successful `/search` trial, all newly generated cards add LINE’s `openExternalBrowser=1` option to Airtable, Google Docs and iCloud button URLs, preserving existing query parameters and album fragments. The registry retains the original canonical URL; do not add the option to saved album links. Postback and confirmation actions remain unchanged. Older already-sent cards retain their original URLs; the deployment does not rewrite queued results or delivery evidence. iOS may still hand supported album links to Photos; the option requests leaving LINE’s in-app browser.
