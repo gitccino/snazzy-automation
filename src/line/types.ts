@@ -39,7 +39,7 @@ export interface LineActor {
 }
 
 export interface SaleValues {
-  inventoryStatus: "In" | "Out";
+  inventoryStatus: string;
   soldPrice: number | null;
   soldAt: string | null;
   soldBy: string | null;

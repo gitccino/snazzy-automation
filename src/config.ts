@@ -1,3 +1,4 @@
+import type { ProductFieldMap } from './shared/product-field-map';
 import { z } from "zod";
 
 const RawAppConfigSchema = z.object({
@@ -31,6 +32,7 @@ const RawAppConfigSchema = z.object({
 });
 
 export interface AppConfig {
+  airtableProductFieldMap?:ProductFieldMap;
   airtableMessengerDeliveriesTableId: string | null;
   messengerCompletionUserIds: string[];
   timeZone: "Asia/Bangkok";

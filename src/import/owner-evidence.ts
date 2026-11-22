@@ -1,3 +1,4 @@
+import type { ProductFieldConfig } from '../shared/product-field-map';
 import { computeGroupHash } from './grouping';
 import { sha256Hex } from '../shared/ids';
 import { downloadJpegAttachment } from '../publication/attachment-download';
@@ -9,7 +10,7 @@ interface Dependencies {
   db:D1Database;
   readOriginal(key:string):Promise<ArrayBuffer | null>;
   renderPreview(bytes:ArrayBuffer):Promise<ArrayBuffer>;
-  readRecord(input:Input):Promise<{productId:string;groupHash:string;attachments:DownloadableProductAttachment[]} | null>;
+  readRecord(input:Input, config:ProductFieldConfig):Promise<{productId:string;groupHash:string;attachments:DownloadableProductAttachment[]} | null>;
   fetcher:Fetcher;
 }
 
@@ -34,7 +35,7 @@ export async function verifyHistoricalImportEvidence(deps:Dependencies, input:In
   const images = members.filter(m => (m.marker_kind ?? (m.is_marker ? 'product_start' : 'none')) === 'none');
   if (images.length < 4 || (members[0]!.marker_kind ?? (members[0]!.is_marker ? 'product_start' : 'none')) !== 'product_start' || images.length !== members.length - 1) return held('membership_conflict');
   try {
-    const record = await deps.readRecord(input);
+    const record = await deps.readRecord(input,context.settings.config);
     if (!record || record.productId !== row.product_id || record.groupHash !== row.group_hash || record.attachments.length !== images.length) return held('candidate_conflict');
     const hashes:string[] = [];
     for (const member of members) {

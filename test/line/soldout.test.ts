@@ -297,3 +297,24 @@ it("waits for durable intent persistence before writing Airtable", async () => {
   await resolution;
   expect(d.inventory.updateSaleValues).toHaveBeenCalledOnce();
 });
+
+it.each(['Rent','Trade','Pledge','Future status'])('blocks sale from %s with actual status', async status => {
+  const d=deps({...product,inventoryStatus:status});
+  const result=await prepareSoldout({productId:'A-1',soldPrice:1290},actor,'evt-status',true,d);
+  expect(result.text).toContain(status);
+  expect(d.repo.createPending).not.toHaveBeenCalled();
+  expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
+});
+it('captures Reserve as the exact pre-sale state', async () => {
+  const d=deps({...product,inventoryStatus:'Reserve'});
+  await prepareSoldout({productId:'A-1',soldPrice:1290},actor,'evt-reserve',true,d);
+  expect(d.repo.createPending).toHaveBeenCalledWith(expect.objectContaining({before:expect.objectContaining({inventoryStatus:'Reserve'}),after:expect.objectContaining({inventoryStatus:'Out'})}));
+});
+
+it('rejects confirmation when Reserve changed to Rent',async()=> {
+  const d=deps({...product,inventoryStatus:'Rent'});
+  d.repo.claimPending=vi.fn().mockResolvedValue(soldoutPending({before:{inventoryStatus:'Reserve',soldPrice:null,soldAt:null,soldBy:null}}));
+  await resolveSoldout('approve','tok',actor,'evt-approve','corr-status',d);
+  expect(d.inventory.updateSaleValues).not.toHaveBeenCalled();
+  expect(d.repo.resolvePending).toHaveBeenCalledWith('tok','evt-approve','rejected',expect.any(String));
+});

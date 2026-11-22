@@ -1,3 +1,4 @@
+import { productFieldFetch } from '../shared/product-field-map';
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import type { Env, Fetcher } from "../env";
@@ -36,6 +37,7 @@ export async function validateSettingsConnections(
   const changed = (prefix: string) =>
     changedKeys.some((key) => key.startsWith(prefix));
   try {
+    fetcher=productFieldFetch(fetcher,{airtableBaseId:candidate.AIRTABLE_BASE_ID,airtableProductsTableId:candidate.AIRTABLE_PRODUCTS_TABLE_ID,airtableProductFieldMap:candidate.AIRTABLE_PRODUCT_FIELD_MAP});
     if (changed("AIRTABLE_")) {
       const base = opaqueId.parse(candidate.AIRTABLE_BASE_ID);
       const response = await fetcher(
@@ -57,6 +59,16 @@ export async function validateSettingsConnections(
           )
         )
           throw new Error();
+        if(label === "Products") {
+          for(const name of ["Brand Name","Model Name"]) {
+            const type=table.fields.find(field=>field.name===name)?.type;
+            if(type && !["singleLineText","multilineText","singleSelect"].includes(type)) throw new Error();
+          }
+          const status=table.fields.find(field=>field.name==="Inventory Status");
+          if(status?.type && status.type!=="singleSelect") throw new Error();
+          const choices=status?.options?.choices;
+          if(choices && ["In","Out"].some(name=>!choices.some(choice=>choice.name===name))) throw new Error();
+        }
       }
     }
     if (changed("AIRTABLE_") && candidate.AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID) {

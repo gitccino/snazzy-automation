@@ -219,7 +219,7 @@ export class ImportWorkflow extends WorkflowEntrypoint<
         const config = JSON.parse(claim.context_json)?.settings?.config;
         const verified: string[] = [];
         if (typeof config?.airtableBaseId === 'string' && typeof config?.airtableProductsTableId === 'string') {
-          const airtable = createAirtableProductsClient({baseId:config.airtableBaseId, tableId:config.airtableProductsTableId, token:this.env.AIRTABLE_TOKEN, fetch:fetch.bind(globalThis)});
+          const airtable = createAirtableProductsClient({baseId:config.airtableBaseId, tableId:config.airtableProductsTableId, fieldMap:config.airtableProductFieldMap, token:this.env.AIRTABLE_TOKEN, fetch:fetch.bind(globalThis)});
           for (const candidate of candidates) {
             try {
               const date = new Date(candidate.createdAt);
@@ -290,6 +290,7 @@ export class ImportWorkflow extends WorkflowEntrypoint<
       airtable: createAirtableProductsClient({
         baseId: config.airtableBaseId,
         tableId: config.airtableProductsTableId,
+        fieldMap: config.airtableProductFieldMap,
         token: this.env.AIRTABLE_TOKEN,
         fetch: fetcher,
       }),

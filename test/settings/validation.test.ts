@@ -72,3 +72,13 @@ it('requires messenger table field types, choices and correct product link', asy
  fields.find(f=>f.name==='Product')!.options={linkedTableId:'wrong'};
  expect(await validateSettingsConnections(testEnv(),settings,candidate,['AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID'],fetcher)).toMatchObject({ok:false});
 });
+
+it('validates mapped single-select brand/model and preserves extra status choices', async()=> {
+  const map={'Product ID':'รหัสสินค้าstock','Brand Name':'ชื่อแบรนด์','Model Name':'ชื่อรุ่น','Inventory Status':'สถานะ'};
+  const candidate={...settings,AIRTABLE_PRODUCT_FIELD_MAP:map};
+  const productFields=requiredFields.Products.map(name=>({name:map[name as keyof typeof map] ?? name,type:['Brand Name','Model Name','Inventory Status'].includes(name)?'singleSelect':'singleLineText',...(name==='Inventory Status'?{options:{choices:['In','Out','Reserve','Rent','Trade','Pledge','Future'].map(name=>({name}))}}:{})}));
+  const fetcher=async()=>Response.json({tables:[{id:'tbl1',fields:productFields},{id:'tbl2',fields:requiredFields['Publication Runs'].map(name=>({name}))}]});
+  expect(await validateSettingsConnections(env,settings,candidate,['AIRTABLE_PRODUCT_FIELD_MAP'],fetcher)).toMatchObject({ok:true});
+  productFields.find(field=>field.name==='ชื่อแบรนด์')!.type='multipleSelects';
+  expect(await validateSettingsConnections(env,settings,candidate,['AIRTABLE_PRODUCT_FIELD_MAP'],fetcher)).toMatchObject({ok:false});
+});

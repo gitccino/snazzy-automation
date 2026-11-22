@@ -53,9 +53,9 @@ describe("inventory Airtable client", () => {
     await expect(client.findByProductId("A-1")).rejects.toMatchObject({ code: "airtable_inventory_find_failed", retryable });
   });
 
-  it("rejects an unknown inventory state instead of treating it as In", async () => {
+  it("preserves an unknown inventory state without treating it as In", async () => {
     const client = createInventoryClient({ ...config, fetch: async () => response({ records: [{ ...record(), fields: { ...record().fields, "Inventory Status": "Unknown" } }] }) });
-    await expect(client.findByProductId("A-1")).rejects.toMatchObject({ code: "airtable_inventory_invalid_record" });
+    await expect(client.findByProductId("A-1")).resolves.toMatchObject({ inventoryStatus: "Unknown" });
   });
 
   it("writes only four system-owned sale fields", async () => {

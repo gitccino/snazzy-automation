@@ -43,3 +43,14 @@ it('saves album mappings under a revision and preserves them on unrelated settin
  expect(await saveSettingsSection(db,{expectedRevision:2,section:'documents',changes:{PUBLICATION_RETRY_LIMIT:5}},'2026-11-22T00:00:03Z',pass)).toMatchObject({ok:true});
  expect((await readSettings(db))?.settings.ICLOUD_ALBUMS).toEqual(albums);
 });
+
+it('requires acknowledgment for a mapping change and preserves it on unrelated saves',async()=> {
+  const db=testEnv().DB;
+  await db.prepare('DELETE FROM app_settings').run();
+  await initializeSettings(db,initial,'2026-11-22T00:00:00Z');
+  const request={expectedRevision:1,section:'connections',changes:{AIRTABLE_PRODUCT_FIELD_MAP:{'Product ID':'รหัสสินค้าstock'}}};
+  expect(await saveSettingsSection(db,request,'2026-11-22T00:01:00Z',pass)).toMatchObject({ok:false,code:'confirmation_required'});
+  expect(await saveSettingsSection(db,{...request,acknowledgeAirtableChange:true},'2026-11-22T00:01:00Z',pass)).toMatchObject({ok:true});
+  await saveSettingsSection(db,{expectedRevision:2,section:'documents',changes:{AI_CAPTIONS_ENABLED:true}},'2026-11-22T00:02:00Z',pass);
+  expect((await readSettings(db))?.settings.AIRTABLE_PRODUCT_FIELD_MAP).toEqual({'Product ID':'รหัสสินค้าstock'});
+});

@@ -74,3 +74,8 @@ describe("formatValidationErrorSummary", () => {
     expect(summary).toBe("A-1001: Brand Name, Description\nA-1002: Size");
   });
 });
+
+it('uses the captured client field names in missing-data guidance',()=> {
+  const result=validateRunCompleteness([product({brandName:'',lineSquarePrice:0})],{'Brand Name':'ชื่อแบรนด์','LINE Square Price':'ราคาLinesquare'});
+  expect(result.productsMissingFields[0]?.missingFields).toEqual(['ชื่อแบรนด์','ราคาLinesquare']);
+});

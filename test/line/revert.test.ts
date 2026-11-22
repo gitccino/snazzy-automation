@@ -219,3 +219,12 @@ it("does not release applying ownership after an uncertain Airtable write", asyn
 
   expect(d.repo.resetPending).not.toHaveBeenCalled();
 });
+
+it('restores Reserve with the original sale metadata', async () => {
+  const d=deps();
+  const reserved={...original,inventoryStatus:'Reserve',soldPrice:800,soldAt:'2026-08-01',soldBy:'old staff'};
+  d.repo.claimPending=vi.fn().mockResolvedValue(revertPending({after:reserved}));
+  const result=await resolveRevert('approve','tok',actor,'evt-approve','corr-revert',d);
+  expect(result).toMatchObject({revertSuccess:true});
+  expect(d.inventory.updateSaleValues).toHaveBeenCalledWith('rec1',reserved);
+});

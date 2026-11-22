@@ -91,6 +91,7 @@ export class LineMutationFollowupWorkflow extends WorkflowEntrypoint<
     const inventory = createInventoryClient({
       baseId: config.airtableBaseId,
       tableId: config.airtableProductsTableId,
+      fieldMap:config.airtableProductFieldMap,
       token: this.env.AIRTABLE_TOKEN,
       fetch: fetchForLineCommand,
     });
