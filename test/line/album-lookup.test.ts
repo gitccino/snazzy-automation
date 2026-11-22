@@ -41,3 +41,10 @@ it('rejects raw whitespace that URL parsing would silently discard',()=>{
 it('accepts the URL-safe token alphabet used by Photos sharing links',()=>{
  expect(albumRegistrySchema.safeParse([{...a,url:'https://www.icloud.com/sharedalbum/#D1zv3AbC_def-123'}]).success).toBe(true);
 });
+
+it('accepts the newer Apple shared-album URL and rejects lookalike or modified destinations',()=>{
+ expect(albumRegistrySchema.safeParse([{...a,url:'https://photos.icloud.com/shared/album/AbC_123-def'}]).success).toBe(true);
+ for(const url of ['https://photos.icloud.com.evil/shared/album/AbC123','https://photos.icloud.com/shared/album/AbC123?next=evil','https://photos.icloud.com/shared/album/AbC123#extra','https://photos.icloud.com/shared/album/AbC123/extra']) {
+  expect(albumRegistrySchema.safeParse([{...a,url}]).success).toBe(false);
+ }
+});

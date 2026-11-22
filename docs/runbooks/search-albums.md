@@ -8,7 +8,7 @@ The registry starts empty. Deployment alone does not identify the twenty histori
 
 - `sourceAlbumId`: stable unique key. For imported albums, copy the exact saved `import_runs.source_album_id`; it is derived from the shared token and is **not** the display number such as 32. Inspect with authenticated D1 access, e.g. `SELECT DISTINCT source_album_id FROM import_runs`. Do not put credentials here. For historical albums with no import history, choose a stable unique key such as `legacy-shared-album-32`.
 - `name`: displayed album name, maximum 100 characters.
-- `url`: verified `https://www.icloud.com/sharedalbum/#<token>` public website URL (maximum 1,000 characters), or `null`. Never enable public sharing automatically. Confirm the link opens the intended album before saving.
+- `url`: verified `https://www.icloud.com/sharedalbum/#<token>` or `https://photos.icloud.com/shared/album/<token>` public sharing URL (maximum 1,000 characters), or `null`. Never enable public sharing automatically. Confirm the link opens the intended album before saving.
 - `startDate`, `endDate`: inclusive Gregorian `YYYY-MM-DD` dates, or both `null` when unverified. Use Bangkok dates. At most two albums may match a day; a shared boundary day intentionally returns both.
 
 ## Save through the existing authenticated settings API
@@ -42,3 +42,5 @@ Verify `/search` with a directly imported item, a historical date match, a share
 No schema migration is required. Deploy the automation Worker and compatible settings site together; older settings schemas reject the new key. Before reverting to older code, export settings privately, quiesce accepted work as required by the existing workflow runbook, and restore a settings document without `ICLOUD_ALBUMS` through compatible tooling. Do not erase import provenance. Initial implementation was local. Staging deployment and its verified limits are recorded in `docs/releases/2026-11-22-search-albums-staging.md`.
 
 Pending data verification: Shared album 32, 33, 34, 35, 36, 39, 40, 42, 43, 44, 45, 49, 50, 51, 52, 53, 54, 55, 56 and 57. The 20 date-added ranges were inspected in Photos Activity on 2026-11-22 and saved in `docs/research/2026-11-22-icloud-album-date-ranges.json`. Eleven existing public links were read from Photos sharing details and saved privately outside the repository at `/Users/gitccino/.t3/userdata/album-inspection/2026-11-22-icloud-album-links.json`. The remaining nine exposed no URL in this Mac account. These metadata inspections have not populated live registry settings.
+
+Mock albums can be registered by exact source ID with both dates null. This prevents synthetic test albums from contaminating historical date fallback when their observed sharing dates overlap real albums. Save the observed dates separately as evidence. Changing or removing a registry entry uses the same revision-checked connections API above; it does not change the active import album secret or import history.

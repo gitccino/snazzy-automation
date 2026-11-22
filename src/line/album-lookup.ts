@@ -9,8 +9,10 @@ const date = z.string().refine(isAlbumDate).nullable();
 const sharedUrl = z.string().max(1000).refine(value => {
   try {
     const u = new URL(value);
-    return u.href === value && u.protocol === 'https:' && u.hostname === 'www.icloud.com' && !u.port && !u.username && !u.password
-      && u.pathname === '/sharedalbum/' && !u.search && /^#[A-Za-z0-9_-]+$/.test(u.hash);
+    const legacy = u.hostname === 'www.icloud.com' && u.pathname === '/sharedalbum/' && /^#[A-Za-z0-9_-]+$/.test(u.hash);
+    const current = u.hostname === 'photos.icloud.com' && /^\/shared\/album\/[A-Za-z0-9_-]+\/?$/.test(u.pathname) && !u.hash;
+    return u.href === value && u.protocol === 'https:' && !u.port && !u.username && !u.password
+      && !u.search && (legacy || current);
   } catch { return false; }
 });
 const albumSchema = z.strictObject({
