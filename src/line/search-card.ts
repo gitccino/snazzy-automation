@@ -60,7 +60,7 @@ function productCard(
     : "ไม่สามารถระบุอัลบั้ม iCloud ของสินค้านี้ได้";
   const albumButtons = album?.status === "found" ? album.albums.map((a,index)=>a.url ? ({
     type: "button", style: "secondary", height: "sm",
-    action: {type: "uri", label: album.albums.length === 1 ? "เปิดอัลบั้ม iCloud" : `เปิดอัลบั้ม iCloud ${index+1}`, uri: a.url},
+    action: {type: "uri", label: album.albums.length === 1 ? "เปิดบน iCloud.com" : `เปิดบน iCloud.com ${index+1}`, uri: a.url},
   }) : null).filter(Boolean) : [];
   return {
     kind: "flex",

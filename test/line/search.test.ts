@@ -252,7 +252,7 @@ it('labels a second candidate link correctly when the first candidate has no URL
  {sourceAlbumId:'32',name:'Shared album 32',url:null,startDate:null,endDate:null},
  {sourceAlbumId:'33',name:'Shared album 33',url:'https://www.icloud.com/sharedalbum/#B123',startDate:null,endDate:null},
  ]});
- expect(JSON.stringify(card)).toContain('เปิดอัลบั้ม iCloud 2');
- expect(JSON.stringify(card)).not.toContain('เปิดอัลบั้ม iCloud 1');
+ expect(JSON.stringify(card)).toContain('เปิดบน iCloud.com 2');
+ expect(JSON.stringify(card)).not.toContain('เปิดบน iCloud.com 1');
  validateReplyMessages([{type:'flex',altText:card.text,contents:card.contents}]);
 });

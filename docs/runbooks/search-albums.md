@@ -1,6 +1,6 @@
 # Configure `/search` iCloud albums
 
-The registry starts empty. Deployment alone does not identify the twenty historical albums. Verify their **date added** ranges against historical Airtable `Upload Date` semantics first. Photo capture dates are insufficient. A link is optional; names alone work.
+The registry starts empty. Deployment alone does not identify the twenty historical albums. Verify their **date added** ranges against historical Airtable `Upload Date` semantics first. Photo capture dates are insufficient. A link is optional; names alone work. The button says `เปิดบน iCloud.com` and opens the website. A staging iPhone test confirmed browser opening; direct Photos-app opening is not promised.
 
 ## Registry
 
