@@ -1,3 +1,4 @@
+import { productFieldFetch } from '../shared/product-field-map';
 import type { RuntimeSettings } from "../settings/schema";
 import Anthropic from "@anthropic-ai/sdk";
 import jpeg from "jpeg-js";
@@ -194,6 +195,7 @@ async function validateAirtableSchema(
   selectedConfig?: RuntimeSettings,
 ): Promise<void> {
   const config = selectedConfig ?? (await loadSettingsSnapshot(env)).config;
+  fetcher=productFieldFetch(fetcher,config);
   const body = AirtableMetaSchema.parse(
     await airtableJson(
       fetcher,
@@ -228,6 +230,7 @@ export async function hasAirtableSequenceDrift(
   selectedConfig?: RuntimeSettings,
 ): Promise<boolean> {
   const config = selectedConfig ?? (await loadSettingsSnapshot(env)).config;
+  fetcher=productFieldFetch(fetcher,config);
   const url = new URL(
     `https://api.airtable.com/v0/${config.airtableBaseId}/${config.airtableProductsTableId}`,
   );
@@ -253,6 +256,7 @@ export async function maximumAirtableProductNumber(
   selectedConfig?: RuntimeSettings,
 ): Promise<number> {
   const config = selectedConfig ?? (await loadSettingsSnapshot(env)).config;
+  fetcher=productFieldFetch(fetcher,config);
   let maximum = 0;
   let offset: string | undefined;
   do {
@@ -292,6 +296,7 @@ export async function createSetupExternalProbes(
   selectedConfig?: RuntimeSettings,
 ): Promise<SetupExternalProbes> {
   const config = selectedConfig ?? (await loadSettingsSnapshot(env)).config;
+  fetcher=productFieldFetch(fetcher,config);
   const googleAuth = createGoogleAuthClient(
     {
       clientId: env.GOOGLE_OAUTH_CLIENT_ID,

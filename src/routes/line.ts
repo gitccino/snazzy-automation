@@ -1,3 +1,4 @@
+import { productFieldFetch, productFields } from '../shared/product-field-map';
 import { lookupProductAlbum } from "../db/album-lookup";
 import { z } from "zod";
 import { sanitizeMessengerEvent } from "../messenger/parser";
@@ -169,7 +170,7 @@ export async function createWebhookDeps(
   const config = context.settings.config;
   const clock = { now: () => new Date() };
   const ids = { next: () => crypto.randomUUID() };
-  const fetcher = fetchForLineCommand;
+  const fetcher = productFieldFetch(fetchForLineCommand,config);
   const line = createLineClient({
     channelAccessToken: env.LINE_CHANNEL_ACCESS_TOKEN,
     fetch: fetcher,
@@ -178,6 +179,7 @@ export async function createWebhookDeps(
   const inventory = createInventoryClient({
     baseId: config.airtableBaseId,
     tableId: config.airtableProductsTableId,
+    fieldMap:config.airtableProductFieldMap,
     token: env.AIRTABLE_TOKEN,
     fetch: fetcher,
     now: clock.now,
@@ -198,8 +200,9 @@ export async function createWebhookDeps(
         return createInventoryClient({
           baseId: selected.airtableBaseId,
           tableId: selected.airtableProductsTableId,
+          fieldMap:selected.airtableProductFieldMap,
           token: env.AIRTABLE_TOKEN,
-          fetch: fetcher,
+          fetch: productFieldFetch(fetchForLineCommand,selected),
           now: clock.now,
         });
       },
@@ -211,7 +214,8 @@ export async function createWebhookDeps(
           a.settings.config.airtableBaseId ===
             b.settings.config.airtableBaseId &&
           a.settings.config.airtableProductsTableId ===
-            b.settings.config.airtableProductsTableId
+            b.settings.config.airtableProductsTableId &&
+          productFields.every(field => (a.settings.config.airtableProductFieldMap?.[field] ?? field) === (b.settings.config.airtableProductFieldMap?.[field] ?? field))
         );
       },
       async status(id) {

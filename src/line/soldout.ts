@@ -127,6 +127,8 @@ export async function prepareSoldout(
     };
   }
 
+  if (!["In", "Reserve"].includes(product.inventoryStatus)) return {kind:"text",text:`ไม่สามารถบันทึกการขาย ${product.productId} ได้ เนื่องจากสถานะปัจจุบันคือ ${product.inventoryStatus}`};
+
   const before: SaleValues = {
     inventoryStatus: product.inventoryStatus,
     soldPrice: product.soldPrice,

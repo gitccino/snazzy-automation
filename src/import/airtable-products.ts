@@ -1,3 +1,4 @@
+import { productFieldFetch, type ProductFieldMap } from '../shared/product-field-map';
 import { z } from "zod";
 import type { Fetcher } from "../env";
 import { OperationalError } from "../shared/errors";
@@ -84,7 +85,9 @@ export function createAirtableProductsClient(config: {
   tableId: string;
   token: string;
   fetch: Fetcher;
+  fieldMap?: ProductFieldMap;
 }): AirtableProductsClient {
+  config = {...config, fetch:productFieldFetch(config.fetch,{airtableBaseId:config.baseId,airtableProductsTableId:config.tableId,airtableProductFieldMap:config.fieldMap})};
   const headers = {
     Authorization: `Bearer ${config.token}`,
     "content-type": "application/json",

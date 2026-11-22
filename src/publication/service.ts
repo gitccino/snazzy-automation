@@ -284,7 +284,7 @@ export async function validatePublication(
     undefined,
     generation,
   );
-  const validation = validateRunCompleteness(run.products);
+  const validation = validateRunCompleteness(run.products,deps.config.airtableProductFieldMap);
   if (!validation.valid) {
     await setJobState(
       deps.db,

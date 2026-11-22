@@ -1,3 +1,4 @@
+import { productFieldFetch, type ProductFieldMap } from '../shared/product-field-map';
 import { z } from "zod";
 import type { Fetcher } from "../shared/http";
 import { OperationalError } from "../shared/errors";
@@ -19,7 +20,7 @@ const AirtableListSchema = z.object({
 
 const InventoryFieldsSchema = z.object({
   "Product ID": z.string().regex(/^A-[1-9]\d*$/),
-  "Inventory Status": z.enum(["In", "Out"]),
+  "Inventory Status": z.string().trim().min(1),
   "Upload Date": z.string().optional(),
   "Sold Price": z.number().int().positive().optional(),
   "Sold At": z.string().optional(),
@@ -35,7 +36,7 @@ const DailySaleFieldsSchema = z.object({
 });
 
 const SaleValuesSchema = z.object({
-  inventoryStatus: z.enum(["In", "Out"]),
+  inventoryStatus: z.enum(["In", "Reserve", "Out"]),
   soldPrice: z.number().int().positive().refine(Number.isSafeInteger).nullable(),
   soldAt: z.string().nullable(),
   soldBy: z.string().nullable(),
@@ -64,8 +65,10 @@ export function createInventoryClient(config: {
   tableId: string;
   token: string;
   fetch: Fetcher;
+  fieldMap?: ProductFieldMap;
   now?: () => Date;
 }): InventoryClient {
+  config = {...config, fetch:productFieldFetch(config.fetch,{airtableBaseId:config.baseId,airtableProductsTableId:config.tableId,airtableProductFieldMap:config.fieldMap})};
   const baseUrl = `https://api.airtable.com/v0/${config.baseId}/${config.tableId}`;
   const headers = { Authorization: `Bearer ${config.token}`, "content-type": "application/json" };
   const now = config.now ?? (() => new Date());

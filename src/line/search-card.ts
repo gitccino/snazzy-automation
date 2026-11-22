@@ -105,6 +105,7 @@ function productCard(
               row("ราคาขาย", product.soldPrice == null ? "ไม่พบข้อมูลเดิม" : `${product.soldPrice.toLocaleString("en-US")} บาท`),
               row("ขายเมื่อวันที่", soldAtText(product.soldAt ?? null)),
             ] : [
+              ...(!["In","Out"].includes(product.inventoryStatus) ? [row("สถานะ",product.inventoryStatus)] : []),
               soldPrice !== undefined
                 ? row("ราคา", `${soldPrice.toLocaleString("en-US")} บาท`)
                 : row(product.brandName ? "แบรนด์" : "รุ่น", product.brandName || product.modelName || "ไม่พบข้อมูล"),

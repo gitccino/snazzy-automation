@@ -1,3 +1,4 @@
+import type { ProductFieldMap } from '../shared/product-field-map';
 import type { PublicationProduct, RawPublicationProduct } from "./types";
 
 export interface ProductMissingFields {
@@ -20,7 +21,7 @@ const REQUIRED_TEXT_FIELDS: Array<{ key: "brandName" | "modelName" | "conditionT
 
 const MIN_COLLAGE_IMAGES = 4;
 
-export function validateRunCompleteness(products: Array<PublicationProduct | RawPublicationProduct>): ValidationResult {
+export function validateRunCompleteness(products: Array<PublicationProduct | RawPublicationProduct>, fieldMap:ProductFieldMap = {}): ValidationResult {
   if (products.length === 0) {
     return {
       valid: false,
@@ -36,20 +37,20 @@ export function validateRunCompleteness(products: Array<PublicationProduct | Raw
     for (const field of REQUIRED_TEXT_FIELDS) {
       const value = product[field.key];
       if (typeof value !== "string" || value.trim().length === 0) {
-        missingFields.push(field.label);
+        missingFields.push(fieldMap[field.label as keyof ProductFieldMap] ?? field.label);
       }
     }
 
     if (("attachments" in product ? product.attachments.length : product.orderedImageKeys.length) < MIN_COLLAGE_IMAGES) {
-      missingFields.push(`Product Images (needs at least ${MIN_COLLAGE_IMAGES})`);
+      missingFields.push(`${fieldMap["Product Images"] ?? "Product Images"} (needs at least ${MIN_COLLAGE_IMAGES})`);
     }
 
     if (!(product.lineSquarePrice > 0)) {
-      missingFields.push("LINE Square Price");
+      missingFields.push(fieldMap["LINE Square Price"] ?? "LINE Square Price");
     }
 
     if (!(product.igPrice > 0)) {
-      missingFields.push("IG Price");
+      missingFields.push(fieldMap["IG Price"] ?? "IG Price");
     }
 
     if (missingFields.length > 0) {

@@ -55,3 +55,8 @@ it('accepts album registry updates only through connections and defaults histori
  expect(parseSaveSectionRequest({expectedRevision:1,section:'connections',changes:{ICLOUD_ALBUMS:registry}}).changes).toEqual({ICLOUD_ALBUMS:registry});
  expect(()=>parseSaveSectionRequest({expectedRevision:1,section:'line',changes:{ICLOUD_ALBUMS:registry}})).toThrow();
 });
+
+it('accepts a per-environment product map and rejects ambiguous mapping',()=> {
+  expect(parseSaveSectionRequest({expectedRevision:1,section:'connections',changes:{AIRTABLE_PRODUCT_FIELD_MAP:{'Product ID':'รหัสสินค้าstock'}}}).changes).toEqual({AIRTABLE_PRODUCT_FIELD_MAP:{'Product ID':'รหัสสินค้าstock'}});
+  expect(()=>parseStoredSettings({...settings,AIRTABLE_PRODUCT_FIELD_MAP:{'Product ID':'Sold Price'}})).toThrow();
+});

@@ -1,3 +1,4 @@
+import { productFieldFetch } from '../shared/product-field-map';
 import { z } from 'zod';
 import type { Env } from '../env';
 import { verifyAdminBearer } from '../shared/admin-auth';
@@ -21,8 +22,9 @@ export async function handleImportOwnerResolution(request:Request, env:Env):Prom
     db:env.DB,
     readOriginal:async key => (await env.IMAGES_BUCKET.get(key))?.arrayBuffer() ?? null,
     renderPreview:async bytes => (await renderAirtablePreview(env.IMAGES, new Blob([bytes]).stream())).arrayBuffer(),
-    readRecord:async ({baseId,tableId,recordId}) => {
-      const response = await fetch(`https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableId)}/${encodeURIComponent(recordId)}`, {headers:{Authorization:`Bearer ${env.AIRTABLE_TOKEN}`}});
+    readRecord:async ({baseId,tableId,recordId},config) => {
+      const mappedFetch=productFieldFetch(fetch.bind(globalThis),config);
+      const response = await mappedFetch(`https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableId)}/${encodeURIComponent(recordId)}`, {headers:{Authorization:`Bearer ${env.AIRTABLE_TOKEN}`}});
       if (!response.ok) throw new Error('provider unavailable');
       const {fields} = recordSchema.parse(await response.json());
       return {productId:fields['Product ID'],groupHash:fields['System Group ID'],attachments:fields['Product Images']};

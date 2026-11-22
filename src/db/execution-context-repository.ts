@@ -1,3 +1,4 @@
+import { productFieldMapSchema } from '../shared/product-field-map';
 import { z } from "zod";
 import { albumRegistrySchema } from "../line/album-lookup";
 import { claudeModelSchema, type OperationContext } from "../settings/schema";
@@ -9,6 +10,7 @@ const contextSchema = z.strictObject({
     schemaVersion: z.literal(1),
     revision: z.number().int().nonnegative(),
     config: z.strictObject({
+      airtableProductFieldMap: productFieldMapSchema.optional(),
       icloudAlbums: albumRegistrySchema.optional(),
       airtableMessengerDeliveriesTableId: z.string().regex(/^tbl[A-Za-z0-9]+$/).nullable().default(null),
       messengerCompletionUserIds: z.array(z.string().regex(/^U[0-9a-f]{32}$/)).default([]),

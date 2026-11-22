@@ -33,3 +33,14 @@ it('retains captured album mappings while preserving legacy contexts without the
  const context={settings:{...settings,config:{...settings.config,icloudAlbums:[{sourceAlbumId:'album32',name:'Shared album 32',url:null,startDate:null,endDate:null}]}},replyGroupId:'C1'};
  expect(parseContext(serializeContext(context))).toEqual(context);
 });
+
+it('pins product field mappings for import replay',async()=> {
+  const db=testEnv().DB;
+  await db.prepare("INSERT INTO import_runs (id,source_album_id,trigger,status,started_at) VALUES ('mapped-context-run','mapped-album','line','running','2026-11-22')").run();
+  const settings=await loadSettingsSnapshot({...testEnv(),...createTestEnv(),CONFIGURATION_MODE:'legacy'});
+  const first={settings:{...settings,config:{...settings.config,airtableProductFieldMap:{'Product ID':'รหัสสินค้าstock'}}},replyGroupId:'C1'};
+  await saveImportContextIfAbsent(db,'mapped-context-run',first);
+  const later={...first,settings:{...first.settings,config:{...first.settings.config,airtableProductFieldMap:{'Product ID':'Changed'}}}};
+  expect(await saveImportContextIfAbsent(db,'mapped-context-run',later)).toEqual(first);
+  expect(await readImportContext(db,'mapped-context-run')).toEqual(first);
+});

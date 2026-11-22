@@ -13,6 +13,7 @@ type ValidateChanges = (
   changedKeys: string[],
 ) => Promise<SettingsResult<void>>;
 const airtableKeys = [
+  "AIRTABLE_PRODUCT_FIELD_MAP",
   "AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID",
   "AIRTABLE_BASE_ID",
   "AIRTABLE_PRODUCTS_TABLE_ID",

@@ -13,6 +13,7 @@ export function toRuntimeSettings(
   publicBaseUrl: string,
 ): RuntimeSettings {
   return {
+    ...(s.AIRTABLE_PRODUCT_FIELD_MAP ? {airtableProductFieldMap:s.AIRTABLE_PRODUCT_FIELD_MAP} : {}),
     icloudAlbums: s.ICLOUD_ALBUMS,
     airtableMessengerDeliveriesTableId: s.AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID,
     messengerCompletionUserIds: s.MESSENGER_COMPLETION_USER_IDS,

@@ -1,3 +1,4 @@
+import { productFieldMapSchema, type ProductFieldMap } from '../shared/product-field-map';
 import { z } from "zod";
 import { albumRegistrySchema, type Album } from "../line/album-lookup";
 
@@ -5,6 +6,7 @@ const id = z.string().trim().min(1);
 export const claudeModelSchema = z.string().trim().min(1).max(200).regex(/^claude-[A-Za-z0-9._-]+$/);
 const retry = z.union([z.literal(0), z.literal(5)]);
 const fields = {
+  AIRTABLE_PRODUCT_FIELD_MAP: productFieldMapSchema.optional(),
   ICLOUD_ALBUMS: albumRegistrySchema.default([]),
   AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID: z.string().trim().regex(/^tbl[A-Za-z0-9]+$/).nullable().default(null),
   MESSENGER_COMPLETION_USER_IDS: z.array(z.string().trim().regex(/^U[0-9a-f]{32}$/)).refine(ids => new Set(ids).size === ids.length).default([]),
@@ -36,6 +38,7 @@ export type StoredSettings = z.infer<typeof storedSettingsSchema>;
 export const sectionSchemas = {
   connections: z
     .strictObject({
+      AIRTABLE_PRODUCT_FIELD_MAP: productFieldMapSchema,
       ICLOUD_ALBUMS: albumRegistrySchema,
       AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID: fields.AIRTABLE_MESSENGER_DELIVERIES_TABLE_ID.unwrap(),
       AIRTABLE_BASE_ID: fields.AIRTABLE_BASE_ID,
@@ -96,6 +99,7 @@ export type SettingsRecord = {
   settings: StoredSettings;
 };
 export type RuntimeSettings = {
+  airtableProductFieldMap?: ProductFieldMap;
   icloudAlbums?: Album[];
   airtableMessengerDeliveriesTableId: string | null;
   messengerCompletionUserIds: string[];
