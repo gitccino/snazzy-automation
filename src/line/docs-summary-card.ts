@@ -1,3 +1,4 @@
+import { externalBrowserUri } from "./external-browser";
 import { imageFailureGuidance } from "../publication/image-diagnostic";
 import type { SearchCardReply } from "./search-card";
 import { buildPublicationSuccessMessage, buildPublicationValidationFailureMessage, buildPublicationWorkflowFailureMessage, publicationOwnerReviewInstruction } from "./messages";
@@ -25,7 +26,7 @@ function summaryCard(title: string, icon: string, date: string, details: Record<
     },
     footer: {
       type: "box", layout: "vertical", paddingAll: "16px", paddingTop: "0px", backgroundColor: "#FFFFFF",
-      contents: [{ type: "button", style: "primary", color: "#2C2C2C", height: "sm", action: { type: "uri", label: buttonLabel, uri } }],
+      contents: [{ type: "button", style: "primary", color: "#2C2C2C", height: "sm", action: { type: "uri", label: buttonLabel, uri: externalBrowserUri(uri) } }],
     },
   };
 }

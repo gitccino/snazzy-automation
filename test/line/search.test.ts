@@ -206,3 +206,53 @@ it("lets durable processing retry temporary report failures instead of returning
   vi.mocked(d.inventory.listSalesForDay).mockRejectedValue(error);
   await expect(handleReadOnlyCommand({ type: "report", page: 1 }, { ...d, retryTransientErrors: true })).rejects.toBe(error);
 });
+
+it('enriches search with two album names, only available URLs and uncertainty', async () => {
+ const d=deps();
+ const product={recordId:'r',productId:'A-1',inventoryStatus:'In' as const,soldPrice:null,soldAt:null,soldBy:null,uploadDate:'2026-06-11',airtableUrl:'https://airtable.com/r'};
+ d.inventory.findByProductId=async()=>product;
+ d.lookupAlbum=async()=>({status:'found',basis:'date',albums:[
+  {sourceAlbumId:'32',name:'Shared album 32',url:'https://www.icloud.com/sharedalbum/#B123',startDate:null,endDate:null},
+  {sourceAlbumId:'33',name:'Shared album 33',url:null,startDate:null,endDate:null},
+ ]});
+ const reply=await handleReadOnlyCommand({type:'search',productId:'A-1'},d);
+ expect(typeof reply).not.toBe('string');
+ const json=JSON.stringify(reply);
+ expect(json).toContain('สินค้านี้อาจอยู่ในอัลบั้มใดอัลบั้มหนึ่ง');
+ expect(json).toContain('Shared album 33');
+ expect(json).toContain('https://www.icloud.com/sharedalbum/?openExternalBrowser=1#B123');
+ expect(json).toContain('เปิดใน Airtable');
+ expect(typeof reply!=='string' && reply.text).toContain('Shared album 32');
+});
+it('still returns a product and safe feedback when optional album lookup throws',async()=>{
+ const d=deps();
+ d.inventory.findByProductId=async()=>({recordId:'r',productId:'A-1',inventoryStatus:'In',soldPrice:null,soldAt:null,soldBy:null,uploadDate:null,airtableUrl:'https://airtable.com/r'});
+ d.lookupAlbum=async()=>{throw new Error('private URL and secret');};
+ const json=JSON.stringify(await handleReadOnlyCommand({type:'search',productId:'A-1'},d));
+ expect(json).toContain('ตรวจสอบอัลบั้ม iCloud ไม่สำเร็จ');
+ expect(json).toContain('เปิดใน Airtable');
+ expect(json).not.toContain('secret');
+});
+
+it('renders an unknown album explanation without changing soldout cards', async()=>{
+ const {searchCard,alreadyOutCard,saleSuccessCard}=await import('../../src/line/search-card');
+ const {validateReplyMessages}=await import('../../src/line/client');
+ const product={recordId:'r',productId:'A-1',inventoryStatus:'In' as const,soldPrice:null,soldAt:null,soldBy:null,uploadDate:null,airtableUrl:'https://airtable.com/r'};
+ const card=searchCard(product,'https://worker.example',{status:'unknown'});
+ expect(JSON.stringify(card)).toContain('ไม่สามารถระบุอัลบั้ม iCloud');
+ validateReplyMessages([{type:'flex',altText:card.text,contents:card.contents}]);
+ expect(JSON.stringify(alreadyOutCard(product,'https://worker.example'))).not.toContain('iCloud');
+ expect(JSON.stringify(saleSuccessCard('A-1',100,'https://worker.example',product))).not.toContain('iCloud');
+});
+it('labels a second candidate link correctly when the first candidate has no URL',async()=>{
+ const {searchCard}=await import('../../src/line/search-card');
+ const {validateReplyMessages}=await import('../../src/line/client');
+ const product={recordId:'r',productId:'A-1',inventoryStatus:'In' as const,soldPrice:null,soldAt:null,soldBy:null,uploadDate:null,airtableUrl:'https://airtable.com/r'};
+ const card=searchCard(product,'https://worker.example',{status:'found',basis:'date',albums:[
+ {sourceAlbumId:'32',name:'Shared album 32',url:null,startDate:null,endDate:null},
+ {sourceAlbumId:'33',name:'Shared album 33',url:'https://www.icloud.com/sharedalbum/#B123',startDate:null,endDate:null},
+ ]});
+ expect(JSON.stringify(card)).toContain('เปิดบน iCloud.com 2');
+ expect(JSON.stringify(card)).not.toContain('เปิดบน iCloud.com 1');
+ validateReplyMessages([{type:'flex',altText:card.text,contents:card.contents}]);
+});

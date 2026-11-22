@@ -1,3 +1,5 @@
+import { externalBrowserUri } from "./external-browser";
+import type { AlbumLookup } from "./album-lookup";
 import type { InventoryProduct } from "./types";
 import { alreadyOutText, searchText, soldAtText } from "./messages";
 
@@ -7,8 +9,8 @@ export interface SearchCardReply {
   contents: Record<string, unknown>;
 }
 
-export function searchCard(product: InventoryProduct, publicBaseUrl: string): SearchCardReply {
-  return productCard(product, publicBaseUrl, searchText(product));
+export function searchCard(product: InventoryProduct, publicBaseUrl: string, album?: AlbumLookup): SearchCardReply {
+  return productCard(product, publicBaseUrl, searchText(product), undefined, false, album);
 }
 
 export function alreadyOutCard(product: InventoryProduct, publicBaseUrl: string): SearchCardReply {
@@ -35,6 +37,7 @@ function productCard(
   text: string,
   soldPrice?: number,
   alreadyOut = false,
+  album?: AlbumLookup,
 ): SearchCardReply {
   const isIn = product.inventoryStatus === "In";
   const ink = "#2C2C2C";
@@ -52,9 +55,21 @@ function productCard(
   const date = uploadDate
     ? `${Number(uploadDate[3])}/${Number(uploadDate[2])}/${uploadDate[1]}`
     : product.uploadDate ?? "ไม่พบข้อมูล";
+  const albumNames = album?.status === "found" ? album.albums.map(a=>a.name).join("\n") : null;
+  const albumText = !album ? null : album.status === "found"
+    ? `${album.albums.length === 2 ? "สินค้านี้อาจอยู่ในอัลบั้มใดอัลบั้มหนึ่ง\n" : ""}${albumNames}`
+    : album.status === "unavailable" ? "ตรวจสอบอัลบั้ม iCloud ไม่สำเร็จ กรุณาลอง /search อีกครั้ง"
+    : "ไม่สามารถระบุอัลบั้ม iCloud ของสินค้านี้ได้";
+  const albumNote = album?.status === "found"
+    ? album.albums.length === 2 ? "สินค้านี้อาจอยู่ในอัลบั้มใดอัลบั้มหนึ่ง" : null
+    : albumText;
+  const albumButtons = album?.status === "found" ? album.albums.map((a,index)=>a.url ? ({
+    type: "button", style: "secondary", height: "sm",
+    action: {type: "uri", label: album.albums.length === 1 ? "เปิดบน iCloud.com" : `เปิดบน iCloud.com ${index+1}`, uri: externalBrowserUri(a.url)},
+  }) : null).filter(Boolean) : [];
   return {
     kind: "flex",
-    text,
+    text: albumText ? `${text}\n${albumText}`.slice(0,400).replace(/[\uD800-\uDBFF]$/, "") : text,
     contents: {
       type: "bubble", size: "mega",
       ...(product.imageUrl && !alreadyOut ? {
@@ -94,16 +109,22 @@ function productCard(
                 ? row("ราคา", `${soldPrice.toLocaleString("en-US")} บาท`)
                 : row(product.brandName ? "แบรนด์" : "รุ่น", product.brandName || product.modelName || "ไม่พบข้อมูล"),
               ...(product.uploadDate !== undefined || soldPrice === undefined ? [row("วันที่อัปโหลด", date)] : []),
+              ...(albumNames ? [{type: "text", text: albumNames, color: ink, size: "sm", align: "end", wrap: true, margin: "xs"}] : []),
             ],
           },
+          ...(albumNote ? [{type: "text", text: albumNote, color: muted, size: "sm", wrap: true, margin: "lg"}] : []),
         ],
       },
-      ...(product.airtableUrl ? { footer: {
+      ...(product.airtableUrl || albumButtons.length ? { footer: {
         type: "box", layout: "vertical", paddingAll: "16px", paddingTop: "0px", backgroundColor: background,
-        contents: [{
-          type: "button", style: "primary", color: ink, height: "sm",
-          action: { type: "uri", label: "เปิดใน Airtable", uri: product.airtableUrl },
-        }],
+        ...(albumButtons.length ? {spacing: "sm"} : {}),
+        contents: [
+          ...(product.airtableUrl ? [{
+            type: "button", style: "primary", color: ink, height: "sm",
+            action: { type: "uri", label: "เปิดใน Airtable", uri: externalBrowserUri(product.airtableUrl) },
+          }] : []),
+          ...albumButtons,
+        ],
       } } : {}),
     },
   };
