@@ -36,3 +36,11 @@ The deterministic source ID from that existing URL matches a saved staging impor
 Latest automation version: `356cae6b-3a56-4135-951e-13b26f1803bd`. Latest compatible settings version: `74490f54-8e7b-44b1-9066-530562c312b6`. Both tagged `271db43`. Post-change health: HTTP 200, `ok: true`, `importRunning: false`. Pre-change active import/publication/queue counts were zero.
 
 Verification: 80 focused tests, 19 settings-site tests, typecheck, build and diff check passed. The root test command's owner CLI check passed; Vitest completed 1,393 passing and the same nine established baseline failures. No LINE search message was sent; user testing through fresh `/search` remains appropriate. Production and the active upload-album secret were not changed. Production has an independent registry and does not inherit this staging entry automatically.
+
+## Approved album-name placement
+
+The user approved the visual refinement: remove the separate album heading and place the album name in black, right-aligned directly below the upload date. Implemented in `0e801a2`; two matching names use the same placement and retain a separate uncertainty note. Unknown and unavailable guidance stays full-width and readable; soldout cards and button actions are unchanged.
+
+Deployed automation version `f6505c18-294b-40bf-a0e6-24662b1f99c4`, tag `0e801a2`. The settings Worker did not require redeployment for this rendering-only change. Private D1 backup was retained before deployment; no settings or schema changes were made. Readback confirms revision 15, 21 albums and zero unresolved queue entries. Health returned HTTP 200 with `ok: true`, `importRunning: false`.
+
+Both new placement regressions failed before the patch and passed afterward. Focused search/resolver/D1 suites passed 53 tests; typecheck, dry run and diff check passed. Root Node owner CLI passed, and Vitest completed with 1,395 passing and the same nine baseline failures documented above. Existing Miniflare and source-map warnings remained. The final live mobile layout requires a fresh `/search`; old LINE cards are immutable. Production was not changed.
