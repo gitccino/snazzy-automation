@@ -14,9 +14,11 @@ import { alreadyOutCard, saleSuccessCard, searchCard, type SearchCardReply } fro
 
 export type UploadTriggerResult =
   | { status: "started"; importRunId: string }
+  | { status: "owner_review" | "checking" | "completed" | "partial"; importRunId: string }
   | {
       status:
         | "already_running"
+        | "busy"
         | "sequence_not_bootstrapped"
         | "workflow_start_failed"
         | "import_trigger_failed";
@@ -24,6 +26,10 @@ export type UploadTriggerResult =
 
 export type DocsTriggerResult =
   | { status: "no_runnable_run" }
+  | { status: "failed_to_start"; publicationRunId: string }
+  | { status: "owner_review"; publicationRunId: string }
+  | { status: "checking"; publicationRunId: string }
+  | { status: "busy" }
   | { status: "regenerating"; publicationRunId: string; generation: number }
   | {
       status: "started" | "restarted" | "resumed" | "already_running" | "already_generated";
@@ -35,8 +41,8 @@ export interface ReadOnlyDeps {
   retryTransientErrors?: boolean;
   inventory: Pick<InventoryClient, "findByProductId" | "listSalesForDay">;
   clock: Clock;
-  triggerUpload(): Promise<UploadTriggerResult>;
-  triggerDocs(publicationDate?: string): Promise<DocsTriggerResult>;
+  triggerUpload(trustedEventId?: string): Promise<UploadTriggerResult>;
+  triggerDocs(publicationDate?: string, trustedEventId?: string): Promise<DocsTriggerResult>;
 }
 
 function uploadResultReply(result: UploadTriggerResult, publicBaseUrl: string): string | SearchCardReply {
@@ -45,6 +51,16 @@ function uploadResultReply(result: UploadTriggerResult, publicBaseUrl: string): 
       return uploadStartCard(result.importRunId, publicBaseUrl);
     case "already_running":
       return "⚠️ มีงานนำเข้ากำลังทำงานอยู่";
+    case "busy":
+      return "⚠️ มีงานนำเข้าเดิมที่ต้องตรวจสอบ";
+    case "owner_review":
+      return `⚠️ กรุณาตรวจสอบงานนำเข้าเดิมก่อนเริ่มใหม่ ${result.importRunId}`;
+    case "checking":
+      return `🔎 กำลังตรวจสอบงานนำเข้าเดิม ${result.importRunId}`;
+    case "completed":
+      return `✅ งานนำเข้าเดิมเสร็จแล้ว ${result.importRunId}`;
+    case "partial":
+      return `⚠️ งานนำเข้าเดิมเสร็จบางส่วน ${result.importRunId}`;
     case "sequence_not_bootstrapped":
       return "⚠️ ยังเริ่มนำเข้าไม่ได้ เพราะยังไม่ได้ตั้งค่าลำดับรหัสสินค้า";
     case "workflow_start_failed":
@@ -146,6 +162,14 @@ function testSoldoutReply(caseNumber: number | null, publicBaseUrl: string): str
 
 function docsResultText(result: DocsTriggerResult, publicationDate?: string): string {
   switch (result.status) {
+    case "failed_to_start":
+      return "⚠️ งานเอกสารไม่ได้เริ่ม กรุณาให้เจ้าของตรวจสอบรหัส Publication Run และแก้ไขก่อนส่ง /docs อีกครั้ง";
+    case "busy":
+      return "⚠️ มีงานสร้างเอกสารที่ต้องตรวจสอบ";
+    case "owner_review":
+      return `⚠️ กรุณาตรวจสอบงานเดิมก่อนเริ่มใหม่ ${result.publicationRunId}`;
+    case "checking":
+      return `กำลังตรวจสอบงานเดิม ${result.publicationRunId}`;
     case "regenerating":
       return `เริ่มสร้างเอกสารเวอร์ชัน v${result.generation} แล้ว ${result.publicationRunId}`;
     case "started":
@@ -241,6 +265,7 @@ function testReportReply(caseNumber: number | null, page: number, publicBaseUrl:
 export async function handleReadOnlyCommand(
   command: Extract<ParsedCommand, { type: "report" | "help" | "search" | "upload" | "testupload" | "testsearch" | "testsoldout" | "testdocs" | "testreport" | "docs" }>,
   deps: ReadOnlyDeps,
+  trustedEventId?: string,
 ): Promise<string | SearchCardReply> {
   if (command.type === "testreport") return testReportReply(command.caseNumber, command.page, deps.publicBaseUrl);
   if (command.type === "testupload") return testUploadReply(command.caseNumber, deps.publicBaseUrl);
@@ -269,7 +294,7 @@ export async function handleReadOnlyCommand(
     return product ? searchCard(product, deps.publicBaseUrl) : notFoundText(command.productId);
   }
   if (command.type === "upload") {
-    const result = await deps.triggerUpload();
+    const result = await deps.triggerUpload(trustedEventId);
     if (deps.retryTransientErrors && (result.status === "workflow_start_failed" || result.status === "import_trigger_failed")) {
       throw new OperationalError(result.status, "Import trigger failed", true);
     }
@@ -277,8 +302,8 @@ export async function handleReadOnlyCommand(
   }
   try {
     const result = command.publicationDate
-      ? await deps.triggerDocs(command.publicationDate)
-      : await deps.triggerDocs();
+      ? await deps.triggerDocs(command.publicationDate, trustedEventId)
+      : await deps.triggerDocs(undefined, trustedEventId);
     return docsResultReply(result, deps.publicBaseUrl, command.publicationDate);
   } catch (error) {
     if (!(error instanceof OperationalError) || error.code !== "airtable_duplicate_publication_date") throw error;

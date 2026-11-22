@@ -4,7 +4,7 @@ import {
   ensureTemporaryDocument, failPublicationAfterExhaustion, fillAndVerifyDocument,
   finalizePublication, notifyPublicationSuccess, notifyPublicationValidationFailure,
   preparePublicationOutputs, validatePublication,
-  finalizeStoredPublication,
+  finalizeStoredPublication, recoverPublicationFinalization,
   type PublicationServiceDeps, type PreparedPublication, type ValidatedPublication,
 } from "../../src/publication/service";
 import type { Fetcher } from "../../src/shared/http";
@@ -33,6 +33,7 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 function baseDeps(overrides: Partial<PublicationServiceDeps> = {}): PublicationServiceDeps {
   return {
     db: env.DB,
+    copyOwner: { workflowId: "corr-1", notificationCycle: 1 },
     assets: { putIfAbsent: vi.fn(), signUrl: vi.fn(async (key: string) => `https://worker.example/assets/${encodeURIComponent(key)}?exp=1&sig=x`) },
     bucket: { get: vi.fn(), put: vi.fn() } as unknown as R2Bucket,
     images: { input: vi.fn() },
@@ -147,7 +148,7 @@ describe("publication stages", () => {
       }
       return json({ id: "rec-run-1", fields });
     });
-    const deps = baseDeps({ fetcher });
+    const deps = baseDeps({ fetcher, copyOwner: { workflowId: "publication-rec-run-1-v2", notificationCycle: 1 } });
     if (failure === "D1") {
       deps.db = { prepare(sql: string) {
         if (sql.includes("successful_generation=generation") && loseResponse) { loseResponse = false; throw new Error("D1 unavailable"); }
@@ -161,6 +162,7 @@ describe("publication stages", () => {
     expect(await job()).toMatchObject({ state: "failed", google_doc_id: "old-doc", temp_doc_id: "candidate-v2" });
     expect((await env.DB.prepare("SELECT finalization_json FROM publication_jobs").first<{ finalization_json: string }>())?.finalization_json).toContain('"generation":2');
     await reopenFailedJobForRestart(env.DB, clock, "rec-run-1", "publication-rec-run-1-v2", 2);
+    deps.copyOwner = { workflowId: "publication-rec-run-1-v2", notificationCycle: 2 };
     await expect(finalizeStoredPublication(deps, "rec-run-1", 2)).resolves.toMatchObject({ googleDocId: "candidate-v2", productIds: ["A-1001"] });
     expect(titles).toEqual(["Publication 2026-09-02 (v2)", "Publication 2026-09-02 (v2)"]);
     expect(fields.Status).toBe("Generated");
@@ -170,7 +172,7 @@ describe("publication stages", () => {
     await seedJob("generating", null, "publication-rec-run-1-v2");
     await env.DB.prepare("UPDATE publication_jobs SET generation=2,successful_generation=1,google_doc_id='old-doc',google_doc_url='old-url'").run();
     const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(token()).mockResolvedValueOnce(json({ files: [] })).mockResolvedValueOnce(json({ id: "new-v2" }));
-    await expect(ensureTemporaryDocument(baseDeps({ fetcher }), { ...prepared, generation: 2 })).resolves.toBe("new-v2");
+    await expect(ensureTemporaryDocument(baseDeps({ fetcher, copyOwner: { workflowId: "publication-rec-run-1-v2", notificationCycle: 1 } }), { ...prepared, generation: 2 })).resolves.toBe("new-v2");
     expect(new URL(String(fetcher.mock.calls[1]![0])).searchParams.get("q")).toContain("value='publication-rec-run-1-v2'");
     expect(JSON.parse(String(fetcher.mock.calls[2]![1]?.body))).toMatchObject({
       name: "Publication 2026-09-02 (v2) (in progress)", appProperties: { publicationRunId: "publication-rec-run-1-v2" },
@@ -190,6 +192,7 @@ describe("publication stages", () => {
   });
   beforeEach(async () => {
     await env.DB.exec("DELETE FROM publication_product_cache");
+    await env.DB.exec("DELETE FROM publication_cleanup_intents");
     await env.DB.exec("DELETE FROM publication_jobs");
   });
 
@@ -404,7 +407,7 @@ describe("publication stages", () => {
       .mockRejectedValueOnce({ status: 403, message: "upstream secret" })
       .mockResolvedValueOnce(captionResponse([{ productId: "A-1002", drafts }]) as never);
     const two = { ...validated, run: { ...validated.run, products: [product, { ...product, productId: "A-1002", airtableRecordId: "rec-product-2" }] } };
-    await expect(preparePublicationOutputs(deps, two)).rejects.toMatchObject({ code: "anthropic_create_message_failed", retryable: false });
+    await expect(preparePublicationOutputs(deps, two)).rejects.toMatchObject({ code: "anthropic_auth_failed", retryable: false });
     expect((await getProductCache(env.DB, "rec-run-1", "A-1001")).captionsJson).toBe(JSON.stringify(drafts));
     await preparePublicationOutputs(deps, two);
     expect(JSON.stringify(create.mock.calls[2]![0])).not.toContain("A-1001");
@@ -438,8 +441,40 @@ describe("publication stages", () => {
     expect(await job()).toMatchObject({ temp_doc_id: "temp-doc" });
   });
 
+  it("does not copy for a stale workflow owner", async () => {
+    await seedJob();
+    await env.DB.prepare("INSERT OR REPLACE INTO publication_google_write_evidence (publication_run_id, generation, notification_cycle, state) VALUES ('rec-run-1', 1, 1, 'tracking')").run();
+    const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(token()).mockResolvedValueOnce(json({ files: [] }));
+    await expect(ensureTemporaryDocument(baseDeps({ fetcher, copyOwner: { workflowId: "old", notificationCycle: 1 } }), prepared)).rejects.toMatchObject({ code: "publication_generation_stale" });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(await env.DB.prepare("SELECT state FROM publication_google_write_evidence WHERE publication_run_id='rec-run-1'").first()).toEqual({ state: "tracking" });
+  });
+
+  it.each(["fill", "finalize", "recovery", "delete"].flatMap(stage => [true, false].map(tracked => ({ stage, tracked }))))("rejects stale owner before Google $stage (tracked=$tracked)", async ({ stage, tracked }) => {
+    await seedJob("generating", "temp-doc");
+    await env.DB.prepare("DELETE FROM publication_google_write_evidence").run();
+    if (tracked) await env.DB.prepare("INSERT INTO publication_google_write_evidence (publication_run_id, generation, notification_cycle, state) VALUES ('rec-run-1', 1, 1, 'tracking')").run();
+    const intent = { generation: 1, publicationDate: "2026-09-02", thaiDate: "Today", docId: "temp-doc", docUrl: "https://docs.google.com/document/d/temp-doc/edit", title: "Publication", productIds: ["A-1001"], generatedAt: clock.now().toISOString() };
+    if (stage === "finalize" || stage === "recovery") await env.DB.prepare("UPDATE publication_jobs SET finalization_json=?").bind(JSON.stringify(intent)).run();
+    const fetcher = vi.fn<Fetcher>().mockImplementation(async (url) => String(url).includes("oauth2") ? token() : String(url).includes("docs.googleapis.com") ? document("{{PUBLICATION_DATE}}\n{{PRODUCTS}}suffix{{END_PRODUCTS}}\n") : json({ id: "ok" }));
+    const deps = baseDeps({ fetcher, copyOwner: { workflowId: "old", notificationCycle: 1 } });
+    const action = stage === "fill" ? () => fillAndVerifyDocument(deps, prepared, "temp-doc") : stage === "finalize" ? () => finalizeStoredPublication(deps, "rec-run-1", 1) : stage === "recovery" ? () => recoverPublicationFinalization(deps, "rec-run-1", 1) : () => failPublicationAfterExhaustion(deps, "rec-run-1", "failed", null);
+    await expect(action()).rejects.toMatchObject({ code: "publication_generation_stale" });
+    expect(fetcher.mock.calls.some(([url, init]) => ["docs.googleapis.com", "www.googleapis.com"].includes(new URL(String(url)).hostname) && ["POST", "PATCH", "DELETE"].includes(init?.method ?? ""))).toBe(false);
+    expect((await env.DB.prepare("SELECT state FROM publication_google_write_evidence").all()).results).toEqual(tracked ? [{ state: "tracking" }] : []);
+  });
+
+  it("persists possible write before a lost copy response", async () => {
+    await seedJob();
+    await env.DB.prepare("INSERT OR REPLACE INTO publication_google_write_evidence (publication_run_id, generation, notification_cycle, state) VALUES ('rec-run-1', 1, 1, 'tracking')").run();
+    const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(token()).mockResolvedValueOnce(json({ files: [] })).mockRejectedValue(new Error("response lost"));
+    await expect(ensureTemporaryDocument(baseDeps({ fetcher }), prepared)).rejects.toThrow();
+    expect(await env.DB.prepare("SELECT state FROM publication_google_write_evidence WHERE publication_run_id='rec-run-1'").first()).toEqual({ state: "may_have_written" });
+  });
+
   it.each([true, false])("signs, fills and verifies with captioning enabled=%s", async aiCaptionsEnabled => {
     await seedJob("generating", "temp-doc");
+    await env.DB.prepare("INSERT OR REPLACE INTO publication_google_write_evidence (publication_run_id, generation, notification_cycle, state) VALUES ('rec-run-1', 1, 1, 'tracking')").run();
     const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(json({ id: product.airtableRecordId }))
       .mockResolvedValueOnce(token())
       .mockResolvedValueOnce(document("{{PUBLICATION_DATE}}\n{{PRODUCTS}}suffix{{END_PRODUCTS}}\n"))
@@ -448,6 +483,7 @@ describe("publication stages", () => {
     const deps = baseDeps({ fetcher });
     deps.config = { ...deps.config, aiCaptionsEnabled };
     await fillAndVerifyDocument(deps, prepared, "temp-doc");
+    expect(await env.DB.prepare("SELECT state FROM publication_google_write_evidence WHERE publication_run_id='rec-run-1' AND generation=1 AND notification_cycle=1").first()).toEqual({ state: "may_have_written" });
     const requests = JSON.parse(String(fetcher.mock.calls[3]![1]?.body)).requests;
     expect(JSON.stringify(requests).includes("Caption 1:")).toBe(aiCaptionsEnabled);
     expect(JSON.stringify(requests).includes("หนึ่ง")).toBe(aiCaptionsEnabled);
@@ -507,6 +543,21 @@ describe("publication stages", () => {
     expect(fetcher.mock.calls[2]![1]?.method).toBe("DELETE");
     expect(await job()).toMatchObject({ state: "failed", temp_doc_id: null });
     expect(deps.notify).toHaveBeenCalledWith(expect.stringContaining("ไม่สามารถอ่านวันที่รายการได้"), expect.objectContaining({ type: "bubble" }), expect.any(String));
+  });
+
+  it("records the exact cleanup intent before a lost delete response", async () => {
+    await seedJob("generating", "temp-doc");
+    let observed: unknown;
+    const fetcher = vi.fn<Fetcher>().mockImplementation(async (_url, init) => {
+      if (init?.method === "DELETE") {
+        observed = await env.DB.prepare("SELECT doc_id, origin_workflow_id FROM publication_cleanup_intents WHERE publication_run_id='rec-run-1'").first();
+        throw new Error("lost response");
+      }
+      return token();
+    });
+    await expect(failPublicationAfterExhaustion(baseDeps({ fetcher }), "rec-run-1", "failed", null)).rejects.toThrow("Google drive delete transport failed");
+    expect(observed).toEqual({ doc_id: "temp-doc", origin_workflow_id: "corr-1" });
+    expect(await job()).toMatchObject({ state: "generating", temp_doc_id: "temp-doc" });
   });
 
   it("retains the temp ID when deletion fails so cleanup can safely retry", async () => {

@@ -29,6 +29,10 @@ it("returns Thai not-found text for an unknown Product ID", async () => {
 const uploadCases: Array<[UploadTriggerResult, string]> = [
   [{ status: "started", importRunId: "import-1" }, "เริ่มการนำเข้าสินค้า\nimport-1"],
   [{ status: "already_running" }, "⚠️ มีงานนำเข้ากำลังทำงานอยู่"],
+  [{ status: "busy" }, "⚠️ มีงานนำเข้าเดิมที่ต้องตรวจสอบ"],
+  [{ status: "completed", importRunId: "original" }, "✅ งานนำเข้าเดิมเสร็จแล้ว original"],
+  [{ status: "partial", importRunId: "original" }, "⚠️ งานนำเข้าเดิมเสร็จบางส่วน original"],
+  [{ status: "owner_review", importRunId: "original" }, "⚠️ กรุณาตรวจสอบงานนำเข้าเดิมก่อนเริ่มใหม่ original"],
   [{ status: "sequence_not_bootstrapped" }, "⚠️ ยังเริ่มนำเข้าไม่ได้ เพราะยังไม่ได้ตั้งค่าลำดับรหัสสินค้า"],
   [{ status: "workflow_start_failed" }, "⚠️ เริ่มงานนำเข้าไม่สำเร็จ กรุณาลอง /upload อีกครั้ง"],
   [{ status: "import_trigger_failed" }, "⚠️ ระบบเริ่มงานนำเข้าขัดข้อง กรุณาลอง /upload อีกครั้ง"],
@@ -65,6 +69,8 @@ const docsCases: Array<[DocsTriggerResult, string]> = [
   [{ status: "already_running", publicationRunId: "run-1" }, "⚠️ มีงานสร้างเอกสารกำลังทำงานอยู่ run-1"],
   [{ status: "already_generated", publicationRunId: "run-1" }, "⚠️ สร้างเอกสารของ Publication Run นี้แล้ว run-1\nหากต้องการสร้างเวอร์ชันใหม่ ตั้งสถานะเป็น Ready แล้วส่งคำสั่ง /docs อีกครั้ง"],
   [{ status: "no_runnable_run" }, "⚠️ ยังไม่มี Publication Run ที่พร้อมวันนี้"],
+  [{ status: "owner_review", publicationRunId: "run-1" }, "⚠️ กรุณาตรวจสอบงานเดิมก่อนเริ่มใหม่ run-1"],
+  [{ status: "busy" }, "⚠️ มีงานสร้างเอกสารที่ต้องตรวจสอบ"],
 ];
 
 it.each(docsCases)("maps docs result %j to its Thai reply", async (result, expected) => {

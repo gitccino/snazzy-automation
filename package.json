@@ -6,7 +6,7 @@
   "scripts": {
     "check": "npm run typecheck && npm test",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "node --test test/scripts/check-import-group-owner-cli.mjs && vitest run",
     "test:watch": "vitest",
     "dev": "wrangler dev",
     "db:migrate:local": "wrangler d1 migrations apply snazzy-automation-local --local",

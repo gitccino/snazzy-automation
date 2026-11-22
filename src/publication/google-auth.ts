@@ -55,7 +55,8 @@ export function createGoogleAuthClient(
 
       if (!response.ok) {
         throw new OperationalError(
-          "google_token_exchange_failed",
+          response.status === 400 || response.status === 401 || response.status === 403
+            ? "google_auth_failed" : "google_token_exchange_failed",
           `Google token exchange failed with status ${response.status}`,
           response.status === 429 || response.status >= 500,
         );

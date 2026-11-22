@@ -8,6 +8,44 @@ function repo() {
 }
 
 describe("import-repository", () => {
+  it("commits a LINE result with finalization, rejects conflicts, and replays safely", async () => {
+    const db = testEnv().DB;
+    const r = repo();
+    const id = crypto.randomUUID(), sourceAlbumId = crypto.randomUUID(), groupId = crypto.randomUUID();
+    await r.createImportRun({ id, sourceAlbumId, trigger: "line" });
+    await db.prepare("UPDATE import_runs SET settings_context_json=? WHERE id=?").bind(JSON.stringify({ replyGroupId: groupId }), id).run();
+    const result = { schemaVersion: 1 as const, kind: "import" as const, runId: id, generation: 1, notificationCycle: 1, outcome: "success" as const, messages: [{ type: "text" as const, text: "done" }] };
+    const input = { id, sourceAlbumId, status: "completed" as const, orphanPhotoCount: 0, checkpointPosition: 42, lineResult: { groupId, result } };
+    await r.finalizeImportRun(input);
+    await r.finalizeImportRun(input);
+    const rows = await db.prepare("SELECT * FROM line_result_outbox WHERE result_key=?").bind(JSON.stringify(["import", id, 1, 1, "terminal"])).all();
+    expect(rows.results).toHaveLength(1);
+    await expect(r.finalizeImportRun({ ...input, lineResult: { groupId, result: { ...result, messages: [{ type: "text", text: "different" }] } } })).rejects.toThrow();
+    expect(await r.getCheckpoint(sourceAlbumId)).toBe(42);
+  });
+
+  it("rolls back finalization if the LINE outbox conflicts", async () => {
+    const db = testEnv().DB, r = repo();
+    const id = crypto.randomUUID(), sourceAlbumId = crypto.randomUUID(), groupId = crypto.randomUUID();
+    await r.createImportRun({ id, sourceAlbumId, trigger: "line" });
+    await db.prepare("UPDATE import_runs SET settings_context_json=? WHERE id=?").bind(JSON.stringify({ replyGroupId: groupId }), id).run();
+    await db.prepare("INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at) VALUES(?,?,?,?)").bind(JSON.stringify(["import", id, 1, 1, "terminal"]), groupId, "{}", "now").run();
+    await expect(r.finalizeImportRun({ id, sourceAlbumId, status: "completed", orphanPhotoCount: 0, checkpointPosition: 42, lineResult: { groupId, result: { schemaVersion: 1, kind: "import", runId: id, generation: 1, notificationCycle: 1, outcome: "success", messages: [{ type: "text", text: "done" }] } } })).rejects.toThrow();
+    expect(await r.hasRunningImportRun(sourceAlbumId)).toBe(true);
+    expect(await r.getCheckpoint(sourceAlbumId)).toBeNull();
+  });
+
+  it("rejects a LINE result for a different captured group without finalizing", async () => {
+    const db = testEnv().DB, r = repo();
+    const id = crypto.randomUUID(), sourceAlbumId = crypto.randomUUID();
+    await r.createImportRun({ id, sourceAlbumId, trigger: "line" });
+    await db.prepare("UPDATE import_runs SET settings_context_json=? WHERE id=?").bind(JSON.stringify({ replyGroupId: "owner" }), id).run();
+    await expect(r.finalizeImportRun({ id, sourceAlbumId, status: "completed", orphanPhotoCount: 0, checkpointPosition: 1, lineResult: { groupId: "other", result: { schemaVersion: 1, kind: "import", runId: id, generation: 1, notificationCycle: 1, outcome: "success", messages: [{ type: "text", text: "done" }] } } })).rejects.toThrow();
+    expect(await r.hasRunningImportRun(sourceAlbumId)).toBe(true);
+    expect(await r.getCheckpoint(sourceAlbumId)).toBeNull();
+    expect((await db.prepare("SELECT 1 FROM line_result_outbox WHERE result_key=?").bind(JSON.stringify(["import", id, 1, 1, "terminal"])).all()).results).toHaveLength(0);
+  });
+
   it("creates a running import run and reports it as running", async () => {
     const r = repo();
     const albumId = `album-${crypto.randomUUID()}`;
@@ -34,6 +72,33 @@ describe("import-repository", () => {
     await r.markImportRunStartFailed(runId);
 
     expect(await r.hasRunningImportRun(albumId)).toBe(false);
+  });
+
+  it("atomically records a LINE scan failure and its notice, fencing conflicts and replay", async () => {
+    const db = testEnv().DB, r = repo();
+    const id = crypto.randomUUID(), sourceAlbumId = crypto.randomUUID(), groupId = crypto.randomUUID();
+    await r.createImportRun({ id, sourceAlbumId, trigger: "line" });
+    await db.prepare("UPDATE import_runs SET settings_context_json=? WHERE id=?").bind(JSON.stringify({ replyGroupId: groupId }), id).run();
+    const result = { schemaVersion: 1 as const, kind: "import" as const, runId: id, generation: 1, notificationCycle: 1, outcome: "failed" as const, messages: [{ type: "text" as const, text: "check run" }] };
+    const input = { id, sourceAlbumId, failureReason: "source_unavailable", lineResult: { groupId, result } };
+    await expect(r.failImportRun({ ...input, lineResult: { groupId: "other", result } })).rejects.toThrow();
+    expect(await r.hasRunningImportRun(sourceAlbumId)).toBe(true);
+    await r.failImportRun(input);
+    await r.failImportRun(input);
+    const rows = await db.prepare("SELECT group_id,result_json FROM line_result_outbox WHERE result_key=?").bind(JSON.stringify(["import", id, 1, 1, "terminal"])).all();
+    expect(rows.results).toEqual([{ group_id: groupId, result_json: JSON.stringify(result) }]);
+    await expect(r.failImportRun({ ...input, lineResult: { groupId, result: { ...result, messages: [{ type: "text", text: "different" }] } } })).rejects.toThrow();
+    expect(await r.getCheckpoint(sourceAlbumId)).toBeNull();
+  });
+
+  it("rolls back a scan failure when its notice conflicts", async () => {
+    const db = testEnv().DB, r = repo();
+    const id = crypto.randomUUID(), sourceAlbumId = crypto.randomUUID(), groupId = crypto.randomUUID();
+    await r.createImportRun({ id, sourceAlbumId, trigger: "line" });
+    await db.prepare("UPDATE import_runs SET settings_context_json=? WHERE id=?").bind(JSON.stringify({ replyGroupId: groupId }), id).run();
+    await db.prepare("INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at) VALUES(?,?,?,?)").bind(JSON.stringify(["import", id, 1, 1, "terminal"]), groupId, "{}", "now").run();
+    await expect(r.failImportRun({ id, sourceAlbumId, failureReason: "source_unavailable", lineResult: { groupId, result: { schemaVersion: 1, kind: "import", runId: id, generation: 1, notificationCycle: 1, outcome: "failed", messages: [{ type: "text", text: "check run" }] } } })).rejects.toThrow();
+    expect(await r.hasRunningImportRun(sourceAlbumId)).toBe(true);
   });
 
   it("terminalizes a failed workflow run without advancing its checkpoint", async () => {
@@ -272,6 +337,38 @@ describe("import-repository", () => {
     expect(second.id).toBe(first.id);
     expect(second.state).toBe("succeeded");
     expect(second.productId).toBe("A-501");
+  });
+
+  it("claims an allocated Airtable create once and preserves its identity across runs", async () => {
+    const r = repo();
+    const album = `album-${crypto.randomUUID()}`;
+    const run = crypto.randomUUID();
+    await r.createImportRun({ id: run, sourceAlbumId: album, trigger: "cron" });
+    const input = { id: crypto.randomUUID(), importRunId: run, ordinal: 0, groupHash: `hash-${crypto.randomUUID()}`, firstPhotoId: "a", lastPhotoId: "b" };
+    const group = await r.upsertPendingGroup(input);
+    const productId = `product-${crypto.randomUUID()}`;
+    await r.setGroupState(group.id, "importing", { productId });
+    const claim = { groupId: group.id, productId, baseId: "base", tableId: "table" };
+    expect((await Promise.all([r.claimAirtableCreate(claim), r.claimAirtableCreate(claim)])).sort()).toEqual(["acquired", "existing"]);
+    expect(await r.claimAirtableCreate({ ...claim, productId: "wrong" })).toBe("conflict");
+    expect(await r.claimAirtableCreate({ ...claim, tableId: "other" })).toBe("conflict");
+    expect(await r.claimAirtableCreate({ ...claim, baseId: "other" })).toBe("conflict");
+    await expect(r.setGroupState(group.id, "failed", { productId: "wrong" })).rejects.toThrow();
+    await r.setGroupState(group.id, "failed", { productId: null });
+    await r.finalizeImportRun({ id: run, sourceAlbumId: album, status: "completed_with_failures", orphanPhotoCount: 0, checkpointPosition: 0 });
+    const next = crypto.randomUUID();
+    await r.createImportRun({ id: next, sourceAlbumId: album, trigger: "line" });
+    expect(await r.upsertPendingGroup({ ...input, id: crypto.randomUUID(), importRunId: next })).toMatchObject({ id: group.id, state: "pending", productId });
+    expect(await r.claimAirtableCreate(claim)).toBe("existing");
+    expect(await r.claimAirtableCreate({ ...claim, productId: "wrong" })).toBe("conflict");
+  });
+
+  it("rejects claims without the group's allocated product ID", async () => {
+    const r = repo();
+    const run = crypto.randomUUID();
+    await r.createImportRun({ id: run, sourceAlbumId: `album-${crypto.randomUUID()}`, trigger: "cron" });
+    const group = await r.upsertPendingGroup({ id: crypto.randomUUID(), importRunId: run, ordinal: 0, groupHash: `hash-${crypto.randomUUID()}`, firstPhotoId: "a", lastPhotoId: "b" });
+    expect(await r.claimAirtableCreate({ groupId: group.id, productId: "wrong", baseId: "base", tableId: "table" })).toBe("conflict");
   });
 
   it("setGroupState updates failureReason and attemptCount independently", async () => {

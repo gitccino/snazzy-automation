@@ -96,7 +96,7 @@ export async function prepareLineReply(
         : { kind: "text", text: parseErrorText(parsed.code) };
     const actor = await actorFor(event, deps.line);
     if (parsed.command.type !== "soldout" && parsed.command.type !== "revert") {
-      const reply = await handleReadOnlyCommand(parsed.command, deps);
+      const reply = await handleReadOnlyCommand(parsed.command, deps, event.webhookEventId);
       return typeof reply === "string" ? { kind: "text", text: reply } : reply;
     }
     return parsed.command.type === "soldout"

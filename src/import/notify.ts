@@ -8,6 +8,9 @@ export interface ImportSummaryInput {
 }
 
 function failureReason(errorCode: string): string {
+  if (errorCode === "historical_group_unavailable") return "ไม่พบภาพกลุ่มเดิมในอัลบั้ม กรุณาให้เจ้าของตรวจสอบ";
+  if (errorCode === "confirmed_group_membership_changed") return "ภาพในกลุ่มที่ยืนยันแล้วเปลี่ยนไป กรุณาให้เจ้าของตรวจสอบ";
+  if (errorCode === "airtable_create_unconfirmed") return "ไม่สามารถยืนยันการสร้างสินค้าใน Airtable กรุณาให้เจ้าของตรวจสอบ";
   if (errorCode === "airtable_rate_limited") return "Airtable จำกัดจำนวนคำขอชั่วคราว";
   if (errorCode === "airtable_verification_failed") return "ข้อมูลหรือภาพสินค้าใน Airtable ยังไม่ครบ";
   if (errorCode === "airtable_cleanup_failed") return "ต้องตรวจสอบข้อมูลที่บันทึกค้างไว้ใน Airtable";
@@ -17,6 +20,8 @@ function failureReason(errorCode: string): string {
 
 export function buildImportSummaryMessage(input: ImportSummaryInput): string {
   const { result, orphanRange, nowThaiText } = input;
+  const newFailures = result.failedGroups.filter(failure => failure.errorCode !== "historical_group_unavailable").length;
+  const historicalHolds = result.failedGroups.length - newFailures;
   const lines = [
     `นำเข้ารูปภาพ — ${nowThaiText}`,
     result.succeededProductIds.length === 0 && result.failedGroups.length === 0 && orphanRange === null
@@ -29,12 +34,13 @@ export function buildImportSummaryMessage(input: ImportSummaryInput): string {
   }
 
   if (result.failedGroups.length > 0) {
-    lines.push(`ล้มเหลว ${result.failedGroups.length} รายการ`);
-    for (const [index, failure] of result.failedGroups.entries()) {
-      const productLabel = failure.productId ?? `รายการที่ ${index + 1} (ยังไม่มีรหัสสินค้า)`;
+    if (newFailures) lines.push(`ล้มเหลว ${newFailures} รายการ`);
+    if (historicalHolds) lines.push(`รายการเดิมรอเจ้าของตรวจสอบ ${historicalHolds} รายการ`);
+    for (const failure of result.failedGroups) {
+      const productLabel = failure.productId ?? `อ้างอิง ${failure.groupId}`;
       lines.push(`- ${productLabel}: ${failureReason(failure.errorCode)}`);
     }
-    lines.push("แก้ไขแล้วพิมพ์ /upload เพื่อลองใหม่");
+    if (result.failedGroups.some(failure => !["confirmed_group_membership_changed", "airtable_create_unconfirmed", "historical_group_unavailable"].includes(failure.errorCode))) lines.push("รายการที่แก้ไขแล้ว พิมพ์ /upload เพื่อลองใหม่");
   }
 
   if (result.ignoredGroupCount) {
@@ -53,10 +59,11 @@ export function buildImportSummaryMessage(input: ImportSummaryInput): string {
 export function buildImportSummaryCard(input: ImportSummaryInput, publicBaseUrl: string): Record<string, unknown> {
   const { result, orphanRange, nowThaiText } = input;
   const succeeded = result.succeededProductIds.length;
-  const failed = result.failedGroups.length;
-  const needsAttention = failed > 0 || orphanRange !== null;
+  const failed = result.failedGroups.filter(failure => failure.errorCode !== "historical_group_unavailable").length;
+  const historicalHolds = result.failedGroups.length - failed;
+  const needsAttention = failed > 0 || historicalHolds > 0 || orphanRange !== null;
   const title = needsAttention
-    ? succeeded > 0 ? "นำเข้าสำเร็จบางรายการ" : failed > 0 ? "นำเข้าไม่สำเร็จ" : "ยังไม่มีสินค้าที่นำเข้าได้"
+    ? succeeded > 0 ? "นำเข้าสำเร็จบางรายการ" : failed > 0 ? "นำเข้าไม่สำเร็จ" : historicalHolds > 0 ? "มีรายการเดิมรอตรวจสอบ" : "ยังไม่มีสินค้าที่นำเข้าได้"
     : succeeded > 0 ? "นำเข้าสินค้าสำเร็จ"
     : "ไม่มีสินค้าใหม่ให้นำเข้า";
   const icon = needsAttention ? "alert-v1" : succeeded ? "check-green-v2" : "image-v1";
@@ -86,6 +93,7 @@ export function buildImportSummaryCard(input: ImportSummaryInput, publicBaseUrl:
   if (result.ignoredGroupCount) {
     contents.push({ ...text(`ข้ามสินค้าซ้ำ ${result.ignoredGroupCount} รายการ`, "#949494"), margin: "lg" });
   }
+  if (historicalHolds) contents.push({ ...text(`รายการเดิมรอเจ้าของตรวจสอบ ${historicalHolds} รายการ`, "#949494"), margin: "lg" });
   if (succeeded) {
     // ponytail: keep one card compact; paginate if users need full large-run lists in LINE.
     const ids = result.succeededProductIds.slice(0, 40).join(", ");
@@ -94,22 +102,22 @@ export function buildImportSummaryCard(input: ImportSummaryInput, publicBaseUrl:
       contents: [text("สินค้าที่นำเข้าแล้ว", "#949494"), text(ids + (succeeded > 40 ? `\nและอีก ${succeeded - 40} รายการ` : ""))],
     });
   }
-  if (failed) {
+  if (result.failedGroups.length) {
     contents.push({
       type: "box", layout: "vertical", margin: "xl", spacing: "md",
       contents: [
         { ...text("รายการที่ต้องตรวจสอบ"), weight: "bold" },
-        ...result.failedGroups.slice(0, 10).map((failure, index) => ({
+        ...result.failedGroups.slice(0, 10).map((failure) => ({
           type: "box", layout: "vertical", spacing: "xs",
           contents: [
-            { ...text(failure.productId ?? `รายการที่ ${index + 1} (ยังไม่มีรหัสสินค้า)`), weight: "bold" },
+            { ...text(failure.productId ?? `อ้างอิง ${failure.groupId}`), weight: "bold" },
             text(failureReason(failure.errorCode), "#949494", "xs"),
           ],
         })),
-        ...(failed > 10 ? [text(`และอีก ${failed - 10} รายการที่ไม่สำเร็จ`, "#949494")] : []),
+        ...(result.failedGroups.length > 10 ? [text(`และอีก ${result.failedGroups.length - 10} รายการที่ต้องตรวจสอบ`, "#949494")] : []),
       ],
     });
-    contents.push({ ...text("ตรวจสอบรายการที่ไม่สำเร็จ แล้วพิมพ์ /upload เพื่อลองใหม่", "#949494", "xs"), margin: "xl" });
+    if (result.failedGroups.some(failure => !["confirmed_group_membership_changed", "airtable_create_unconfirmed", "historical_group_unavailable"].includes(failure.errorCode))) contents.push({ ...text("รายการที่แก้ไขแล้ว พิมพ์ /upload เพื่อลองใหม่", "#949494", "xs"), margin: "xl" });
   }
   if (orphanRange) {
     contents.push({ ...text(`พบภาพ ${orphanRange.count} ภาพก่อนมาร์กเกอร์แรก\nเพิ่มมาร์กเกอร์ก่อนภาพสินค้า แล้วลอง /upload อีกครั้ง`, "#949494", "xs"), margin: "xl" });

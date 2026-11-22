@@ -106,7 +106,7 @@ export async function resolveImportContext(
 }
 export async function resolvePublicationContext(
   env: Env,
-  params: import("../publication/types").PublicationWorkflowParams,
+  params: import("../publication/types").PublicationBusinessParams,
 ): Promise<import("./schema").OperationContext> {
   const { readPublicationContext, savePublicationAttemptContext } =
     await import("../db/execution-context-repository");

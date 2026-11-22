@@ -3,7 +3,7 @@ import type { ImportRepository } from "../db/import-repository";
 import type { SequenceRepository } from "../db/sequence-repository";
 import type { AuditLog } from "../db/audit";
 import type { AlbumSnapshot, ImageSource, SourcePhoto } from "../icloud/types";
-import { OperationalError } from "../shared/errors";
+import { workflowFailureCode, OperationalError } from "../shared/errors";
 import { sha256Hex } from "../shared/ids";
 import { todayBangkokDate } from "../shared/time";
 import { AIRTABLE_PREVIEW_VARIANT, type AssetStore } from "./asset-store";
@@ -39,6 +39,7 @@ export interface DownloadAndGroupOutcome {
   // Optional for workflow steps persisted before ignored counts were introduced.
   ignoredGroupCount?: number;
   pendingGroups: PersistedGroup[];
+  heldGroups?: Array<{ groupId: string; productId: string | null; errorCode: string }>;
   orphanRange: OrphanRange | null;
   checkpointPosition: number;
 }
@@ -48,6 +49,8 @@ export interface ProcessGroupDeps extends ImportServiceDeps {
   audit: AuditLog;
   airtable: AirtableProductsClient;
   productIdPrefix: string;
+  airtableBaseId: string;
+  airtableTableId: string;
   assetUrlTtlSeconds: number;
 }
 
@@ -122,14 +125,32 @@ export async function downloadAndGroupSnapshot(
   deps: ImportServiceDeps,
   importRunId: string,
 ): Promise<DownloadAndGroupOutcome> {
-  const snapshot: AlbumSnapshot = await deps.imageSource.getSnapshot();
-  if (snapshot.sourceAlbumId !== deps.sourceAlbumId) {
-    throw new OperationalError(
-      "source_album_identity_mismatch",
-      "Snapshot album identity changed",
-      false,
-    );
+  let evidence = await deps.repo.getImportScan(importRunId);
+  if (evidence === "incomplete") {
+    throw new OperationalError("import_scan_incomplete", "Album scan was interrupted; owner review is required", false);
   }
+  const claimed = evidence === null && await deps.repo.claimImportScan(importRunId);
+  if (evidence === null && !claimed) {
+    throw new OperationalError("import_scan_incomplete", "Album scan is already in progress or interrupted", false);
+  }
+  const current: AlbumSnapshot = await deps.imageSource.getSnapshot();
+  if (current.sourceAlbumId !== deps.sourceAlbumId) {
+    throw new OperationalError("source_album_identity_mismatch", "Snapshot album identity changed", false);
+  }
+  if (claimed) {
+    evidence = current.photos.map(({ applePhotoId, position, captureAt, mediaType }) => ({ applePhotoId, position, captureAt, mediaType }));
+    await deps.repo.completeImportScan(importRunId, evidence);
+  }
+  if (!Array.isArray(evidence)) throw new Error("Import scan evidence unavailable");
+  const byId = new Map(current.photos.map(photo => [photo.applePhotoId, photo]));
+  const photos = evidence.map(original => {
+    const photo = byId.get(original.applePhotoId);
+    if (!photo || photo.captureAt !== original.captureAt || photo.mediaType !== original.mediaType) {
+      throw new OperationalError("import_snapshot_original_unavailable", "An original album photo is unavailable or changed; owner review is required", false);
+    }
+    return { ...photo, position: original.position };
+  });
+  const snapshot: AlbumSnapshot = { ...current, photos };
 
   const savedCheckpoint = await deps.repo.getCheckpoint(deps.sourceAlbumId);
   const firstImportCutoffDate = deps.firstImportCutoffDate;
@@ -142,6 +163,9 @@ export async function downloadAndGroupSnapshot(
             photo.captureAt >= firstImportCutoffDate,
         );
 
+  const countedBefore = new Set(await deps.repo.countedIgnoreMarkerIds(deps.sourceAlbumId, importRunId));
+  const countedIgnoreMarkerIds: string[] = [];
+  let markerId = "";
   let ignoring = false;
   let ignoredGroupCount = 0;
   let uncountedNewIgnoreGroup = false;
@@ -157,10 +181,12 @@ export async function downloadAndGroupSnapshot(
     }
     if (markerKind === "ignore_start") {
       ignoring = true;
-      uncountedNewIgnoreGroup = photo.position > (savedCheckpoint ?? -1);
+      markerId = photo.applePhotoId;
+      uncountedNewIgnoreGroup = photo.position > (savedCheckpoint ?? -1) && !countedBefore.has(markerId);
     }
     if (markerKind === "none" && uncountedNewIgnoreGroup) {
       ignoredGroupCount++;
+      countedIgnoreMarkerIds.push(markerId);
       uncountedNewIgnoreGroup = false;
     }
     let r2Key = asset?.r2Key ?? null;
@@ -191,6 +217,7 @@ export async function downloadAndGroupSnapshot(
   const { groups, orphanPhotos } = groupByMarkers(groupingPhotos);
 
   const pendingGroups: PersistedGroup[] = [];
+  const heldGroups: NonNullable<DownloadAndGroupOutcome["heldGroups"]> = [];
   for (const group of groups) {
     const groupHash = await computeGroupHash(deps.sourceAlbumId, group.photos);
     const row = await deps.repo.upsertPendingGroup({
@@ -203,6 +230,14 @@ export async function downloadAndGroupSnapshot(
       photos: group.photos.map(photo => ({ applePhotoId: photo.applePhotoId, r2Key: photo.r2Key })),
     });
     if (row.state === "succeeded") {
+      if (row.importRunId !== importRunId) continue;
+    } else if (row.state === "failed" && row.importRunId === importRunId && row.failureReason) {
+      heldGroups.push({ groupId: row.id, productId: row.productId, errorCode: row.failureReason });
+      continue;
+    }
+    if (row.state !== "succeeded" && await deps.repo.findConfirmedOverlap(deps.sourceAlbumId, groupHash, group.photos.map(photo => photo.applePhotoId))) {
+      await deps.repo.setGroupState(row.id, "failed", { failureReason: "confirmed_group_membership_changed" });
+      heldGroups.push({ groupId: row.id, productId: null, errorCode: "confirmed_group_membership_changed" });
       continue;
     }
     pendingGroups.push({
@@ -221,6 +256,8 @@ export async function downloadAndGroupSnapshot(
     });
   }
 
+  heldGroups.push(...await deps.repo.listHistoricalHolds(importRunId));
+
   const orphanRange: OrphanRange | null =
     orphanPhotos.length === 0
       ? null
@@ -234,7 +271,11 @@ export async function downloadAndGroupSnapshot(
     savedCheckpoint ?? -1,
   );
 
-  return { pendingGroups, orphanRange, checkpointPosition, ignoredGroupCount };
+  if (evidence.length > 0) {
+    const saved = await deps.repo.recordGroupingEvidence(importRunId, evidence, { version: 1, savedCheckpoint, firstImportCutoffDate, orphanRange, checkpointPosition, ignoredGroupCount, countedIgnoreMarkerIds });
+    return { pendingGroups, orphanRange: saved.orphanRange, checkpointPosition: saved.checkpointPosition, ignoredGroupCount: saved.ignoredGroupCount, heldGroups };
+  }
+  return { pendingGroups, orphanRange, checkpointPosition, ignoredGroupCount, heldGroups };
 }
 
 export async function processProductGroupAttempt(
@@ -291,11 +332,14 @@ export async function processProductGroupAttempt(
 
     const existing = await deps.airtable.findBySystemGroupId(group.groupId);
     if (existing !== null) {
+      if (existing.productId !== productId) {
+        throw new OperationalError("airtable_product_id_conflict", "Airtable Product ID conflicts with the allocated ID; owner review is required", false);
+      }
       await verifyKnownAirtableProduct(
         deps.airtable,
         existing.recordId,
         {
-          productId: existing.productId,
+          productId,
           systemGroupId: group.groupId,
           uploadDate: intendedUploadDate,
           imageCount: group.attachablePhotos.length,
@@ -306,14 +350,14 @@ export async function processProductGroupAttempt(
         actor: "system:import",
         action: "product_group_succeeded",
         beforeValue: "importing",
-        afterValue: existing.productId,
+        afterValue: productId,
       });
       await deps.repo.setGroupState(group.groupRowId, "succeeded", {
-        productId: existing.productId,
+        productId,
         airtableRecordId: existing.recordId,
         failureReason: null,
       });
-      return { outcome: "succeeded", productId: existing.productId };
+      return { outcome: "succeeded", productId };
     }
     const productImages = await Promise.all(
       group.attachablePhotos.map(async (photo) => {
@@ -334,6 +378,10 @@ export async function processProductGroupAttempt(
         };
       }),
     );
+    const claim = await deps.repo.claimAirtableCreate({ groupId: group.groupRowId, productId, baseId: deps.airtableBaseId, tableId: deps.airtableTableId });
+    if (claim !== "acquired") {
+      throw new OperationalError("airtable_create_unconfirmed", "Airtable creation requires owner review", false);
+    }
     const created = await deps.airtable.createProduct({
       productId,
       systemGroupId: group.groupId,
@@ -393,11 +441,11 @@ export async function recordExhaustedGroupFailure(
 ): Promise<{ productId: string | null; errorCode: string }> {
   const current = await deps.repo.findGroupByHash(group.groupId);
   const errorCode =
-    error instanceof OperationalError
+    workflowFailureCode(error) ?? (error instanceof OperationalError
       ? error.code
       : error instanceof Error && /^[a-z][a-z0-9_]*$/.test(error.name)
         ? error.name
-        : "unknown_error";
+        : "unknown_error");
   if (current?.state === "succeeded") {
     return { productId: current.productId, errorCode };
   }
@@ -421,6 +469,7 @@ export async function finalizeImportRun(
   hadFailures: boolean,
   orphanPhotoCount: number,
   checkpointPosition: number,
+  lineResult?: Parameters<ImportRepository["finalizeImportRun"]>[0]["lineResult"],
 ): Promise<void> {
   await repo.finalizeImportRun({
     id: importRunId,
@@ -428,5 +477,6 @@ export async function finalizeImportRun(
     status: hadFailures ? "completed_with_failures" : "completed",
     orphanPhotoCount,
     checkpointPosition,
+    lineResult,
   });
 }

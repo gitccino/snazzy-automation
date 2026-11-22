@@ -1,18 +1,22 @@
 import type { WorkflowStep } from "cloudflare:workers";
+import jpeg from "jpeg-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseConfig } from "../../src/config";
 import type { Env } from "../../src/env";
 import {
-  acquireOrResumeJob, getProductCache, putProductCollage,
+  acquireOrResumeJob, claimPublicationVerification, getProductCache, putProductCollage,
 } from "../../src/db/publication-repository";
 import { createAssetStore, verifyAssetToken } from "../../src/import/asset-store";
+import { createLineReplyRepository } from "../../src/db/line-reply-repository";
 import { collageInputFingerprint, type ImageTransformer } from "../../src/publication/collage";
 import type { GoogleDocsRequest } from "../../src/publication/google-docs";
 import {
   preparePublicationOutputs, type PublicationServiceDeps, type ValidatedPublication,
 } from "../../src/publication/service";
-import type { PublicationProduct, PublicationRunStatus } from "../../src/publication/types";
-import { runPublicationWorkflow } from "../../src/publication/workflow";
+import { publicationWorkflowId, type PublicationProduct, type PublicationRunStatus } from "../../src/publication/types";
+import { PublicationWorkflow, runPublicationWorkflow } from "../../src/publication/workflow";
+import { handleLineRoute } from "../../src/routes/line";
+import { LineCommandWorkflow } from "../../src/line/command-workflow";
 import { handleDocsTrigger } from "../../src/publication/trigger";
 import { handleDocsRoute } from "../../src/routes/docs";
 import { createTestEnv, testEnv } from "../helpers/env";
@@ -69,17 +73,26 @@ async function seedCollages(products: PublicationProduct[]) {
 }
 
 function imageBoundary() {
+  const objects = new Map<string, ArrayBuffer>();
   const sources = new Map<ReadableStream<Uint8Array>, string>();
   const transformers = new Map<ImageTransformer, string>();
   const transforms: Array<{ key: string; options: Parameters<ImageTransformer["transform"]>[0] }> = [];
   const draws: Array<{ base: string; key: string; options: Parameters<ImageTransformer["draw"]>[1] }> = [];
   const get = vi.fn(async (key: string) => {
-    const body = new ReadableStream<Uint8Array>();
+    const bytes = objects.get(key);
+    if (!bytes && key !== "assets/collage-base-1080.jpg") return null;
+    const body = new ReadableStream<Uint8Array>({ start(controller) { if (bytes) controller.enqueue(new Uint8Array(bytes)); controller.close(); } });
     sources.set(body, key);
-    return { body };
+    return { body, size: bytes?.byteLength ?? 0 };
   });
-  const put = vi.fn().mockResolvedValue(null);
-  const output = vi.fn(async () => ({ response: () => new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/jpeg" } }) }));
+  const head = vi.fn(async (key: string) => objects.has(key) ? { size: objects.get(key)!.byteLength } : null);
+  const put = vi.fn(async (key: string, data: ArrayBuffer | Uint8Array, options?: { onlyIf?: unknown }) => {
+    if (options?.onlyIf && objects.has(key)) return null;
+    objects.set(key, data instanceof ArrayBuffer ? data.slice(0) : Uint8Array.from(data).buffer);
+    return {};
+  });
+  const preview = jpeg.encode({ data: Buffer.from([255, 0, 0, 255]), width: 1, height: 1 }, 80).data;
+  const output = vi.fn(async (options: { quality: number }) => ({ response: () => new Response(options.quality === 80 ? preview : new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/jpeg" } }) }));
   const input = vi.fn((stream: ReadableStream<Uint8Array>): ImageTransformer => {
     const key = sources.get(stream);
     if (!key) throw new Error("Images input was not an R2 body");
@@ -96,12 +109,18 @@ function imageBoundary() {
     transformers.set(transformer, key);
     return transformer;
   });
-  return { bucket: { get, put } as unknown as R2Bucket, get, put, images: { input }, transforms, draws, output };
+  return { bucket: { get, head, put } as unknown as R2Bucket, get, put, images: { input }, transforms, draws, output, preview };
 }
 
 // In-memory HTTP boundary: documents change only through the actual requests
 // emitted by production. Unexpected URLs fail instead of reaching the network.
 function publicationFixture(products = [product("A-1001")], fixtureRunId = runId) {
+  const image = imageBoundary();
+  const initialAttachments = (item: PublicationProduct) => item.orderedImageKeys.map((key, i) => ({
+    id: `${item.airtableRecordId}-attachment-${i}`, url: `https://fixtures.airtableusercontent.com/${item.airtableRecordId}/${i}`, filename: key.slice(7),
+  }));
+  const attachments = new Map(products.map(item => [item.airtableRecordId, initialAttachments(item)]));
+  let nextAttachment = 0;
   const state = {
     status: "Ready" as PublicationRunStatus,
     docs: new Map<string, { text: string; name: string; owner?: string }>(),
@@ -110,6 +129,7 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
     loseFillResponse: false,
     batchFailureStatus: 0,
     publishFailure: false,
+    lookupFailure: "" as "" | "run" | "products",
     docUrl: null as string | null,
     generatedAt: null as string | null,
     errorSummary: null as string | null,
@@ -132,6 +152,7 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
       calls.push({ method: request.method, url: request.url, body });
       if (url.hostname === "api.airtable.com") {
         if (url.pathname.endsWith(`/tblRuns/${fixtureRunId}`)) {
+          if (request.method === "GET" && state.lookupFailure === "run") return new Response("unavailable", { status: 503 });
           if (request.method === "GET" && state.publishFailure && state.docUrl?.includes("temp-doc-2")) throw new Error("published state unavailable");
           if (request.method === "PATCH") {
             const fields = body.fields as { Status: PublicationRunStatus; "Error Summary"?: string | null; "Google Doc URL"?: string; "Generated At"?: string };
@@ -144,20 +165,34 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
           return Response.json(runRecord());
         }
         if (url.pathname.endsWith("/tblRuns")) return Response.json({ records: [runRecord()] });
+        if (url.pathname.endsWith("/tblProducts") && state.lookupFailure === "products") return new Response("unavailable", { status: 503 });
         if (url.pathname.endsWith("/tblProducts")) return Response.json({
           records: [...products].reverse().map(item => ({ id: item.airtableRecordId, fields: {
             "Product ID": item.productId,
-            "Product Images": item.orderedImageKeys.map((key, i) => ({
-              id: `attachment-${i}`, url: `https://dl.airtable.com/${i}`, filename: key.slice(7),
-            })),
+            "Product Images": attachments.get(item.airtableRecordId) ?? initialAttachments(item),
             "Brand Name": item.brandName, "Model Name": item.modelName,
             "Condition Type": item.conditionType, Size: item.size, Description: item.description,
             "LINE Square Price": item.lineSquarePrice, "IG Price": item.igPrice,
           } })),
         });
-        if (request.method === "PATCH" && products.some(p => url.pathname.endsWith(`/tblProducts/${p.airtableRecordId}`))) {
-          return Response.json({ id: url.pathname.split("/").at(-1) });
+        const item = products.find(p => url.pathname.endsWith(`/tblProducts/${p.airtableRecordId}`));
+        if (item && !attachments.has(item.airtableRecordId)) attachments.set(item.airtableRecordId, initialAttachments(item));
+        if (item && request.method === "GET") return Response.json({ id: item.airtableRecordId, fields: {
+          "Product ID": item.productId, "Product Images": attachments.get(item.airtableRecordId),
+        } });
+        if (item && request.method === "PATCH") {
+          const images = (body.fields as { "Product Images"?: Array<{ id?: string; filename?: string }> })["Product Images"];
+          if (images) attachments.set(item.airtableRecordId, images.map(entry => {
+            if (entry.id) return attachments.get(item.airtableRecordId)!.find(existing => existing.id === entry.id)!;
+            return { id: `preview-${++nextAttachment}`, filename: entry.filename!, url: `https://fixtures.airtableusercontent.com/preview/${nextAttachment}`, size: image.preview.length, type: "image/jpeg" };
+          }));
+          return Response.json({ id: item.airtableRecordId });
         }
+      }
+      if (url.hostname === "fixtures.airtableusercontent.com" && request.method === "GET") {
+        if (![...attachments.values()].flat().some(attachment => attachment.url === request.url)) throw new Error(`Unexpected attachment: ${request.url}`);
+        const bytes = url.pathname.startsWith("/preview/") ? image.preview : jpeg.encode({ data: Buffer.from([url.pathname.length, Number(url.pathname.split("/").at(-1)), 0, 255]), width: 1, height: 1 }, 80).data;
+        return new Response(bytes, { headers: { "content-type": "image/jpeg" } });
       }
       if (url.hostname === "oauth2.googleapis.com") return Response.json({ access_token: "google-token", expires_in: 3600 });
       if (url.pathname === "/drive/v3/files" && request.method === "GET") {
@@ -219,7 +254,6 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
       throw new Error(`Unexpected HTTP request: ${request.method} ${request.url}`);
     },
   }]);
-  const image = imageBoundary();
   const countTokens = vi.fn().mockResolvedValue({ input_tokens: 12_000 });
   const create = vi.fn().mockResolvedValue(toolResponse(products.map(p => ({ productId: p.productId, drafts: drafts(p.productId) }))));
   const notify = vi.fn().mockResolvedValue(undefined);
@@ -238,19 +272,23 @@ function publicationFixture(products = [product("A-1001")], fixtureRunId = runId
   const scheduler = retryingStep();
   return {
     products, state, calls, batches, failureSnapshots, image, countTokens, create, notify, deps, scheduler,
-    run: (generation = 1) => runPublicationWorkflow(
+    reverseAttachments: (recordId: string) => attachments.get(recordId)!.reverse(),
+    run: (generation = 1, notificationCycle = 1) => runPublicationWorkflow(
       { publicationRunId: fixtureRunId, trigger: "line", ...(generation > 1 ? { generation } : {}) },
       scheduler as unknown as WorkflowStep,
-      deps,
+      { ...deps, copyOwner: { workflowId: publicationWorkflowId(fixtureRunId, generation), notificationCycle } },
     ),
   };
 }
 
 function workflowBinding() {
-  let status = "unknown";
+  let status = "missing";
   const restart = vi.fn(async () => { status = "running"; });
   const create = vi.fn(async (value: { id: string }) => { status = "running"; return { id: value.id }; });
-  const get = vi.fn(async (_id: string) => ({ status: async () => ({ status }), restart, resume: vi.fn() }));
+  const get = vi.fn(async (_id: string) => {
+    if (status === "missing") throw new Error("instance.not_found");
+    return { status: async () => ({ status }), restart, resume: vi.fn() };
+  });
   return { create, get, restart, setStatus: (value: string) => { status = value; } };
 }
 
@@ -262,11 +300,239 @@ function docsRequest() {
 
 describe("publication acceptance", () => {
   beforeEach(async () => {
+    await env.DB.exec("DELETE FROM product_image_originals");
+    await env.DB.exec("DELETE FROM product_image_preparations");
     await env.DB.exec("DELETE FROM publication_product_cache");
+    await env.DB.exec("DELETE FROM publication_cleanup_intents");
+    await env.DB.exec("DELETE FROM publication_verification_claims");
     await env.DB.exec("DELETE FROM publication_jobs");
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network forbidden in acceptance tests"));
   });
   afterEach(() => vi.restoreAllMocks());
+
+  it.each(["accepted", "rejected", "uncertain"] as const)("holds an invalid external run ID and handles a %s reply", async (delivery) => {
+    const invalidId = `bad:${crypto.randomUUID()}`;
+    const fixture = publicationFixture([product("A-1001")], invalidId);
+    const eventId = crypto.randomUUID(), group = "CtestGroup";
+    const commands: any[] = [], replies: any[] = [];
+    const create = vi.fn(), get = vi.fn(async () => { throw new Error("instance.not_found"); });
+    const local = { ...env, ...configEnv, LINE_CHANNEL_SECRET: "secret",
+      LINE_COMMAND_WORKFLOW: { createBatch: async (items: any[]) => { commands.push(...items); return []; } },
+      PUBLICATION_WORKFLOW: { create, get },
+    } as unknown as Env;
+    const step = { do: async (_name: string, a: any, b?: any) => (b ?? a)() } as unknown as WorkflowStep;
+    vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+      const request = new Request(input, init), url = new URL(request.url);
+      if (url.pathname.includes("/member/")) return Response.json({ userId: "U1", displayName: "Tester" });
+      if (url.pathname.endsWith("/message/reply")) {
+        replies.push(await request.json());
+        if (replies.length === 1 && delivery === "uncertain") throw new Error("network timeout");
+        return replies.length === 1 && delivery === "rejected" ? new Response("rate limited", { status: 429 }) : Response.json({});
+      }
+      return fixture.deps.fetcher(request);
+    });
+    const admit = async (id: string, text: string, target = group) => {
+      const body = JSON.stringify({ events: [{ type: "message", webhookEventId: id, replyToken: `token-${id}`, source: { type: "group", groupId: target, userId: "U1" }, message: { type: "text", id: `m-${id}`, text } }] });
+      const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const signature = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)))));
+      expect((await handleLineRoute(new Request("https://app/line/webhook", { method: "POST", headers: { "x-line-signature": signature }, body }), local, {} as ExecutionContext)).status).toBe(200);
+    };
+    const run = (item: any) => LineCommandWorkflow.prototype.run.call({ env: local } as unknown as LineCommandWorkflow, { payload: item.params, instanceId: item.id } as any, step);
+    await admit(eventId, "/docs 2/9/2026");
+    expect(await run(commands[0])).toEqual({ status: delivery });
+    expect(create).not.toHaveBeenCalled();
+    expect(JSON.stringify(replies[0])).toContain("ไม่ได้เริ่ม");
+    expect(await local.DB.prepare("SELECT group_id, state FROM line_result_outbox WHERE result_json LIKE ?").bind(`%${invalidId}%`).first()).toEqual({ group_id: group, state: delivery === "rejected" ? "pending" : delivery });
+    await admit(eventId, "/docs 2/9/2026");
+    expect(await run(commands[1])).toEqual({ status: delivery === "rejected" ? "duplicate" : "ignored" });
+    const otherConfig = JSON.parse(configEnv.APP_CONFIG_JSON); otherConfig.LINE_ALLOWED_GROUP_ID = "Cother";
+    local.APP_CONFIG_JSON = JSON.stringify(otherConfig);
+    await admit(crypto.randomUUID(), "hello", "Cother");
+    expect(await run(commands[2])).toEqual({ status: "ignored" });
+    expect(replies).toHaveLength(1);
+    local.APP_CONFIG_JSON = configEnv.APP_CONFIG_JSON;
+    await admit(crypto.randomUUID(), "hello");
+    expect(await run(commands[3])).toEqual({ status: delivery === "rejected" ? "accepted" : "ignored" });
+    if (delivery === "rejected") expect(JSON.stringify(replies[1])).toContain("ไม่ได้เริ่ม");
+    expect(replies).toHaveLength(delivery === "rejected" ? 2 : 1);
+    expect(create).not.toHaveBeenCalled();
+    if (delivery === "uncertain") {
+      const repo = createLineReplyRepository(local.DB, {now: () => new Date()});
+      const head = await repo.head(group);
+      expect(await repo.recordOwnerDisposition({eventId,sequence:head!.sequence,groupId:group,decision:'close_unverifiable',actor:'test',reason:'test cleanup'})).toBe(true);
+    }
+  });
+
+  it.each([false, true])("delivers the generated publication after a lost signed start reply (lost create: %s)", async (lostCreate) => {
+    const id = crypto.randomUUID(), group = `C${id}`, other = `Cother-${id}`;
+    const fixture = publicationFixture([product("A-1001")], id);
+    const originalConfig = JSON.parse(configEnv.APP_CONFIG_JSON); originalConfig.LINE_ALLOWED_GROUP_ID = group;
+    const commands: any[] = [], business: any[] = [], replies: any[] = [];
+    const local = { ...env, ...configEnv, APP_CONFIG_JSON: JSON.stringify(originalConfig), LINE_CHANNEL_SECRET: "secret", IMAGES_BUCKET: fixture.image.bucket, IMAGES: fixture.image.images,
+      LINE_COMMAND_WORKFLOW: { createBatch: async (items: any[]) => { commands.push(...items); return []; } },
+      PUBLICATION_WORKFLOW: { create: async (item: any) => { business.push(item); if (lostCreate) throw new Error("creation response lost"); return { id: item.id }; }, get: async () => { if (!business.length) throw new Error("instance.not_found"); return { status: async () => ({ status: "running" }) }; } },
+    } as unknown as Env;
+    const step = { do: async (_name: string, a: any, b?: any) => (b ?? a)() } as unknown as WorkflowStep;
+    vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+      const request = new Request(input, init), url = new URL(request.url);
+      if (url.pathname.includes("/member/")) return Response.json({ userId: "U1", displayName: "Tester" });
+      if (url.pathname.endsWith("/message/reply")) {
+        replies.push(await request.json());
+        if (replies.length === 1) throw new Error("reply accepted but response lost");
+        return Response.json({});
+      }
+      if (url.hostname === "api.anthropic.com") return Response.json(url.pathname.endsWith("count_tokens") ? { input_tokens: 12000 } : toolResponse([{ productId: "A-1001", drafts: drafts("A-1001") }]));
+      return fixture.deps.fetcher(request);
+    });
+    const admit = async (eventId: string, text: string, groupId = group) => {
+      const body = JSON.stringify({ events: [{ type: "message", webhookEventId: eventId, replyToken: `token-${eventId}`, source: { type: "group", groupId, userId: "U1" }, message: { type: "text", id: `m-${eventId}`, text } }] });
+      const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const signature = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)))));
+      expect((await handleLineRoute(new Request("https://app/line/webhook", { method: "POST", headers: { "x-line-signature": signature }, body }), local, {} as ExecutionContext)).status).toBe(200);
+    };
+    const runCommand = (item: any) => LineCommandWorkflow.prototype.run.call({ env: local } as unknown as LineCommandWorkflow, { payload: item.params, instanceId: item.id } as any, step);
+    await admit(id, "/docs 2/9/2026");
+    expect(await runCommand(commands[0])).toEqual({ status: "uncertain" });
+    await admit(id, "/docs 2/9/2026");
+    expect(await runCommand(commands[1])).toEqual({ status: "duplicate" });
+    expect(business).toHaveLength(1);
+    expect(await local.DB.prepare("SELECT phase FROM line_reply_dispatches WHERE event_id=?").bind(id).first()).toEqual({ phase: "uncertain" });
+    const result = await PublicationWorkflow.prototype.run.call({ env: local } as unknown as PublicationWorkflow, { payload: business[0].params, instanceId: business[0].id } as any, step);
+    expect(result?.googleDocUrl).toContain("temp-doc-1");
+    expect(fixture.state.docs.size).toBe(1);
+    expect(fixture.calls.filter(call => new URL(call.url).pathname.endsWith("/copy"))).toHaveLength(1);
+    const otherConfig = { ...originalConfig }; otherConfig.LINE_ALLOWED_GROUP_ID = other;
+    local.APP_CONFIG_JSON = JSON.stringify(otherConfig);
+    await admit(crypto.randomUUID(), "hello", other);
+    await runCommand(commands[2]);
+    local.APP_CONFIG_JSON = JSON.stringify(originalConfig);
+    expect(replies).toHaveLength(1);
+    const fresh = crypto.randomUUID();
+    await admit(fresh, "hello");
+    expect(await runCommand(commands[3])).toEqual({ status: "accepted" });
+    expect(replies).toHaveLength(2);
+    expect(JSON.stringify(replies[1])).toContain(result!.googleDocUrl);
+    expect(replies[1].replyToken).toBe(`token-${fresh}`);
+    await runCommand(commands[3]);
+    expect(replies).toHaveLength(2);
+    expect(business).toHaveLength(1);
+  });
+
+  it.each([
+    { provider: "cleanup", status: 401, code: "anthropic_auth_failed", stage: "prepare outputs", notice: "Claude" },
+    { provider: "image", status: 200, code: "product_image_format_invalid", stage: "prepare product images", notice: "ไฟล์รูปต้องเป็น JPEG" },
+    { provider: "claude", status: 401, code: "anthropic_auth_failed", stage: "prepare outputs", notice: "Claude" },
+    { provider: "claude", status: 404, code: "anthropic_model_failed", stage: "prepare outputs", notice: "โมเดล" },
+    { provider: "google", status: 400, code: "google_auth_failed", stage: "ensure temporary document", notice: "Google" },
+    { provider: "google", status: 503, code: "google_token_exchange_failed", stage: "ensure temporary document", notice: "สร้างเอกสาร" },
+    { provider: "copy", status: 403, code: "google_drive_copy_failed", stage: "ensure temporary document", notice: "สร้างเอกสาร" },
+    { provider: "mismatch", status: 200, code: "publication_stage_failed", stage: "fill and verify document", notice: "เขียนและตรวจสอบเอกสาร" },
+    { provider: "verification", status: 403, code: "google_docs_get_failed", stage: "fill and verify document", notice: "เขียนและตรวจสอบเอกสาร" },
+    { provider: "fill", status: 400, code: "google_docs_batch_update_failed", stage: "fill and verify document", notice: "เขียนและตรวจสอบเอกสาร" },
+  ])("delivers sanitized $provider $status failure only to its group", async ({ provider, status, code, stage, notice }) => {
+    const fixtureId = crypto.randomUUID();
+    const fixture = publicationFixture([product("A-1001")], fixtureId);
+    if (provider === "fill") fixture.state.batchFailureStatus = status;
+    const id = crypto.randomUUID(), group = "CtestGroup", other = "Cother";
+    const commands: any[] = [], business: any[] = [], replies: any[] = [];
+    const local = { ...env, ...configEnv, LINE_CHANNEL_SECRET: "secret", IMAGES_BUCKET: fixture.image.bucket, IMAGES: fixture.image.images,
+      LINE_COMMAND_WORKFLOW: { createBatch: async (items: any[]) => { commands.push(...items); return []; } },
+      PUBLICATION_WORKFLOW: { create: async (item: any) => { business.push(item); return { id: item.id }; }, get: async () => { if (!business.length) throw new Error("instance.not_found"); return { status: async () => ({ status: "running" }) }; } },
+    } as unknown as Env;
+    const step = { do: async (_name: string, a: any, b?: any) => (b ?? a)() } as unknown as WorkflowStep;
+    let cleanupFailed = false;
+    vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+      const request = new Request(input, init), url = new URL(request.url);
+      if (url.pathname.includes("/member/")) return Response.json({ userId: "U1", displayName: "Tester" });
+      if (url.pathname.endsWith("/message/reply")) {
+        replies.push(await request.json());
+
+        return Response.json({});
+      }
+      if (provider === "image" && url.hostname === "fixtures.airtableusercontent.com") return new Response("SECRET invalid image https://private.example/token", { headers: { "content-type": "image/jpeg" } });
+      if (url.hostname === "api.anthropic.com") {
+        if (provider === "claude" || provider === "cleanup") return Response.json({ type: "error", error: { type: status === 401 ? "authentication_error" : "not_found_error", message: "SECRET provider response" } }, { status });
+        return Response.json(url.pathname.endsWith("count_tokens") ? { input_tokens: 12000 } : toolResponse([{ productId: "A-1001", drafts: drafts("A-1001") }]));
+      }
+      if (url.hostname === "oauth2.googleapis.com" && provider === "google") return Response.json({ error: "invalid_grant", error_description: "SECRET refresh token" }, { status });
+      if (provider === "cleanup" && url.pathname === "/drive/v3/files" && request.method === "GET") {
+        fixture.state.docs.set("temp-doc-1", { text: template, name: "temporary", owner: fixtureId });
+        return Response.json({ files: [{ id: "temp-doc-1" }] });
+      }
+      if (provider === "cleanup" && url.pathname.endsWith("/temp-doc-1")) {
+        if (request.method === "GET") return Response.json({ id: "temp-doc-1", parents: [config.googleDriveFolderId], trashed: false, appProperties: { publicationRunId: fixtureId } });
+        if (request.method === "DELETE" && !cleanupFailed) { cleanupFailed = true; return new Response("SECRET cleanup", { status: 503 }); }
+      }
+      if (provider === "copy" && url.pathname.endsWith("/copy")) return new Response("SECRET copy error", { status });
+      if (provider === "mismatch" && url.hostname === "docs.googleapis.com" && request.method === "GET" && fixture.batches.length) {
+        const doc = fixture.state.docs.get(url.pathname.split("/").at(-1)!)!;
+        doc.text = doc.text.replaceAll("A-1001", "missing");
+      }
+      if (provider === "verification" && url.hostname === "docs.googleapis.com" && request.method === "GET" && fixture.batches.length) return new Response("SECRET verification error", { status });
+      return fixture.deps.fetcher(request);
+    });
+    const admit = async (eventId: string, text: string, groupId = group) => {
+      const body = JSON.stringify({ events: [{ type: "message", webhookEventId: eventId, replyToken: `token-${eventId}`, source: { type: "group", groupId, userId: "U1" }, message: { type: "text", id: `m-${eventId}`, text } }] });
+      const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const signature = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)))));
+      expect((await handleLineRoute(new Request("https://app/line/webhook", { method: "POST", headers: { "x-line-signature": signature }, body }), local, {} as ExecutionContext)).status).toBe(200);
+    };
+    const runCommand = (item: any) => LineCommandWorkflow.prototype.run.call({ env: local } as unknown as LineCommandWorkflow, { payload: item.params, instanceId: item.id } as any, step);
+    await admit(id, "/docs 2/9/2026");
+    expect(await runCommand(commands[0])).toEqual({ status: "accepted" });
+    expect(business).toHaveLength(1);
+    await expect(PublicationWorkflow.prototype.run.call({ env: local } as unknown as PublicationWorkflow, { payload: business[0].params, instanceId: business[0].id } as any, step)).rejects.toBeDefined();
+    expect(await local.DB.prepare("SELECT stage, failure_code FROM workflow_feedback WHERE run_id=?").bind(fixtureId).first()).toEqual({ stage, failure_code: code });
+    expect(fixture.state.docs.size).toBe(provider === "cleanup" ? 1 : 0);
+    if (provider === "cleanup") {
+      expect(await local.DB.prepare("SELECT doc_id, deletion_acknowledged FROM publication_cleanup_intents WHERE publication_run_id=?").bind(fixtureId).first()).toEqual({ doc_id: "temp-doc-1", deletion_acknowledged: null });
+    }
+    if (provider === "mismatch") expect(fixture.batches.length).toBeGreaterThan(0);
+    const persisted = await local.DB.prepare("SELECT outcome_json FROM workflow_feedback_results WHERE run_id=?").bind(fixtureId).all();
+    expect(JSON.stringify(persisted)).not.toMatch(/SECRET|private\.example|refresh token/i);
+    if (provider === "image") {
+      expect(JSON.parse(String(persisted.results[0]!.outcome_json))).toMatchObject({ outcome: "unconfirmed", references: { imageDiagnostic: { productId: "A-1001", position: 0, code } } });
+      const outbox = await local.DB.prepare("SELECT result_json FROM line_result_outbox WHERE group_id=?").bind(group).all();
+      expect(JSON.stringify(outbox)).toContain("ไฟล์รูปต้องเป็น JPEG");
+      expect(JSON.stringify(outbox)).not.toMatch(/SECRET|private\.example/i);
+    }
+    const otherConfig = JSON.parse(configEnv.APP_CONFIG_JSON); otherConfig.LINE_ALLOWED_GROUP_ID = other;
+    local.APP_CONFIG_JSON = JSON.stringify(otherConfig);
+    await admit(crypto.randomUUID(), "hello", other);
+    await runCommand(commands[1]);
+    local.APP_CONFIG_JSON = configEnv.APP_CONFIG_JSON;
+    expect(replies).toHaveLength(1);
+    const fresh = crypto.randomUUID();
+    await admit(fresh, "hello");
+    expect(await runCommand(commands[2])).toEqual({ status: "accepted" });
+    expect(replies).toHaveLength(2);
+    expect(JSON.stringify(replies[1])).toContain(notice);
+    expect(JSON.stringify(replies[1])).toContain("ผู้ดูแล");
+    expect(JSON.stringify(replies[1])).not.toMatch(/SECRET|private\.example|หมดอายุ|expired/i);
+    if (provider === "image") {
+      expect(JSON.stringify(replies[1])).toContain("A-1001");
+      expect(JSON.stringify(replies[1])).toContain("รูปที่ 1");
+    }
+    expect(replies[1].replyToken).toBe(`token-${fresh}`);
+    if (provider === "cleanup") {
+      const claim = await claimPublicationVerification(local.DB, { runId: fixtureId, generation: 1, notificationCycle: 1, groupId: group });
+      if (claim.status !== "claimed") throw new Error("missing verification claim");
+      local.PUBLICATION_WORKFLOW = { get: async () => ({ status: async () => ({ status: "terminated" }) }) } as any;
+      const payload = { kind: "verification", publicationRunId: fixtureId, generation: 1, notificationCycle: 1, groupId: group, verifierId: claim.verifierId };
+      const verify = () => PublicationWorkflow.prototype.run.call({ env: local } as unknown as PublicationWorkflow, { payload, instanceId: claim.verifierId } as any, step);
+      await verify(); await verify();
+      const row = await local.DB.prepare("SELECT result_json FROM publication_verification_claims WHERE publication_run_id=?").bind(fixtureId).first<{result_json:string}>();
+      expect(JSON.parse(row!.result_json).outcome).toBe("unconfirmed");
+      expect(fixture.state.docs.size).toBe(1);
+      expect(await local.DB.prepare("SELECT deletion_acknowledged FROM publication_cleanup_intents WHERE publication_run_id=?").bind(fixtureId).first()).toEqual({ deletion_acknowledged: null });
+      const correction = crypto.randomUUID(); await admit(correction, "hello"); await runCommand(commands[3]);
+      expect(replies).toHaveLength(2);
+      expect(await local.DB.prepare("SELECT completed FROM publication_verification_claims WHERE publication_run_id=?").bind(fixtureId).first()).toEqual({ completed: 1 });
+    }
+    await runCommand(commands[2]);
+    expect(replies).toHaveLength(2);
+    expect(business).toHaveLength(1);
+  });
 
   it.each([false, true])("preserves old Docs through replacement and saved-finalization retry (lost response: %s)", async (loseResponse) => {
     const fixture = publicationFixture();
@@ -276,8 +542,10 @@ describe("publication acceptance", () => {
     fixture.state.status = "Ready";
     vi.mocked(globalThis.fetch).mockImplementation(fixture.deps.fetcher as typeof fetch);
     const binding = workflowBinding();
+    let v2Created = false;
     binding.get.mockImplementation(async (id: string) => {
-      if (id.endsWith("-v2") || id.endsWith("-v3")) throw new Error("instance.not_found");
+      if ((id.endsWith("-v2") && !v2Created) || id.endsWith("-v3")) throw new Error("instance.not_found");
+      if (id.endsWith("-v2")) return { status: async () => ({ status: "errored" }), restart: binding.restart, resume: vi.fn() };
       return { status: async () => ({ status: "complete" }), restart: binding.restart, resume: vi.fn() };
     });
     const triggerEnv = { ...env, ...configEnv, PUBLICATION_WORKFLOW: binding } as unknown as Env;
@@ -288,6 +556,7 @@ describe("publication acceptance", () => {
     expect(triggers.some(value => value.status === "regenerating")).toBe(true);
     expect(binding.create).toHaveBeenCalledTimes(1);
     expect(binding.create.mock.calls.every(([value]) => value.id === "publication-rec-run-1-v2")).toBe(true);
+    v2Created = true;
     fixture.state.publishFailure = loseResponse;
     if (loseResponse) {
       await expect(fixture.run(2)).rejects.toThrow("Unable to finalize");
@@ -298,7 +567,7 @@ describe("publication acceptance", () => {
       expect(await handleDocsTrigger(triggerEnv, "cron", clock)).toMatchObject({ status: "already_generated" });
       await handleDocsTrigger(triggerEnv, "line", clock);
     }
-    const v2 = await fixture.run(2);
+    const v2 = await fixture.run(2, loseResponse ? 2 : 1);
     expect(v2!.productIds).toEqual(["A-1001"]);
     expect(fixture.state.docs.get("temp-doc-1")).toEqual(original);
     expect(fixture.state.docs.get("temp-doc-2")!.name).toBe("Publication 2026-09-02 (v2)");
@@ -314,9 +583,22 @@ describe("publication acceptance", () => {
     expect(fixture.state.docs.get("temp-doc-3")!.name).toBe("Publication 2026-09-02 (v3)");
     expect(fixture.state.docUrl).toBe(v3!.googleDocUrl);
     expect(fixture.state.docs.get("temp-doc-3")!.text).not.toContain("A-1001");
-    await expect(fixture.run(1)).rejects.toMatchObject({ name: "publication_generation_stale" });
+    await expect(fixture.run(1)).rejects.toThrow('"code":"publication_generation_stale"');
     const rows = await env.DB.prepare("SELECT generation, successful_generation FROM publication_jobs WHERE publication_date='2026-09-02'").all();
     expect(rows.results).toEqual([{ generation: 3, successful_generation: 3 }]);
+  });
+
+  it.each(["run", "products"] as const)("reports an unavailable %s lookup as a provider failure, not missing fields", async lookup => {
+    const fixture = publicationFixture([{ ...product("A-1001"), description: "" }]);
+    fixture.state.lookupFailure = lookup;
+    await expect(fixture.run()).rejects.toThrow();
+    expect(await job()).toMatchObject({ state: "failed" });
+    expect(fixture.notify).toHaveBeenCalledOnce();
+    const [text, , outcome] = fixture.notify.mock.calls[0]!;
+    expect(outcome).toBe("failed");
+    expect(text).not.toContain("A-1001: Description");
+    expect(fixture.state.errorSummary).not.toContain("A-1001: Description");
+    expect(fixture.create).not.toHaveBeenCalled();
   });
 
   it("blocks the whole run for missing fields, restores Draft, and sends the complete Thai report", async () => {
@@ -350,6 +632,8 @@ describe("publication acceptance", () => {
     fixture.state.status = "Ready";
     await fixture.run();
     expect(fixture.state.status).toBe("Generated");
+    expect(fixture.calls.some(call => call.method === "GET" && call.url.endsWith("/tblProducts/rec-A-1001"))).toBe(true);
+    expect(fixture.calls.filter(call => call.method === "PATCH" && call.url.endsWith("/tblProducts/rec-A-1001") && "Product Images" in (call.body.fields as object))).toHaveLength(1);
     expect(fixture.state.errorSummary).toBeNull();
     expect(await env.DB.prepare("SELECT validation_result_json FROM publication_jobs WHERE publication_run_id = ?").bind(runId).first())
       .toEqual({ validation_result_json: null });
@@ -363,7 +647,7 @@ describe("publication acceptance", () => {
     expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
     expect(first.state.docs.size + second.state.docs.size).toBe(1);
     expect(first.create.mock.calls.length + second.create.mock.calls.length).toBe(1);
-    expect(first.image.put.mock.calls.length + second.image.put.mock.calls.length).toBe(1);
+    expect(first.image.put.mock.calls.filter(([key]) => key.includes("/collage/")).length + second.image.put.mock.calls.filter(([key]) => key.includes("/collage/")).length).toBe(1);
     const rows = await env.DB.prepare("SELECT publication_run_id, publication_date, state FROM publication_jobs ORDER BY publication_run_id")
       .all<{ publication_run_id: string; publication_date: string | null; state: string }>();
     expect(rows.results.filter(row => row.state === "succeeded")).toHaveLength(1);
@@ -383,7 +667,7 @@ describe("publication acceptance", () => {
     const changedBefore = await getProductCache(env.DB, runId, "A-1001");
     const unchangedBefore = await getProductCache(env.DB, runId, "A-1002");
     products[0]!.description = "คำอธิบายใหม่";
-    products[0]!.orderedImageKeys.reverse();
+    fixture.reverseAttachments(products[0]!.airtableRecordId);
     fixture.create.mockResolvedValueOnce(toolResponse([{ productId: "A-1001", drafts: ["ฉบับใหม่หนึ่ง", "ฉบับใหม่สอง", "ฉบับใหม่สาม"] }]));
     vi.mocked(globalThis.fetch).mockImplementation(fixture.deps.fetcher as typeof fetch);
     const binding = workflowBinding();
@@ -391,14 +675,17 @@ describe("publication acceptance", () => {
     const response = await handleDocsRoute(docsRequest(), { ...env, ...configEnv, PUBLICATION_WORKFLOW: binding } as unknown as Env, clock);
     expect(await response.json()).toEqual({ status: "restarted", publicationRunId: runId });
     fixture.state.batchFailureStatus = 0;
-    await fixture.run();
+    await expect(fixture.run(1, 1)).rejects.toThrow('"code":"publication_generation_stale"');
+    expect(fixture.state.docs.size).toBe(0);
+    await fixture.run(1, 2);
     expect(fixture.create).toHaveBeenCalledTimes(2);
     expect(fixture.create.mock.calls[1]![0].messages[0].content).toContain("คำอธิบายใหม่");
     expect(fixture.create.mock.calls[1]![0].messages[0].content).not.toContain("A-1002");
-    expect(fixture.image.put.mock.calls.map(call => call[0])).toEqual([
+    expect(fixture.image.put.mock.calls.map(call => call[0]).filter(key => key.includes("/collage/"))).toEqual([
       "products/A-1001/collage/1080x1080.jpg", "products/A-1002/collage/1080x1080.jpg", "products/A-1001/collage/1080x1080.jpg",
     ]);
-    expect(fixture.image.transforms.slice(-4).map(item => item.key)).toEqual(products[0]!.orderedImageKeys.slice(0, 4));
+    const originalKeys = fixture.image.put.mock.calls.slice(0, 5).map(([key]) => key);
+    expect(fixture.image.transforms.slice(-4).map(item => item.key)).toEqual(originalKeys.reverse().slice(0, 4));
     const changedAfter = await getProductCache(env.DB, runId, "A-1001");
     expect(changedAfter.collageInputFingerprint).not.toBe(changedBefore.collageInputFingerprint);
     expect(changedAfter.captionsInputFingerprint).not.toBe(changedBefore.captionsInputFingerprint);
@@ -410,9 +697,11 @@ describe("publication acceptance", () => {
   it("places the first four Airtable-ordered images in the white 1080-square collage and reuses its private cache", async () => {
     const fixture = publicationFixture();
     await fixture.run();
-    const expectedKeys = ["third", "first", "fourth", "second"].map(name => `assets/A-1001-${name}.jpg`);
-    expect(fixture.image.get.mock.calls.map(([key]) => key)).toEqual(["assets/collage-base-1080.jpg", ...expectedKeys]);
-    expect(fixture.image.transforms).toEqual(expectedKeys.map(key => ({ key, options: {
+    const originalKeys = fixture.image.put.mock.calls.slice(0, 5).map(([key]) => key);
+    expect(new Set(originalKeys).size).toBe(5);
+    const expectedKeys = originalKeys.slice(0, 4);
+    expect(fixture.image.get.mock.calls.map(([key]) => key).slice(-5)).toEqual(["assets/collage-base-1080.jpg", ...expectedKeys]);
+    expect(fixture.image.transforms.slice(-4)).toEqual(expectedKeys.map(key => ({ key, options: {
       width: 540, height: 540, fit: "cover", background: "#FFFFFF",
     } })));
     expect(fixture.image.draws).toEqual([
@@ -421,9 +710,9 @@ describe("publication acceptance", () => {
       { base: "assets/collage-base-1080.jpg", key: expectedKeys[2], options: { top: 540, left: 0 } },
       { base: "assets/collage-base-1080.jpg", key: expectedKeys[3], options: { top: 540, left: 540 } },
     ]);
-    expect(fixture.image.output).toHaveBeenCalledExactlyOnceWith({ format: "image/jpeg", quality: 90 });
-    expect(fixture.image.put).toHaveBeenCalledExactlyOnceWith("products/A-1001/collage/1080x1080.jpg", new Uint8Array([1, 2, 3]), { httpMetadata: { contentType: "image/jpeg" } });
-    const patch = fixture.calls.find(c => c.url.endsWith("/tblProducts/rec-A-1001"))!;
+    expect(fixture.image.output.mock.calls.filter(([options]) => options.quality === 90)).toEqual([[{ format: "image/jpeg", quality: 90 }]]);
+    expect(fixture.image.put.mock.calls.filter(([key]) => key.includes("/collage/"))).toEqual([["products/A-1001/collage/1080x1080.jpg", new Uint8Array([1, 2, 3]), { httpMetadata: { contentType: "image/jpeg" } }]]);
+    const patch = fixture.calls.find(c => c.method === "PATCH" && c.url.endsWith("/tblProducts/rec-A-1001") && "4-in-1 Image" in (c.body.fields as object))!;
     const signedUrl = new URL((patch.body.fields as { "4-in-1 Image": Array<{ url: string }> })["4-in-1 Image"][0]!.url);
     expect(decodeURIComponent(signedUrl.pathname)).toBe("/assets/products/A-1001/collage/1080x1080.jpg");
     const expires = Number(signedUrl.searchParams.get("exp"));
@@ -431,7 +720,7 @@ describe("publication acceptance", () => {
     expect(await verifyAssetToken("products/A-1001/collage/1080x1080.jpg", expires, signedUrl.searchParams.get("sig")!, "test-secret", clock.now().getTime() / 1000)).toBe(true);
     expect(fixture.batches[0]!.filter(r => "insertInlineImage" in r).map(r => r.insertInlineImage.uri)).toEqual([signedUrl.toString()]);
     await fixture.run();
-    expect(fixture.image.put).toHaveBeenCalledTimes(1);
+    expect(fixture.image.put.mock.calls.filter(([key]) => key.includes("/collage/"))).toHaveLength(1);
   });
 
   it("caches exactly three Thai captions per ID for 22 products in one generation request", async () => {
@@ -531,7 +820,10 @@ describe("publication acceptance", () => {
     const duplicate = await handleDocsRoute(docsRequest(), triggerEnv, clock);
     expect(duplicate.status).toBe(200);
     expect(await duplicate.json()).toEqual({ status: "already_running", publicationRunId: runId });
-    expect(binding.create).toHaveBeenCalledExactlyOnceWith({ id: "publication-rec-run-1", params: { publicationRunId: runId, trigger: "admin" } });
+    const saved = await env.DB.prepare("SELECT settings_context_json FROM publication_jobs WHERE publication_run_id = ?").bind(runId).first<{ settings_context_json: string }>();
+    const context = JSON.parse(saved!.settings_context_json);
+    expect(context).toMatchObject({ replyGroupId: null, settings: { revision: 0, schemaVersion: 1, config: { airtableBaseId: config.airtableBaseId, googleTemplateDocId: config.googleTemplateDocId } } });
+    expect(binding.create).toHaveBeenCalledExactlyOnceWith({ id: "publication-rec-run-1", params: { publicationRunId: runId, trigger: "admin", context } });
     await fixture.run();
     // Even if Airtable is stale or staff marks it Ready again, D1 owns the result.
     fixture.state.status = "Ready";
@@ -546,8 +838,8 @@ describe("publication acceptance", () => {
     for (const call of queries) expect(new URL(call.url).searchParams.get("filterByFormula")).toBe("DATESTR({Publication Date})='2026-09-02'");
   });
 
-  it.each([[503, "errored", "restarted"], [429, "unknown", "started"]] as const)
-    ("exhausts six Google %s attempts before cleanup, then restarts a %s Workflow using cached products", async (httpStatus, workflowStatus, triggerStatus) => {
+  it.each([[503, "errored", "restarted"], [429, "missing", "restarted"]] as const)
+    ("exhausts six Google %s attempts before cleanup, then handles a %s Workflow with cached products", async (httpStatus, workflowStatus, triggerStatus) => {
       const fixture = publicationFixture();
       fixture.state.batchFailureStatus = httpStatus;
       await expect(fixture.run()).rejects.toThrow("Unable to fill or verify the Google document.");
@@ -570,7 +862,7 @@ describe("publication acceptance", () => {
       expect(fixture.calls.filter(c => c.url.endsWith(`/tblRuns/${runId}`) && c.method === "PATCH").at(-1)!.body).toEqual({
         fields: { Status: "Failed", "Error Summary": "Unable to fill or verify the Google document." },
       });
-      expect(fixture.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Unable to fill or verify the Google document."), expect.objectContaining({ type: "bubble" }), expect.any(String));
+      expect(fixture.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("ขั้นตอนเขียนและตรวจสอบเอกสารไม่สำเร็จ"), expect.objectContaining({ type: "bubble" }), expect.any(String));
       expect(fixture.notify.mock.calls[0]![0]).toMatch(/[ก-๙]/);
       const cached = await getProductCache(env.DB, runId, "A-1001");
       expect(cached).toEqual({
@@ -582,19 +874,30 @@ describe("publication acceptance", () => {
       const binding = workflowBinding();
       binding.setStatus(workflowStatus);
       const triggerEnv = { ...env, ...configEnv, PUBLICATION_WORKFLOW: binding } as unknown as Env;
-      const response = await handleDocsRoute(docsRequest(), triggerEnv, clock);
+      let response = await handleDocsRoute(docsRequest(), triggerEnv, clock);
+      if (workflowStatus === "missing") {
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ status: "owner_review", publicationRunId: runId });
+        expect(await job()).toMatchObject({ state: "failed", correlation_id: "publication-rec-run-1" });
+        expect(await getProductCache(env.DB, runId, "A-1001")).toEqual(cached);
+        expect(binding.create).not.toHaveBeenCalled();
+        expect(binding.restart).not.toHaveBeenCalled();
+        binding.setStatus("errored");
+        response = await handleDocsRoute(docsRequest(), triggerEnv, clock);
+      }
       expect(response.status).toBe(202);
       expect(await response.json()).toEqual({ status: triggerStatus, publicationRunId: runId });
       expect(await job()).toMatchObject({ state: "locked", correlation_id: "publication-rec-run-1" });
       expect(await getProductCache(env.DB, runId, "A-1001")).toEqual(cached);
-      expect(workflowStatus === "errored" ? binding.restart : binding.create).toHaveBeenCalledTimes(1);
+      expect(binding.restart).toHaveBeenCalledTimes(1);
+      expect(binding.create).not.toHaveBeenCalled();
       fixture.state.batchFailureStatus = 0;
-      const result = await fixture.run();
+      const result = await fixture.run(1, 2);
       expect(result!.googleDocId).toBe("temp-doc-2");
       expect(fixture.state.docs.size).toBe(1);
       expect(fixture.state.docs.get("temp-doc-2")!.name).toBe("Publication 2026-09-02");
       expect(fixture.create).toHaveBeenCalledTimes(1);
-      expect(fixture.image.put).toHaveBeenCalledTimes(1);
+      expect(fixture.image.put.mock.calls.filter(([key]) => key.includes("/collage/"))).toHaveLength(1);
       expect(await job()).toMatchObject({ state: "succeeded", google_doc_id: "temp-doc-2", google_doc_url: result!.googleDocUrl });
       expect(fixture.state.status).toBe("Generated");
       expect(fixture.notify).toHaveBeenCalledTimes(2);

@@ -1,6 +1,6 @@
 import { NonRetryableError } from "cloudflare:workflows";
 import { describe, expect, it, vi } from "vitest";
-import { OperationalError } from "../../src/shared/errors";
+import { OperationalError, workflowFailureCode } from "../../src/shared/errors";
 import { runImportWorkflow } from "../../src/import/workflow";
 import type {
   ProcessGroupDeps,
@@ -83,7 +83,7 @@ describe("runImportWorkflow", () => {
     await expect(runImportWorkflow(processDeps(), { importRunId: "run-1", sourceAlbumId: "album-1", trigger: "line" }, step, {
       retryLimit: 0, downloadAndGroup: download, recordRunFailure: record,
       processGroupAttempt: vi.fn(), recordExhaustedFailure: vi.fn(), finalize: vi.fn(), notify: vi.fn(),
-    })).rejects.toMatchObject({ code: "db_unavailable" });
+    })).rejects.toThrow("source_unavailable");
     expect(download).toHaveBeenCalledTimes(1);
     expect(record).toHaveBeenCalledTimes(1);
     expect(step.calls.map(call => call.attempts)).toEqual([1, 1]);
@@ -138,10 +138,7 @@ describe("runImportWorkflow", () => {
           notify,
         },
       ),
-    ).rejects.toMatchObject({
-      name: "icloud_invalid_webstream_response",
-      message: "iCloud returned a malformed response",
-    });
+    ).rejects.toThrow("icloud_invalid_webstream_response");
 
     expect(recordRunFailure).toHaveBeenCalledWith(
       "icloud_invalid_webstream_response",
@@ -183,7 +180,7 @@ describe("runImportWorkflow", () => {
           notify: vi.fn(),
         },
       ),
-    ).rejects.toThrow("iCloud unavailable");
+    ).rejects.toThrow("icloud_webstream_unavailable");
 
     expect(recordRunFailure).toHaveBeenCalledWith(
       "icloud_webstream_unavailable",
@@ -302,7 +299,7 @@ describe("runImportWorkflow", () => {
       },
       attempts: 2,
     });
-    expect(finalize).toHaveBeenCalledWith(false, 2, 10);
+    expect(finalize).toHaveBeenCalledWith(false, 2, 10, result, expect.objectContaining({ count: 2 }));
     expect(notify).toHaveBeenCalledWith(result, {
       firstApplePhotoId: "orphan-1",
       lastApplePhotoId: "orphan-2",
@@ -409,7 +406,7 @@ describe("runImportWorkflow", () => {
       "notify",
     ]);
     expect(result).toEqual(expectedResult);
-    expect(finalize).toHaveBeenCalledWith(true, 0, 10);
+    expect(finalize).toHaveBeenCalledWith(true, 0, 10, expectedResult, null);
     expect(notify).toHaveBeenCalledWith(expectedResult, null);
   });
 
@@ -452,10 +449,7 @@ describe("runImportWorkflow", () => {
     expect(
       step.calls.find((call) => call.name === "process-group-row-g1"),
     ).toMatchObject({ attempts: 1 });
-    expect(record.mock.calls[0]?.[3]).toMatchObject({
-      name: "product_group_missing",
-      message: "Product group row is missing",
-    });
+    expect(workflowFailureCode(record.mock.calls[0]?.[3])).toBe("product_group_missing");
   });
 });
 
@@ -478,7 +472,7 @@ describe("ignore sections workflow outcomes", () => {
     expect(result.succeededProductIds).toEqual(mixed ? ["A-501"] : []);
     expect(result.failedGroups).toEqual(mixed ? [{ groupId: "row-incomplete", productId: null, errorCode: "insufficient_product_photos" }] : []);
     expect(result.ignoredGroupCount).toBe(2);
-    expect(finalize).toHaveBeenCalledWith(mixed, 0, 12);
+    expect(finalize).toHaveBeenCalledWith(mixed, 0, 12, result, null);
     expect(notify).toHaveBeenCalledWith(result, null);
     if (mixed) expect(step.calls.find(c => c.name === "process-group-row-incomplete")?.attempts).toBe(1);
     else expect(process).not.toHaveBeenCalled();
@@ -491,4 +485,13 @@ it('records an early failure then persists its terminal notice independently', a
    retryLimit:0,downloadAndGroup:async()=>{throw new OperationalError('bad_album','bad album',false);},recordRunFailure:async()=>{},processGroupAttempt:vi.fn(),recordExhaustedFailure:vi.fn(),finalize:vi.fn(),notify:vi.fn(),notifyFailure,
  })).rejects.toThrow();
  expect(notifyFailure).toHaveBeenCalledWith('failed');
+});
+
+it('retains the safe download code across serialized permanent failures', async () => {
+  const step=retryingStep();
+  const real=step.do.bind(step);
+  step.do=async <T>(name: string, options: unknown, callback?: () => Promise<T>): Promise<T> => {try{return await real(name, options, callback) as T;}catch(error){throw new Error(`NonRetryableError: ${(error as Error).message}`);}};
+  const recordRunFailure=vi.fn();
+  await expect(runImportWorkflow(processDeps(),{importRunId:'run',sourceAlbumId:'album',trigger:'cron'},step,{retryLimit:5,downloadAndGroup:async()=>{throw new OperationalError('icloud_invalid_webstream_response','SECRET',false);},recordRunFailure,processGroupAttempt:vi.fn(),recordExhaustedFailure:vi.fn(),finalize:vi.fn(),notify:vi.fn()})).rejects.toThrow();
+  expect(recordRunFailure).toHaveBeenCalledWith('icloud_invalid_webstream_response');
 });

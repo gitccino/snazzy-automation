@@ -1,0 +1,35 @@
+import { expect, it } from 'vitest';
+import { testEnv } from '../helpers/env';
+import { repairImportOwnerNotice } from '../../src/db/import-owner-notice';
+
+it('repairs one owned saved early notice atomically and rejects replay and changed evidence', async () => {
+  const db=testEnv().DB, run=crypto.randomUUID(), group=crypto.randomUUID();
+  const context=JSON.stringify({replyGroupId:'owner',settings:{config:{airtableBaseId:'base',airtableProductsTableId:'table'}}});
+  const key=JSON.stringify(['import',run,1,1,'terminal']);
+  await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json) VALUES(?, 'album','line','start_failed','2026-11-20T00:00:00Z',?)").bind(run,context).run();
+  await db.prepare("INSERT INTO product_groups(id,import_run_id,ordinal,group_hash,state,first_photo_id,last_photo_id,created_at,updated_at) VALUES(?,?,0,?,'failed','a','b','now','now')").bind(group,run,group).run();
+  await db.prepare("INSERT INTO line_command_ingress VALUES('event','owner','{\"type\":\"upload\"}',?,'now')").bind(run).run();
+  await db.prepare("INSERT INTO workflow_feedback(kind,run_id,generation,notification_cycle,group_id,context_json,stage,event_id,failure_code) VALUES('import',?,1,1,'owner',?,'settings-context','event','setup_failed')").bind(run,context).run();
+  await db.prepare("INSERT INTO workflow_feedback_results(kind,run_id,generation,notification_cycle,revision,result_key,outcome_json,group_id) VALUES('import',?,1,1,0,?,?,'owner')").bind(run,key,JSON.stringify({stage:'settings-context',failureCode:'setup_failed',action:'verify',outcome:'unconfirmed',eventId:'event',resultKey:key,references:{notice:'early_setup'}})).run();
+  const input={runId:run,ownerGroupId:'owner',baseId:'base',tableId:'table',actor:'operator',reason:'reviewed'};
+  expect(await repairImportOwnerNotice(db,{...input,ownerGroupId:'foreign'})).toBe(false);
+  expect(await repairImportOwnerNotice(db,{...input,baseId:'wrong'})).toBe(false);
+  await db.prepare('UPDATE import_runs SET settings_context_json=? WHERE id=?').bind(JSON.stringify({replyGroupId:'owner',settings:{config:{airtableBaseId:'changed',airtableProductsTableId:'table'}}}),run).run();
+  expect(await repairImportOwnerNotice(db,input)).toBe(false);
+  await db.prepare('UPDATE import_runs SET settings_context_json=? WHERE id=?').bind(context,run).run();
+  await db.prepare("INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at) VALUES(?, 'owner','{}','now')").bind(key).run();
+  expect(await repairImportOwnerNotice(db,input)).toBe(false);
+  await db.prepare('DELETE FROM line_result_outbox WHERE result_key=?').bind(key).run();
+  await db.prepare("INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at) VALUES('other','owner','{}','now')").run();
+  expect(await repairImportOwnerNotice(db,input)).toBe(false);
+  await db.prepare("DELETE FROM line_result_outbox WHERE result_key='other'").run();
+  await db.prepare("CREATE TRIGGER reject_notice BEFORE INSERT ON line_result_outbox BEGIN SELECT RAISE(ABORT,'failed'); END").run();
+  await expect(repairImportOwnerNotice(db,input)).rejects.toThrow();
+  expect((await db.prepare('SELECT * FROM import_owner_notice_repairs').all()).results).toHaveLength(0);
+  await db.prepare('DROP TRIGGER reject_notice').run();
+  expect((await Promise.all([repairImportOwnerNotice(db,input),repairImportOwnerNotice(db,input)])).sort()).toEqual([false,true]);
+  expect(await repairImportOwnerNotice(db,input)).toBe(false);
+  expect((await db.prepare('SELECT * FROM import_owner_notice_repairs WHERE run_id=?').bind(run).all()).results).toHaveLength(1);
+  expect((await db.prepare('SELECT * FROM line_result_outbox WHERE result_key=?').bind(key).all()).results).toHaveLength(1);
+  expect(await db.prepare('SELECT materialized FROM workflow_feedback_results WHERE result_key=?').bind(key).first()).toEqual({materialized:1});
+});

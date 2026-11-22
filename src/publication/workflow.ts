@@ -1,8 +1,14 @@
+import { docsWorkflowFailureCard, publicationFailureGuidance } from '../line/docs-summary-card';
+import { publicationOwnerReviewInstruction } from '../line/messages';
+import { earlySetupResult } from '../line/early-setup-notice';
 import {
   preparePublicationImages,
   ProductImagePreparationFailure,
 } from "./product-images";
 import Anthropic from "@anthropic-ai/sdk";
+import { z } from "zod";
+import { createGoogleAuthClient } from "./google-auth";
+import { verifyDocumentContainsProducts } from "./google-docs";
 import {
   WorkflowEntrypoint,
   type WorkflowEvent,
@@ -14,10 +20,11 @@ import type { OperationContext } from "../settings/schema";
 import type { Env } from "../env";
 import { createAssetStore } from "../import/asset-store";
 import { createLineReplyRepository } from '../db/line-reply-repository';
-import { readPublicationJob } from '../db/publication-repository';
+import { readPublicationJob, completePublicationVerification, readPreGoogleFailure, readFinalizationCandidate, readPublicationCleanupCandidate, readPublicationCleanupReceipt, readPublicationCleanupFailure, claimPublicationCleanupDispatch, recordPublicationCleanupReceipt } from '../db/publication-repository';
+import { createWorkflowFeedbackRepository } from '../db/workflow-feedback';
 import { docsUnconfirmedCard } from '../line/docs-summary-card';
 import type { TerminalResultV1 } from '../line/reply-types';
-import { OperationalError } from "../shared/errors";
+import { OperationalError, workflowFailureCode, workflowFailureMessage } from "../shared/errors";
 import type { Clock } from "../shared/time";
 import {
   ensureTemporaryDocument,
@@ -31,7 +38,7 @@ import {
   validatePublication,
   type PublicationServiceDeps,
 } from "./service";
-import type { PublicationResult, PublicationWorkflowParams } from "./types";
+import type { PublicationResult, PublicationWorkflowParams, PublicationBusinessParams } from "./types";
 import { publicationWorkflowId } from "./types";
 
 function depsFor(
@@ -101,7 +108,9 @@ function depsFor(
 }
 
 function publicationErrorCode(error:unknown,fallback:string):string {
-  const code=error instanceof OperationalError ? error.code : error instanceof Error ? error.name : '';
+  const decoded = workflowFailureCode(error);
+  if (decoded) return decoded;
+  const code=error instanceof ProductImagePreparationFailure ? error.diagnostic?.code ?? "" : error instanceof OperationalError ? error.code : error instanceof Error ? error.name : '';
   return /^[a-z][a-z0-9_]{0,99}$/.test(code)?code:fallback;
 }
 
@@ -112,24 +121,15 @@ async function workflowCall<T>(
   try {
     return await call();
   } catch (error) {
-    if (error instanceof OperationalError && !error.retryable) {
-      // The name survives durable error serialization; custom Error fields may not.
-      throw new NonRetryableError(reason, error.code);
-    }
-    // Durable retries and their logs must not retain raw upstream bodies or secrets.
-    const safe=new Error(reason);
-    safe.name=publicationErrorCode(error,'publication_stage_failed');
-    throw safe;
+    const code = error instanceof OperationalError || error instanceof ProductImagePreparationFailure ? publicationErrorCode(error, 'publication_stage_failed') : 'publication_stage_failed';
+    const message = workflowFailureMessage(code, reason);
+    if (error instanceof NonRetryableError || (error instanceof OperationalError && !error.retryable)) throw new NonRetryableError(message);
+    throw new Error(message);
   }
 }
 
 function isContenderRejection(error: unknown): boolean {
-  const code =
-    error instanceof OperationalError
-      ? error.code
-      : error instanceof Error
-        ? error.name
-        : null;
+  const code = publicationErrorCode(error, 'publication_stage_failed');
   return (
     code === "publication_job_locked" ||
     code === "publication_job_terminal" ||
@@ -138,10 +138,11 @@ function isContenderRejection(error: unknown): boolean {
 }
 
 export async function runPublicationWorkflow(
-  params: PublicationWorkflowParams,
+  params: PublicationBusinessParams,
   step: WorkflowStep,
   deps: PublicationServiceDeps,
   instanceId?: string,
+  feedbackIdentity?: {groupId:string;notificationCycle:number},
 ): Promise<PublicationResult | null> {
   const retries = {
     retries: {
@@ -164,19 +165,43 @@ export async function runPublicationWorkflow(
     const notice=JSON.parse(json) as {text:string;contents?:Record<string,unknown>;outcome?:TerminalResultV1['outcome']}|null;
     if(notice)await step.do(name,persistenceOptions,()=>deps.notify(notice.text,notice.contents,notice.outcome));
   }
-  async function recordFailure(reason:string,displayDate:string|null,originalError:unknown) {
+  async function recordFailure(stage:string,reason:string,displayDate:string|null,originalError:unknown) {
+    const imageDiagnostic = originalError instanceof ProductImagePreparationFailure ? originalError.diagnostic : undefined;
+    if (params.trigger === "line" && feedbackIdentity) {
+      await step.do("persist primary publication failure",persistenceOptions,async()=>{
+        const job=await readPublicationJob(deps.db,runId);
+        if (!job || job.generation!==generation || job.notificationCycle!==feedbackIdentity.notificationCycle || job.correlationId!==instanceId)
+          throw new NonRetryableError("Publication identity unavailable");
+        if (job.state === "succeeded") return;
+        const attempt={kind:"publication" as const,runId,generation,...feedbackIdentity};
+        const committed=await createWorkflowFeedbackRepository(deps.db).commitOutcome(attempt,{stage,failureCode:publicationErrorCode(originalError,"publication_stage_failed"),action:"verify",outcome:"unconfirmed",references:{thaiDate:displayDate??"ไม่สามารถอ่านวันที่รายการได้",airtableRunUrl:`https://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`,publicBaseUrl:deps.config.publicBaseUrl,...(imageDiagnostic ? {imageDiagnostic} : {})},resultKey:JSON.stringify(["publication",runId,generation,feedbackIdentity.notificationCycle,"terminal"])});
+        if (!committed) throw new NonRetryableError("Publication identity unavailable");
+      });
+    }
     type Notice={text:string;contents?:Record<string,unknown>;outcome:TerminalResultV1['outcome']};
     let noticeJson:string;
     try {
       noticeJson=await step.do('record exhausted publication failure',retries,()=>workflowCall('Unable to record the publication failure.',async()=>{
         let intent:Notice|null=null;
-        await failPublicationAfterExhaustion({...deps,notify:async(text,contents)=>{intent={text,...(contents?{contents}:{}),outcome:'failed'};}},runId,reason,displayDate,...generationArgs);
+        await failPublicationAfterExhaustion({...deps,notify:async()=>{
+          const card=docsWorkflowFailureCard({thaiDate:displayDate ?? 'ไม่สามารถอ่านวันที่รายการได้',reason:publicationFailureGuidance(stage,publicationErrorCode(originalError,'publication_stage_failed'),imageDiagnostic),airtableRunUrl:`https://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`},deps.config.publicBaseUrl);
+          intent={text:card.text,contents:card.contents,outcome:'failed'};
+        }},runId,reason,displayDate,...generationArgs);
         return JSON.stringify(intent);
       }));
     } catch(recordingError) {
       if(isContenderRejection(recordingError))throw recordingError;
       console.error('publication_failure_recording_unconfirmed',{runId,generation,originalCode:publicationErrorCode(originalError,'publication_stage_failed'),recordingCode:publicationErrorCode(recordingError,'failure_recording_failed')});
       noticeJson=await step.do('prepare unconfirmed publication notice',persistenceOptions,async()=>{
+        if (params.trigger === 'line' && feedbackIdentity) {
+          const saved=await deps.db.prepare(`SELECT outcome_json FROM workflow_feedback_results WHERE kind='publication' AND run_id=? AND generation=? AND notification_cycle=? AND group_id=? AND result_key=?`)
+            .bind(runId,generation,feedbackIdentity.notificationCycle,feedbackIdentity.groupId,JSON.stringify(['publication',runId,generation,feedbackIdentity.notificationCycle,'terminal'])).first<{outcome_json:string}>();
+          if (saved) {
+            const fact=JSON.parse(saved.outcome_json) as {stage:string;failureCode?:string;references?:{imageDiagnostic?:unknown}};
+            const guidance = publicationFailureGuidance(fact.stage, fact.failureCode, fact.references?.imageDiagnostic);
+            return JSON.stringify({text:`วันที่: ${displayDate ?? "ไม่สามารถอ่านวันที่รายการได้"}\n${guidance}\nสถานะการล้างข้อมูลหรือบันทึก Airtable ยังไม่แน่นอน\n${publicationOwnerReviewInstruction}\nhttps://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`,outcome:'unconfirmed'} satisfies Notice);
+          }
+        }
         const card=docsUnconfirmedCard({thaiDate:displayDate??'ไม่สามารถอ่านวันที่รายการได้',airtableRunUrl:`https://airtable.com/${deps.config.airtableBaseId}/${deps.config.airtablePublicationRunsTableId}/${runId}`},deps.config.publicBaseUrl);
         return JSON.stringify({text:card.text,contents:card.contents,outcome:'unconfirmed'} satisfies Notice);
       });
@@ -193,7 +218,7 @@ export async function runPublicationWorkflow(
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
-    await recordFailure("Unable to finalize the publication.",null,error);
+    try { await recordFailure("recover finalization","Unable to finalize the publication.",null,error); } catch { console.error('publication_failure_feedback_unavailable', {runId,generation}); }
     throw error;
   }
   if (recovered) {
@@ -214,7 +239,7 @@ export async function runPublicationWorkflow(
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
-    await recordFailure("Unable to read or validate publication data.",null,error);
+    try { await recordFailure("validate publication","Unable to read or validate publication data.",null,error); } catch { console.error('publication_failure_feedback_unavailable', {runId,generation}); }
     throw error;
   }
   if (validation.kind === "already_succeeded") return validation.result;
@@ -227,6 +252,7 @@ export async function runPublicationWorkflow(
   let result: PublicationResult;
   // Image errors use locally constructed safe reasons; other stages use fixed reasons.
   let failureReason = "Unable to prepare product images.";
+  let failureStage = "prepare product images";
   try {
     let imagePrepared;
     try {
@@ -244,24 +270,28 @@ export async function runPublicationWorkflow(
         failureReason = error.message;
       throw error;
     }
+    failureStage = "prepare outputs";
     failureReason = "Unable to prepare publication images and captions.";
     prepared = await step.do("prepare outputs", retries, () =>
       workflowCall(failureReason, () =>
         preparePublicationOutputs(deps, imagePrepared),
       ),
     );
+    failureStage = "ensure temporary document";
     failureReason = "Unable to create the temporary Google document.";
     const tempDocId = await step.do("ensure temporary document", retries, () =>
       workflowCall(failureReason, () =>
-        ensureTemporaryDocument(deps, prepared),
+        ensureTemporaryDocument({ ...deps, copyOwner: instanceId && feedbackIdentity ? { workflowId: instanceId, notificationCycle: feedbackIdentity.notificationCycle } : deps.copyOwner }, prepared),
       ),
     );
+    failureStage = "fill and verify document";
     failureReason = "Unable to fill or verify the Google document.";
     await step.do("fill and verify document", retries, () =>
       workflowCall(failureReason, () =>
         fillAndVerifyDocument(deps, prepared, tempDocId),
       ),
     );
+    failureStage = "finalize publication";
     failureReason = "Unable to finalize the publication.";
     result = await step.do("finalize publication", retries, () =>
       workflowCall(failureReason, () =>
@@ -270,7 +300,7 @@ export async function runPublicationWorkflow(
     );
   } catch (error) {
     if (isContenderRejection(error)) throw error;
-    await recordFailure(failureReason,validation.value.thaiDate,error);
+    try { await recordFailure(failureStage,failureReason,validation.value.thaiDate,error); } catch { console.error('publication_failure_feedback_unavailable', {runId,generation}); }
     throw error;
   }
   // Notification failure must not delete or downgrade a completed document.
@@ -286,7 +316,90 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
     event: WorkflowEvent<PublicationWorkflowParams>,
     step: WorkflowStep,
   ): Promise<PublicationResult | null> {
-    const generation = event.payload.generation ?? 1;
+    if (event.payload.kind === "verification") {
+      const payload = event.payload;
+      await step.do("verify-publication", async () => {
+        if (event.instanceId !== payload.verifierId) return;
+        const claim = await this.env.DB.prepare(`SELECT origin_workflow_id, context_json FROM publication_verification_claims
+          WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND group_id=? AND verifier_id=? AND completed=0`)
+          .bind(payload.publicationRunId, payload.generation, payload.notificationCycle, payload.groupId, payload.verifierId)
+          .first<{origin_workflow_id:string; context_json:string}>();
+        const job = await readPublicationJob(this.env.DB, payload.publicationRunId);
+        if (!claim || !job || job.generation !== payload.generation || job.notificationCycle !== payload.notificationCycle || job.correlationId !== claim.origin_workflow_id) return;
+        const status = (await (await this.env.PUBLICATION_WORKFLOW.get(claim.origin_workflow_id)).status()).status;
+        if (!["complete", "errored", "terminated"].includes(status)) throw new Error("publication_origin_not_stopped");
+        const attempt = {runId:payload.publicationRunId, generation:payload.generation, notificationCycle:payload.notificationCycle, groupId:payload.groupId};
+        const receipt = await readPublicationCleanupReceipt(this.env.DB, attempt, payload.verifierId);
+        const candidate = receipt ? null : await readFinalizationCandidate(this.env.DB, attempt, payload.verifierId);
+        let confirmedSuccess = false;
+        let verifiedDocument = false;
+        if (candidate) {
+          try {
+            const config = (JSON.parse(candidate.context_json) as OperationContext).settings.config;
+            const intent = candidate.intent;
+            const fetcher = fetch.bind(globalThis);
+            const tokens = createGoogleAuthClient({clientId:this.env.GOOGLE_OAUTH_CLIENT_ID, clientSecret:this.env.GOOGLE_OAUTH_CLIENT_SECRET, refreshToken:this.env.GOOGLE_REFRESH_TOKEN}, {now:()=>new Date()}, fetcher);
+            const token = await tokens.getAccessToken();
+            const drive = await fetcher(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(intent.docId)}?fields=id,name,parents,trashed`, {headers:{Authorization:`Bearer ${token}`}});
+            if (!drive.ok) throw new Error('drive_read_failed');
+            const file = z.object({id:z.string(),name:z.string(),parents:z.array(z.string()),trashed:z.boolean()}).parse(await drive.json());
+            const document = await verifyDocumentContainsProducts(fetcher, tokens, intent.docId, intent.productIds);
+            const airtable = await fetcher(`https://api.airtable.com/v0/${encodeURIComponent(config.airtableBaseId)}/${encodeURIComponent(config.airtablePublicationRunsTableId)}/${encodeURIComponent(attempt.runId)}`, {headers:{Authorization:`Bearer ${this.env.AIRTABLE_TOKEN}`}});
+            if (!airtable.ok) throw new Error('airtable_read_failed');
+            const record = z.object({id:z.string(),fields:z.object({Status:z.string(), 'Google Doc URL':z.string().optional(), 'Generated At':z.string().optional()})}).parse(await airtable.json());
+            const documentMatches = intent.docUrl === `https://docs.google.com/document/d/${encodeURIComponent(intent.docId)}/edit` && file.id === intent.docId && file.name === intent.title && file.parents.includes(config.googleDriveFolderId) && !file.trashed && document.ok && record.id === attempt.runId;
+            verifiedDocument = documentMatches && record.fields.Status === 'Generating' && !record.fields['Google Doc URL'] && !record.fields['Generated At'];
+            confirmedSuccess = documentMatches && record.fields.Status === 'Generated' && record.fields['Google Doc URL'] === intent.docUrl && record.fields['Generated At'] === intent.generatedAt;
+          } catch { /* Unavailable or conflicting evidence remains unconfirmed. */ }
+        }
+        // A metadata read alone cannot confirm whether a cleanup succeeded.
+        const cleanup = receipt ? null : await readPublicationCleanupCandidate(this.env.DB, attempt, payload.verifierId, false);
+        if (cleanup) {
+          try {
+            const fetcher = fetch.bind(globalThis);
+            const tokens = createGoogleAuthClient({clientId:this.env.GOOGLE_OAUTH_CLIENT_ID, clientSecret:this.env.GOOGLE_OAUTH_CLIENT_SECRET, refreshToken:this.env.GOOGLE_REFRESH_TOKEN}, {now:()=>new Date()}, fetcher);
+            const token = await tokens.getAccessToken();
+            const response = await fetcher(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(cleanup.doc_id)}?fields=id,parents,trashed,appProperties`, {headers:{Authorization:`Bearer ${token}`}});
+            if (!response.ok) throw new Error('drive_read_failed');
+            const file = z.object({id:z.string(), parents:z.array(z.string()), trashed:z.boolean(), appProperties:z.object({publicationRunId:z.string()})}).parse(await response.json());
+            if (file.id !== cleanup.doc_id || !file.parents.includes(cleanup.folder_id) || file.trashed || file.appProperties.publicationRunId !== (attempt.generation === 1 ? attempt.runId : publicationWorkflowId(attempt.runId, attempt.generation))) throw new Error('drive_metadata_mismatch');
+            if (await claimPublicationCleanupDispatch(this.env.DB, attempt, payload.verifierId, cleanup.doc_id)) {
+              const deletion = await fetcher(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(cleanup.doc_id)}`, {method:'DELETE', headers:{Authorization:`Bearer ${token}`}});
+              if (deletion.ok) await recordPublicationCleanupReceipt(this.env.DB, {...attempt, verifierId:payload.verifierId, docId:cleanup.doc_id, acknowledged:true});
+            }
+          } catch { /* Missing or conflicting evidence remains unconfirmed. */ }
+        }
+        const preGoogleFailure = await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId);
+        const cleanupFailure = await readPublicationCleanupFailure(this.env.DB, attempt, payload.verifierId);
+        const failure = preGoogleFailure ?? cleanupFailure;
+        const sameFailure = async () => preGoogleFailure
+          ? !!await readPreGoogleFailure(this.env.DB, attempt, payload.verifierId)
+          : JSON.stringify(await readPublicationCleanupFailure(this.env.DB, attempt, payload.verifierId)) === JSON.stringify(cleanupFailure);
+        let confirmedFailed = false;
+        if (failure) {
+          try {
+            const context = JSON.parse(failure.context_json) as OperationContext;
+            const config = context.settings.config;
+            const url = `https://api.airtable.com/v0/${encodeURIComponent(config.airtableBaseId)}/${encodeURIComponent(config.airtablePublicationRunsTableId)}/${encodeURIComponent(attempt.runId)}`;
+            const headers = {Authorization:`Bearer ${this.env.AIRTABLE_TOKEN}`};
+            const read = async () => {
+              const response = await fetch(url, {headers});
+              if (!response.ok) throw new Error('airtable_read_failed');
+              return z.object({id:z.string(), fields:z.object({Status:z.string(), 'Google Doc URL':z.string().optional(), 'Generated At':z.string().optional()})}).parse(await response.json());
+            };
+            const record = await read();
+            confirmedFailed = record.id === attempt.runId && record.fields.Status === 'Failed' && !record.fields['Google Doc URL'] && !record.fields['Generated At'] && await sameFailure();
+          } catch { /* An unavailable or inconsistent record cannot confirm the outcome. */ }
+        }
+        await completePublicationVerification(this.env.DB, attempt, payload.verifierId, {
+          originWorkflowId:claim.origin_workflow_id, contextJson:claim.context_json, candidate: candidate ?? undefined, verifiedDocument, cleanupFailure: confirmedFailed && !preGoogleFailure ? cleanupFailure ?? undefined : undefined,
+          result:{schemaVersion:1, kind:'publication', runId:attempt.runId, generation:attempt.generation, notificationCycle:attempt.notificationCycle, outcome:confirmedSuccess ? 'success' : confirmedFailed ? 'failed' : 'unconfirmed', messages:[{type:'text', text:confirmedSuccess ? `ตรวจสอบแล้ว สร้างเอกสารสำเร็จ\n${candidate!.intent.docUrl}` : confirmedFailed ? `ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed และไม่มีเอกสารที่บันทึกไว้\n${attempt.runId}` : verifiedDocument ? `ตรวจสอบเอกสารแล้ว แต่สถานะ Airtable ยังไม่ยืนยัน ให้ผู้ดูแลตรวจสอบก่อนส่ง /docs ซ้ำ\n${candidate!.intent.docUrl}\n${attempt.runId}` : failure ? `⚠️ ให้ผู้ดูแลตรวจสอบสถานะงานเดิมใน Airtable ก่อนส่ง /docs ซ้ำ\n${attempt.runId}` : `⚠️ ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ\n${attempt.runId}`}]},
+        });
+      });
+      return null;
+    }
+    const payload = event.payload;
+    const generation = payload.generation ?? 1;
     if (
       !Number.isSafeInteger(generation) ||
       generation < 1 ||
@@ -294,26 +407,48 @@ export class PublicationWorkflow extends WorkflowEntrypoint<
         event.instanceId !==
           publicationWorkflowId(event.payload.publicationRunId, generation))
     ) {
-      throw new NonRetryableError(
-        "Invalid publication generation owner",
-        "publication_generation_stale",
-      );
+      throw new NonRetryableError("Invalid publication generation owner");
     }
-    const context = await step.do(
-      "settings-context",
-      { retries: { limit: 0, delay: "1 second" } },
-      () => resolvePublicationContext(this.env, event.payload),
-    );
-    const identity=await step.do('notification-identity',{retries:{limit:0,delay:'1 second'}},async()=>{
-      const job=await readPublicationJob(this.env.DB,event.payload.publicationRunId);
-      if(!job || job.generation!==generation)throw new NonRetryableError('Publication identity unavailable','publication_generation_stale');
-      return {runId:event.payload.publicationRunId,generation,notificationCycle:job.notificationCycle};
-    });
+    let context;
+    let identity: {runId:string;generation:number;notificationCycle:number};
+    let setupStage = 'settings-context';
+    try {
+      context = await step.do(
+        "settings-context",
+        { retries: { limit: 0, delay: "1 second" } },
+        () => resolvePublicationContext(this.env, payload),
+      );
+      setupStage = 'notification-identity';
+      identity = await step.do('notification-identity',{retries:{limit:0,delay:'1 second'}},async()=>{
+        const job=await readPublicationJob(this.env.DB,event.payload.publicationRunId);
+        if(!job || job.generation!==generation || job.correlationId!==event.instanceId)throw new NonRetryableError('Publication identity unavailable');
+        return {runId:event.payload.publicationRunId,generation,notificationCycle:job.notificationCycle};
+      });
+    } catch (error) {
+      try {
+        await step.do('setup-failure-notice', async () => {
+          const runId = event.payload.publicationRunId;
+          const job = await readPublicationJob(this.env.DB, runId);
+          if (!job || job.generation !== generation || job.correlationId !== event.instanceId || event.instanceId !== publicationWorkflowId(runId, generation)) return;
+          const bindings = await this.env.DB.prepare('SELECT event_id, group_id FROM publication_regeneration_events WHERE publication_run_id=? AND generation=? AND notification_cycle=? AND workflow_id=?')
+            .bind(runId, generation, job.notificationCycle, event.instanceId).all<{event_id:string;group_id:string | null}>();
+          if (bindings.results.length !== 1 || !bindings.results[0]?.group_id) return;
+          const binding = bindings.results[0];
+          const attempt = {kind:'publication' as const, runId, generation, notificationCycle:job.notificationCycle, groupId:binding.group_id!};
+          const resultKey = JSON.stringify(['publication',runId,generation,job.notificationCycle,'terminal']);
+          const committed = await createWorkflowFeedbackRepository(this.env.DB).commitOutcome(attempt, {stage:setupStage, failureCode:'setup_failed', action:'verify', outcome:'unconfirmed', resultKey, eventId:binding.event_id, references:{notice:'early_setup'}}, binding.event_id);
+          if (!committed) return;
+          await createLineReplyRepository(this.env.DB,{now:()=>new Date()}).enqueueResult({groupId:attempt.groupId,resultKey,result:earlySetupResult(attempt)});
+        });
+      } catch { /* Preserve the setup failure. */ }
+      throw error;
+    }
     return runPublicationWorkflow(
       event.payload,
       step,
-      depsFor(this.env, { now: () => new Date() }, context,identity),
+      { ...depsFor(this.env, { now: () => new Date() }, context,identity), copyOwner: { workflowId: event.instanceId, notificationCycle: identity.notificationCycle } },
       event.instanceId,
+      context.replyGroupId ? {groupId:context.replyGroupId,notificationCycle:identity.notificationCycle} : undefined,
     );
   }
 }

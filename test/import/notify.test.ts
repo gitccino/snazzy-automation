@@ -35,7 +35,7 @@ describe("buildImportSummaryMessage", () => {
     };
 
     expect(buildImportSummaryMessage({ result, orphanRange: null, nowThaiText })).toBe(
-      "นำเข้ารูปภาพ — 1 กันยายน 2569 09:00\nสำเร็จ 1 รายการ\nA-501\nล้มเหลว 1 รายการ\n- A-502: Airtable จำกัดจำนวนคำขอชั่วคราว\nแก้ไขแล้วพิมพ์ /upload เพื่อลองใหม่",
+      "นำเข้ารูปภาพ — 1 กันยายน 2569 09:00\nสำเร็จ 1 รายการ\nA-501\nล้มเหลว 1 รายการ\n- A-502: Airtable จำกัดจำนวนคำขอชั่วคราว\nรายการที่แก้ไขแล้ว พิมพ์ /upload เพื่อลองใหม่",
     );
     const card = JSON.stringify(buildImportSummaryCard({ result, orphanRange: null, nowThaiText }, "https://worker.example"));
     expect(card).toContain("นำเข้าสำเร็จบางรายการ");
@@ -78,7 +78,7 @@ describe("buildImportSummaryMessage", () => {
     };
 
     expect(buildImportSummaryMessage({ result, orphanRange: null, nowThaiText })).toContain(
-      "- รายการที่ 1 (ยังไม่มีรหัสสินค้า): ระบบนำเข้ารายการนี้ไม่สำเร็จ",
+      "- อ้างอิง group-3: ระบบนำเข้ารายการนี้ไม่สำเร็จ",
     );
   });
 

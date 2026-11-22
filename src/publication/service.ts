@@ -1,3 +1,4 @@
+import { FinalizationIntentSchema } from "./finalization-intent";
 import {
   docsSuccessCard,
   docsValidationFailureCard,
@@ -18,6 +19,8 @@ import type { Fetcher } from "../shared/http";
 import type { Clock } from "../shared/time";
 import { OperationalError } from "../shared/errors";
 import {
+  admitPublicationGoogleCopy,
+  admitPublicationCleanup,
   acquireOrResumeJob,
   readPublicationJob,
   claimPublicationDate,
@@ -80,6 +83,7 @@ import {
 
 export interface PublicationServiceDeps {
   db: D1Database;
+  copyOwner?: { workflowId: string; notificationCycle: number };
   assets: AssetStore;
   bucket: R2Bucket;
   images: ImagesBinding;
@@ -479,6 +483,11 @@ export async function preparePublicationOutputs(
   return { ...validated, outputs };
 }
 
+async function admitGoogleWrite(deps: PublicationServiceDeps, runId: string, generation: number): Promise<void> {
+  if (!deps.copyOwner || !await admitPublicationGoogleCopy(deps.db, runId, generation, deps.copyOwner.notificationCycle, deps.copyOwner.workflowId))
+    throw new OperationalError("publication_generation_stale", "Publication owner is stale", false);
+}
+
 export async function ensureTemporaryDocument(
   deps: PublicationServiceDeps,
   prepared: PreparedPublication,
@@ -502,6 +511,7 @@ export async function ensureTemporaryDocument(
     deps.config.googleDriveFolderId,
     identity,
   );
+  if (!discovered) await admitGoogleWrite(deps, runId, generation);
   const docId =
     discovered ??
     (await copyTemplate(
@@ -560,6 +570,7 @@ export async function fillAndVerifyDocument(
     tempDocId,
     prepared.thaiDate,
     products,
+    () => admitGoogleWrite(deps, prepared.run.airtableRunId, prepared.generation ?? 1),
   );
   const verification = await verifyDocumentContainsProducts(
     deps.fetcher,
@@ -612,16 +623,6 @@ export async function finalizePublication(
   return finalizeStoredPublication(deps, runId, generation);
 }
 
-const FinalizationIntentSchema = z.object({
-  generation: z.number().int().positive().refine(Number.isSafeInteger),
-  publicationDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  thaiDate: z.string().min(1),
-  docId: z.string().min(1),
-  docUrl: z.string().url(),
-  title: z.string().min(1),
-  productIds: z.array(z.string().regex(/^A-[1-9]\d*$/)),
-  generatedAt: z.string().datetime(),
-});
 
 function parseFinalizationIntent(job: StageJob): PublicationFinalizationIntent {
   try {
@@ -653,7 +654,7 @@ export async function finalizeStoredPublication(
     deps.clock,
     deps.fetcher,
   );
-  await finalizeDocument(deps.fetcher, tokens, intent.docId, intent.title);
+  await finalizeDocument(deps.fetcher, tokens, intent.docId, intent.title, () => admitGoogleWrite(deps, runId, generation));
   requireActiveJob(await readJob(deps, runId), generation);
   const published = await readPublishedRun(
     deps.fetcher,
@@ -784,7 +785,12 @@ export async function failPublicationAfterExhaustion(
           false,
         );
       requireActiveJob(await readJob(deps, publicationRunId), generation);
-      await deleteDocument(deps.fetcher, tokens, docId);
+      await deleteDocument(deps.fetcher, tokens, docId, async () => {
+        const owner = deps.copyOwner;
+        if (!owner || !await admitPublicationCleanup(deps.db, publicationRunId, generation, owner.notificationCycle, owner.workflowId, docId))
+          throw new OperationalError("publication_generation_stale", "Publication cleanup owner is stale", false);
+        await admitGoogleWrite(deps, publicationRunId, generation);
+      });
       await setTempDocId(
         deps.db,
         deps.clock,

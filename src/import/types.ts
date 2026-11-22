@@ -6,7 +6,11 @@ export interface ImportWorkflowParams {
   sourceAlbumId: string;
   trigger: "cron" | "line" | "admin";
   context?: OperationContext;
+  trustedEventId?: string;
+  replyGroupId?: string;
 }
+
+export type ImportWorkflowPayload = ImportWorkflowParams | { kind: "verification"; importRunId: string };
 
 export type ProductGroupState =
   | "pending"

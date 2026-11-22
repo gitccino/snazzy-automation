@@ -1,10 +1,20 @@
 import type { OperationContext } from "../settings/schema";
-export interface PublicationWorkflowParams {
+export interface PublicationBusinessParams {
+  kind?: "publication";
   publicationRunId: string;
   trigger: "cron" | "line" | "admin";
   context?: OperationContext;
   generation?: number;
 }
+
+export type PublicationWorkflowParams = PublicationBusinessParams | {
+  kind: "verification";
+  publicationRunId: string;
+  generation: number;
+  notificationCycle: number;
+  groupId: string;
+  verifierId: string;
+};
 
 export function publicationWorkflowId(
   runId: string,

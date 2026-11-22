@@ -19,6 +19,7 @@ import type { Env } from "../env";
 import { createInventoryClient } from "../line/airtable-inventory";
 import { createLineClient } from "../line/client";
 import type { DocsTriggerResult, UploadTriggerResult } from "../line/search";
+import { parseLineCommand } from "../line/parser";
 import { verifyLineSignature } from "../line/signature";
 import {
   parseLineIngressEvents,
@@ -35,6 +36,11 @@ import { handleUploadTrigger } from "./upload";
 const ImportTriggerResponseSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("started"), importRunId: z.string().min(1) }),
   z.object({ status: z.literal("already_running") }),
+  z.object({ status: z.literal("busy") }),
+  z.object({ status: z.literal("owner_review"), importRunId: z.string().min(1) }),
+  z.object({ status: z.literal("checking"), importRunId: z.string().min(1) }),
+  z.object({ status: z.literal("completed"), importRunId: z.string().min(1) }),
+  z.object({ status: z.literal("partial"), importRunId: z.string().min(1) }),
   z.object({ status: z.literal("sequence_not_bootstrapped") }),
   z.object({ status: z.literal("workflow_start_failed") }),
   z.object({ status: z.literal("import_trigger_failed") }),
@@ -92,27 +98,42 @@ export async function handleLineRoute(
     return new Response("ok");
   }
 
-  const context = await captureOperationContext(env, null);
-  const config = context.settings.config;
-  const accepted = events.filter((event) =>
-    config.lineAllowedGroupIds.includes(event.source.groupId),
-  );
   try {
-    // createBatch is idempotent while an instance is retained. Persist before acknowledging LINE.
-    for (let offset = 0; offset < accepted.length; offset += 100) {
-      const batch = await Promise.all(
-        accepted.slice(offset, offset + 100).map(async (event) => {
-          const id = await lineCommandWorkflowId(event.webhookEventId);
-          return {
-            id,
-            params: {
-              event,
-              receivedAt,
-              context: { ...context, replyGroupId: event.source.groupId },
-            },
-          };
-        }),
-      );
+    const context = await captureOperationContext(env, null);
+    const config = context.settings.config;
+    const accepted = events.filter((event) =>
+      config.lineAllowedGroupIds.includes(event.source.groupId),
+    );
+    const ordinary: typeof accepted = [];
+    for (const event of accepted) {
+      const parsed = event.type === "message" ? parseLineCommand(event.message.text) : null;
+      if (!parsed?.ok || (parsed.command.type !== "docs" && parsed.command.type !== "upload")) {
+        ordinary.push(event);
+        continue;
+      }
+      const id = await lineCommandWorkflowId(event.webhookEventId);
+      const operation = JSON.stringify(parsed.command);
+      await env.DB.prepare(`INSERT OR IGNORE INTO line_command_ingress
+        (event_id, group_id, operation, workflow_id, received_at) VALUES (?, ?, ?, ?, ?)`)
+        .bind(event.webhookEventId, event.source.groupId, operation, id, receivedAt).run();
+      const saved = await env.DB.prepare('SELECT group_id, operation, workflow_id, received_at FROM line_command_ingress WHERE event_id=?')
+        .bind(event.webhookEventId).first<{group_id:string; operation:string; workflow_id:string; received_at:string}>();
+      if (!saved || saved.group_id !== event.source.groupId || saved.operation !== operation || saved.workflow_id !== id)
+        throw new Error('ingress_identity_mismatch');
+      try {
+        await env.LINE_COMMAND_WORKFLOW.createBatch([{ id, params: {
+          event, receivedAt: saved.received_at, context: { ...context, replyGroupId: event.source.groupId },
+        } }]);
+      } catch {
+        // A successful lookup proves the deterministic instance already exists.
+        await (await env.LINE_COMMAND_WORKFLOW.get(id)).status();
+      }
+    }
+    for (let offset = 0; offset < ordinary.length; offset += 100) {
+      const batch = await Promise.all(ordinary.slice(offset, offset + 100).map(async (event) => ({
+        id: await lineCommandWorkflowId(event.webhookEventId),
+        params: { event, receivedAt, context: { ...context, replyGroupId: event.source.groupId } },
+      })));
       await env.LINE_COMMAND_WORKFLOW.createBatch(batch);
     }
   } catch {
@@ -262,16 +283,17 @@ export async function createWebhookDeps(
     repo,
     audit: createAuditLog(env.DB, ids, clock),
     inventory,
-    async triggerUpload() {
+    async triggerUpload(trustedEventId) {
       const response = await handleUploadTrigger(
         env,
         "line",
         requestId,
         operationContext,
+        trustedEventId,
       );
       return parseUploadTriggerResponse(await response.json());
     },
-    triggerDocs(publicationDate) {
+    triggerDocs(publicationDate, trustedEventId) {
       return handleDocsTrigger(
         env,
         "line",
@@ -279,6 +301,7 @@ export async function createWebhookDeps(
         publicationDate,
         fetcher,
         operationContext,
+        trustedEventId,
       );
     },
   };

@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { testEnv } from "../helpers/env";
 import {
+  bindInitialPublicationCreate,
   acquireOrResumeJob,
   persistFinalizationIntent,
   completePublicationGeneration,
@@ -20,8 +21,28 @@ const env = testEnv();
 
 describe("publication-repository", () => {
   beforeEach(async () => {
+    await env.DB.exec("DELETE FROM publication_regeneration_events");
     await env.DB.exec("DELETE FROM publication_product_cache");
     await env.DB.exec("DELETE FROM publication_jobs");
+  });
+
+  it("binds a trusted create once and rejects changed ingress or target", async () => {
+    await env.DB.prepare("INSERT INTO line_command_ingress VALUES (?, ?, ?, ?, ?)").bind("create-event", "group-a", JSON.stringify({type: "docs", publicationDate: "2026-09-01"}), "ingress", "now").run();
+    await acquireOrResumeJob(env.DB, clock, "original", "workflow-original");
+    const bind = (group: string, run: string, generation = 1, cycle = 1) => bindInitialPublicationCreate(env.DB, "create-event", group, "2026-09-01", run, generation, cycle);
+    expect(await bind("group-b", "original")).toBeNull();
+    expect(await bind("group-a", "missing")).toBeNull();
+    const first = await bind("group-a", "original");
+    expect(first).toMatchObject({ publicationRunId: "original", generation: 1, notificationCycle: 1, bindingCreated: true });
+    expect(await bind("group-a", "original")).toEqual({ ...first, bindingCreated: false });
+    expect(await bind("group-b", "original")).toBeNull();
+    expect(await bind("group-a", "other")).toBeNull();
+    expect(await bind("group-a", "original", 1, 2)).toBeNull();
+    await env.DB.prepare("UPDATE line_command_ingress SET group_id = ? WHERE event_id = ?").bind("group-b", "create-event").run();
+    expect(await bind("group-b", "original")).toBeNull();
+    await env.DB.prepare("UPDATE line_command_ingress SET group_id = ?, operation = ? WHERE event_id = ?").bind("group-a", JSON.stringify({type: "docs", publicationDate: "2026-09-02"}), "create-event").run();
+    expect(await bindInitialPublicationCreate(env.DB, "create-event", "group-a", "2026-09-02", "original", 1, 1)).toBeNull();
+    await env.DB.prepare("DELETE FROM line_command_ingress WHERE event_id = ?").bind("create-event").run();
   });
 
   it("acquires a new job on first call", async () => {
@@ -48,6 +69,32 @@ describe("publication-repository", () => {
       tempDocId: null, publicationDate: "2026-09-02", correlationId: "publication-run-revision-v2",
     });
     expect(await reopenSuccessfulJobForRegeneration(env.DB, clock, "run-revision", 2)).toBeNull();
+  });
+
+  it("binds a regeneration event once across runs and generations", async () => {
+    for (const id of ["bound", "other"]) {
+      await acquireOrResumeJob(env.DB, clock, id, id);
+      await setJobState(env.DB, clock, id, "succeeded");
+    }
+    const first = await reopenSuccessfulJobForRegeneration(env.DB, clock, "bound", 1, "event-1");
+    expect(first?.bindingCreated).toBe(true);
+    await setJobState(env.DB, clock, "bound", "succeeded", undefined, 2);
+    expect(await reopenSuccessfulJobForRegeneration(env.DB, clock, "bound", 2, "event-1")).toEqual({ ...first, bindingCreated: false });
+    expect(await reopenSuccessfulJobForRegeneration(env.DB, clock, "other", 1, "event-1")).toEqual({ ...first, bindingCreated: false });
+    expect((await acquireOrResumeJob(env.DB, clock, "bound", "x")).job.generation).toBe(2);
+    expect((await acquireOrResumeJob(env.DB, clock, "other", "x")).job.generation).toBe(1);
+  });
+
+  it("rolls back the generation when binding insertion fails", async () => {
+    await acquireOrResumeJob(env.DB, clock, "rollback", "original");
+    await setJobState(env.DB, clock, "rollback", "succeeded");
+    await env.DB.exec("CREATE TRIGGER fail_regeneration_binding BEFORE INSERT ON publication_regeneration_events BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
+    try {
+      await expect(reopenSuccessfulJobForRegeneration(env.DB, clock, "rollback", 1, "event-fail")).rejects.toThrow();
+      expect((await acquireOrResumeJob(env.DB, clock, "rollback", "x")).job).toMatchObject({ generation: 1, state: "succeeded" });
+    } finally {
+      await env.DB.exec("DROP TRIGGER fail_regeneration_binding");
+    }
   });
 
   it("fences old-generation state and cache writes", async () => {

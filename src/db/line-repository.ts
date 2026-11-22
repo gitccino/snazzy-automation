@@ -8,7 +8,7 @@ export interface LineRepository {
   claimEvent(eventId: string, groupId: string): Promise<boolean>;
   releaseEvent(eventId: string): Promise<void>;
   findEventReply(eventId: string): Promise<CommandReply | null>;
-  saveEventReply(eventId: string, reply: CommandReply): Promise<void>;
+  saveEventReply(eventId: string, reply: CommandReply, provenance?: { groupId: string; operation: string; workflowId: string; receivedAt: string }): Promise<void>;
   findPendingBySourceEvent(sourceEventId: string): Promise<PendingLineCommand | null>;
   createPending(command: PendingLineCommand): Promise<PendingLineCommand | null>;
   claimPending(token: string, groupId: string, kind: PendingLineCommand["kind"], eventId: string, nowIso: string): Promise<PendingLineCommand | null>;
@@ -67,9 +67,10 @@ export function createLineRepository(db: D1Database, ids: IdGenerator, clock: Cl
         .bind(eventId).first<{ reply_json: string }>();
       return row ? JSON.parse(row.reply_json) as CommandReply : null;
     },
-    async saveEventReply(eventId, reply) {
-      await db.prepare("INSERT OR IGNORE INTO line_event_replies (event_id, reply_json) VALUES (?, ?)")
-        .bind(eventId, JSON.stringify(reply)).run();
+    async saveEventReply(eventId, reply, provenance) {
+      await db.prepare(`INSERT OR IGNORE INTO line_event_replies (event_id, reply_json, provenance)
+        VALUES (?, ?, CASE WHEN EXISTS (SELECT 1 FROM line_command_ingress WHERE event_id = ? AND group_id = ? AND operation = ? AND workflow_id = ? AND received_at = ?) THEN 'prepared' ELSE NULL END)`)
+        .bind(eventId, JSON.stringify(reply), eventId, provenance?.groupId ?? null, provenance?.operation ?? null, provenance?.workflowId ?? null, provenance?.receivedAt ?? null).run();
     },
     async findPendingBySourceEvent(sourceEventId) {
       const row = await db.prepare("SELECT * FROM pending_line_commands WHERE source_event_id = ?")

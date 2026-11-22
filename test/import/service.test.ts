@@ -105,6 +105,7 @@ async function buildProcessDeps(
 ): Promise<{ deps: ProcessGroupDeps; group: PersistedGroup }> {
   const env = testEnv();
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM airtable_create_claims WHERE group_id IN (SELECT id FROM product_groups WHERE group_hash LIKE 'task13-group-%')"),
     env.DB.prepare(
       "DELETE FROM product_groups WHERE group_hash LIKE 'task13-group-%'",
     ),
@@ -158,6 +159,8 @@ async function buildProcessDeps(
       ),
       airtable: fakeAirtable(airtableOverrides),
       productIdPrefix: "A",
+      airtableBaseId: "base",
+      airtableTableId: "table",
       assetUrlTtlSeconds: 300,
     },
     group: {
@@ -201,6 +204,62 @@ async function auditRows(correlationId: string): Promise<
 }
 
 describe("downloadAndGroupSnapshot", () => {
+  it("holds an interrupted scan and preserves completed membership on replay", async () => {
+    const sourceAlbumId = `scan-${crypto.randomUUID()}`;
+    const run = crypto.randomUUID();
+    const snapshot: AlbumSnapshot = { sourceAlbumId, fetchedAt: "now", photos: [sourcePhoto("m", 0), sourcePhoto("p", 1)].map(p => ({ ...p, sourceAlbumId })) };
+    const deps = await buildDeps(sourceAlbumId, snapshot, new Set(["m"]));
+    await deps.repo.createImportRun({ id: run, sourceAlbumId, trigger: "cron" });
+    const download = deps.imageSource.download;
+    deps.imageSource.download = async () => { throw new Error("interrupted"); };
+    await expect(downloadAndGroupSnapshot(deps, run)).rejects.toThrow("interrupted");
+    snapshot.photos.push({ ...sourcePhoto("new", 2), sourceAlbumId });
+    deps.imageSource.download = download;
+    const result = await downloadAndGroupSnapshot(deps, run);
+    expect(result.checkpointPosition).toBe(1);
+    expect(result.pendingGroups[0]?.attachablePhotos.map(p => p.applePhotoId)).toEqual(["p"]);
+    snapshot.photos = snapshot.photos.filter(p => p.applePhotoId !== "p");
+    await expect(downloadAndGroupSnapshot(deps, run)).rejects.toMatchObject({ code: "import_snapshot_original_unavailable" });
+  });
+
+  it("distinguishes a complete empty scan from an interrupted scan", async () => {
+    const sourceAlbumId = `scan-${crypto.randomUUID()}`;
+    const snapshot: AlbumSnapshot = { sourceAlbumId, fetchedAt: "now", photos: [] };
+    const deps = await buildDeps(sourceAlbumId, snapshot, new Set());
+    const complete = crypto.randomUUID();
+    await deps.repo.createImportRun({ id: complete, sourceAlbumId, trigger: "cron" });
+    expect((await downloadAndGroupSnapshot(deps, complete)).checkpointPosition).toBe(-1);
+    snapshot.photos.push({ ...sourcePhoto("new", 0), sourceAlbumId });
+    expect((await downloadAndGroupSnapshot(deps, complete)).checkpointPosition).toBe(-1);
+    await deps.repo.failImportRun({ id: complete, sourceAlbumId, failureReason: "test" });
+    const interrupted = crypto.randomUUID();
+    await deps.repo.createImportRun({ id: interrupted, sourceAlbumId, trigger: "cron" });
+    deps.imageSource.getSnapshot = async () => { throw new Error("scan interrupted"); };
+    await expect(downloadAndGroupSnapshot(deps, interrupted)).rejects.toThrow("scan interrupted");
+    deps.imageSource.getSnapshot = async () => ({ ...snapshot, photos: [] });
+    await expect(downloadAndGroupSnapshot(deps, interrupted)).rejects.toMatchObject({ code: "import_scan_incomplete" });
+    expect(await deps.repo.getCheckpoint(sourceAlbumId)).toBeNull();
+  });
+
+  it("finds new photos on a fresh run after empty verification", async () => {
+    const { claimImportVerification, completeEmptyImportVerification } = await import('../../src/db/import-repository');
+    const sourceAlbumId = crypto.randomUUID(), runId = crypto.randomUUID();
+    const snapshot: AlbumSnapshot = {sourceAlbumId, fetchedAt:'now', photos:[]};
+    const deps = await buildDeps(sourceAlbumId, snapshot, new Set(['marker']));
+    const db = testEnv().DB, contextJson = JSON.stringify({replyGroupId:'owner'});
+    await deps.repo.createImportRun({id:runId, sourceAlbumId, trigger:'line'});
+    await db.prepare('UPDATE import_runs SET settings_context_json=? WHERE id=?').bind(contextJson,runId).run();
+    await downloadAndGroupSnapshot(deps,runId);
+    const input = {runId, albumId:sourceAlbumId, workflowId:`import-${runId}`, groupId:'owner', contextJson};
+    await claimImportVerification(db,input);
+    expect(await completeEmptyImportVerification(db,input,`import-verification-${runId}`,{schemaVersion:1,kind:'import',runId,generation:1,notificationCycle:1,outcome:'success',messages:[{type:'text',text:'empty'}]})).toBe(true);
+    snapshot.photos.push(...['marker','new'].map((id,i) => ({...sourcePhoto(id,i),sourceAlbumId})));
+    const fresh = crypto.randomUUID();
+    await deps.repo.createImportRun({id:fresh,sourceAlbumId,trigger:'line'});
+    const result = await downloadAndGroupSnapshot(deps,fresh);
+    expect(result.pendingGroups[0]?.attachablePhotos.map(p => p.applePhotoId)).toEqual(['new']);
+  });
+
   it("downloads new photos, groups them, and excludes the marker from attachablePhotos", async () => {
     const sourceAlbumId = `album-${crypto.randomUUID()}`;
     const importRunId = crypto.randomUUID();
@@ -827,55 +886,13 @@ describe("processProductGroupAttempt", () => {
     ]);
   });
 
-  it("reuses the Product ID on a Workflow retry and records success", async () => {
-    let createCalls = 0;
-    const { deps, group } = await buildProcessDeps({
-      createProduct: async () => {
-        createCalls += 1;
-        if (createCalls === 1) {
-          throw new OperationalError(
-            "airtable_rate_limited",
-            "rate limited",
-            true,
-          );
-        }
-        return { recordId: "rec-ok" };
-      },
-    });
-
-    await expect(
-      processProductGroupAttempt(deps, group, "run-retry"),
-    ).rejects.toMatchObject({ code: "airtable_rate_limited" });
-    await expect(
-      processProductGroupAttempt(deps, group, "run-retry"),
-    ).resolves.toEqual({ outcome: "succeeded", productId: "A-501" });
-
-    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
-      state: "succeeded",
-      productId: "A-501",
-      airtableRecordId: "rec-ok",
-      attemptCount: 2,
-    });
-    expect(await auditRows("run-retry")).toEqual([
-      {
-        actor: "system:import",
-        action: "product_id_allocated",
-        before_value: null,
-        after_value: "A-501",
-      },
-      {
-        actor: "system:import",
-        action: "product_group_attempt_failed",
-        before_value: "A-501",
-        after_value: "airtable_rate_limited",
-      },
-      {
-        actor: "system:import",
-        action: "product_group_succeeded",
-        before_value: "importing",
-        after_value: "A-501",
-      },
-    ]);
+  it("holds the allocated ID when a create retry cannot find the row", async () => {
+    const create = vi.fn(async () => { throw new OperationalError("airtable_rate_limited", "rate limited", true); });
+    const { deps, group } = await buildProcessDeps({ createProduct: create });
+    await expect(processProductGroupAttempt(deps, group, "run-retry")).rejects.toMatchObject({ code: "airtable_rate_limited" });
+    await expect(processProductGroupAttempt(deps, group, "run-retry")).rejects.toMatchObject({ code: "airtable_create_unconfirmed", retryable: false });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({ productId: "A-501", attemptCount: 2 });
   });
 
   it("keeps verified success importing until its audit succeeds, then recovers on retry", async () => {
@@ -1213,7 +1230,7 @@ describe("processProductGroupAttempt", () => {
       {
         findBySystemGroupId: async () => ({
           recordId: "rec-existing",
-          productId: "A-777",
+          productId: "A-501",
         }),
         createProduct: async () => {
           throw new Error("recovery must not create another Airtable row");
@@ -1231,13 +1248,13 @@ describe("processProductGroupAttempt", () => {
 
     await expect(
       processProductGroupAttempt(deps, group, "run-recovery"),
-    ).resolves.toEqual({ outcome: "succeeded", productId: "A-777" });
+    ).resolves.toEqual({ outcome: "succeeded", productId: "A-501" });
 
     expect(verificationCalls).toEqual([
       {
         recordId: "rec-existing",
         expected: {
-          productId: "A-777",
+          productId: "A-501",
           systemGroupId: "task13-group-recovery",
           uploadDate: "2026-09-01",
           imageCount: 4,
@@ -1246,7 +1263,7 @@ describe("processProductGroupAttempt", () => {
     ]);
     expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
       state: "succeeded",
-      productId: "A-777",
+      productId: "A-501",
       airtableRecordId: "rec-existing",
       attemptCount: 1,
     });
@@ -1255,9 +1272,47 @@ describe("processProductGroupAttempt", () => {
         actor: "system:import",
         action: "product_group_succeeded",
         before_value: "importing",
-        after_value: "A-777",
+        after_value: "A-501",
       },
     ]);
+  });
+
+  it("holds a candidate with a different product ID without external mutations", async () => {
+    const create = vi.fn();
+    const remove = vi.fn();
+    const { deps, group } = await buildProcessDeps({
+      findBySystemGroupId: async () => ({ recordId: "rec-other", productId: "A-777" }),
+      createProduct: create,
+      deleteProduct: remove,
+    });
+    await deps.repo.setGroupState(group.groupRowId, "importing", { productId: "A-501" });
+    await expect(processProductGroupAttempt(deps, group, "run-conflict")).rejects.toMatchObject({
+      code: "airtable_product_id_conflict", retryable: false,
+    });
+    expect(create).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "importing", productId: "A-501", airtableRecordId: null,
+    });
+  });
+
+  it("holds ambiguous matches without external mutations", async () => {
+    const create = vi.fn();
+    const remove = vi.fn();
+    const { deps, group } = await buildProcessDeps({
+      findBySystemGroupId: async () => { throw new OperationalError("airtable_group_ambiguous", "Multiple matches", false); },
+      createProduct: create,
+      deleteProduct: remove,
+    });
+    await deps.repo.setGroupState(group.groupRowId, "importing", { productId: "A-501" });
+    await expect(processProductGroupAttempt(deps, group, "run-ambiguous")).rejects.toMatchObject({
+      code: "airtable_group_ambiguous", retryable: false,
+    });
+    expect(create).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(await deps.repo.findGroupByHash(group.groupId)).toMatchObject({
+      state: "importing", productId: "A-501", airtableRecordId: null,
+    });
   });
 
   it("recovers a response-lost row after Bangkok midnight using its original persisted Upload Date", async () => {
@@ -1654,6 +1709,34 @@ describe("ignore marker storage and minimum photos", () => {
     return { deps, runId, snapshot };
   }
 
+  it.each([
+    [["ignore", "extra"], { ignoredGroupCount: 1, orphanRange: null, checkpointPosition: 2 }],
+    [["extra"], { ignoredGroupCount: 0, orphanRange: { firstApplePhotoId: "extra", lastApplePhotoId: "extra", count: 1 }, checkpointPosition: 1 }],
+  ])("records no-group evidence for %s", async (ids, expected) => {
+    const { deps, runId } = await setup(ids as string[]);
+    await downloadAndGroupSnapshot(deps, runId);
+    const row = await testEnv().DB.prepare("SELECT grouping_evidence_json FROM import_runs WHERE id=?").bind(runId).first<{grouping_evidence_json:string}>();
+    expect(JSON.parse(row!.grouping_evidence_json)).toEqual({ ...expected, version: 1, savedCheckpoint: null, firstImportCutoffDate: null, countedIgnoreMarkerIds: expected.ignoredGroupCount ? ["ignore"] : [] });
+  });
+
+  it("records original inputs and full scan when cutoff filters photos, and keeps them on replay", async () => {
+    const { deps, runId, snapshot } = await setup(["extra", "extra2"]);
+    await testEnv().DB.prepare("INSERT INTO import_checkpoints (source_album_id, last_position, updated_at) VALUES (?, 1, ?)").bind(deps.sourceAlbumId, "now").run();
+    snapshot.photos[0]!.captureAt = "2026-01-01T00:00:00.000Z";
+    snapshot.photos[1]!.captureAt = "2026-10-01T00:00:00.000Z";
+    deps.firstImportCutoffDate = "2026-09-01T00:00:00.000Z";
+    const result = await downloadAndGroupSnapshot(deps, runId);
+    expect(result.orphanRange?.count).toBe(1);
+    expect(result).not.toHaveProperty("savedCheckpoint");
+    const read = async () => (await testEnv().DB.prepare("SELECT scan_evidence_json, grouping_evidence_json FROM import_runs WHERE id=?").bind(runId).first<{scan_evidence_json:string; grouping_evidence_json:string}>())!;
+    const first = await read();
+    expect(JSON.parse(first.scan_evidence_json)).toHaveLength(2);
+    expect(JSON.parse(first.grouping_evidence_json)).toMatchObject({version:1, savedCheckpoint:1, firstImportCutoffDate:deps.firstImportCutoffDate});
+    deps.firstImportCutoffDate = null;
+    await downloadAndGroupSnapshot(deps, runId);
+    expect((await read()).grouping_evidence_json).toBe(first.grouping_evidence_json);
+  });
+
   it("counts nonempty new ignore groups once and excludes checkpointed groups", async () => {
     const { deps, runId, snapshot } = await setup(["ignore", "extra", "extra2"]);
     const first = await downloadAndGroupSnapshot(deps, runId);
@@ -1666,7 +1749,41 @@ describe("ignore marker storage and minimum photos", () => {
     expect((await downloadAndGroupSnapshot(deps, nextRun)).ignoredGroupCount).toBe(0);
     snapshot.photos.push(...["ignore2", "ignore3", "new-photo", "ignore4"].map((id, i) => ({ ...sourcePhoto(id, i + 4), sourceAlbumId: deps.sourceAlbumId })));
     deps.marker.detect = async bytes => new TextDecoder().decode(bytes).startsWith("product-ignore") ? "ignore_start" : "none";
-    expect((await downloadAndGroupSnapshot(deps, nextRun)).ignoredGroupCount).toBe(1);
+    expect((await downloadAndGroupSnapshot(deps, nextRun)).ignoredGroupCount).toBe(0);
+    await finalizeImportRun(deps.repo, nextRun, deps.sourceAlbumId, false, 0, 3);
+    const laterRun = crypto.randomUUID();
+    await deps.repo.createImportRun({ id: laterRun, sourceAlbumId: deps.sourceAlbumId, trigger: "line" });
+    expect((await downloadAndGroupSnapshot(deps, laterRun)).ignoredGroupCount).toBe(1);
+  });
+
+  it("does not recount a recovered ignored group after positions shift", async () => {
+    const { deps, runId, snapshot } = await setup(["ignore", "extra"]);
+    const db = testEnv().DB;
+    const owner = crypto.randomUUID(), context = JSON.stringify({replyGroupId: owner});
+    await db.prepare("UPDATE import_runs SET settings_context_json=? WHERE id=?").bind(context, runId).run();
+    expect((await downloadAndGroupSnapshot(deps, runId)).ignoredGroupCount).toBe(1);
+    const { claimImportVerification } = await import('../../src/db/import-repository');
+    const { importWorkflowId } = await import('../../src/shared/ids');
+    const { ImportWorkflow } = await import('../../src/import/workflow');
+    await claimImportVerification(db, {runId, albumId:deps.sourceAlbumId, workflowId:importWorkflowId(runId), groupId:owner, contextJson:context});
+    const env = {...testEnv(), IMPORT_WORKFLOW:{get:async () => ({status:async () => ({status:'errored'})})}};
+    await ImportWorkflow.prototype.run.call({env} as any, {instanceId:`import-verification-${runId}`, payload:{kind:'verification', importRunId:runId}} as any, {do:async (_:string, cb:()=>Promise<unknown>)=>cb()} as any);
+    expect(await db.prepare('SELECT status FROM import_runs WHERE id=?').bind(runId).first('status')).toBe('completed');
+    snapshot.photos = ['p1','p2','p3','ignore','extra','ignore2','new-photo'].map((id, i) => ({...sourcePhoto(id, i + 1), sourceAlbumId:deps.sourceAlbumId}));
+    const next = crypto.randomUUID();
+    await deps.repo.createImportRun({id:next, sourceAlbumId:deps.sourceAlbumId, trigger:'line'});
+    expect((await downloadAndGroupSnapshot(deps, next)).ignoredGroupCount).toBe(1);
+  });
+
+  it("retains counted marker identity after normal completion while allowing an uncounted marker", async () => {
+    const { deps, runId, snapshot } = await setup(["ignore", "extra", "ignore2"]);
+    expect((await downloadAndGroupSnapshot(deps, runId)).ignoredGroupCount).toBe(1);
+    await finalizeImportRun(deps.repo, runId, deps.sourceAlbumId, false, 0, 3);
+    snapshot.photos = ["p1", "p2", "p3", "p4", "ignore", "extra", "ignore2", "new-photo"].map((id, i) => ({ ...sourcePhoto(id, i + 1), sourceAlbumId: deps.sourceAlbumId }));
+    const next = crypto.randomUUID();
+    await deps.repo.createImportRun({ id: next, sourceAlbumId: deps.sourceAlbumId, trigger: "line" });
+    expect((await downloadAndGroupSnapshot(deps, next)).ignoredGroupCount).toBe(1);
+    expect((await downloadAndGroupSnapshot(deps, next)).ignoredGroupCount).toBe(1);
   });
 
   it("counts separate ignored products without counting their individual photos", async () => {
@@ -1708,15 +1825,18 @@ describe("ignore marker storage and minimum photos", () => {
     const { deps, runId, snapshot } = await setup(["ignore", "extra"]);
     await downloadAndGroupSnapshot(deps, runId);
     snapshot.photos = ["m1", "p1", "p2", "p3", "extra"].map((id, index) => ({ ...sourcePhoto(id, index + 1), sourceAlbumId: deps.sourceAlbumId }));
+    await finalizeImportRun(deps.repo, runId, deps.sourceAlbumId, false, 0, 2);
+    const nextRun = crypto.randomUUID();
+    await deps.repo.createImportRun({ id: nextRun, sourceAlbumId: deps.sourceAlbumId, trigger: "line" });
     // The source references the same mutable snapshot and preserves original bytes.
     // m1 is already recognized by setup's marker IDs.
     if (changed) {
       const download = deps.imageSource.download;
       deps.imageSource.download = photo => photo.applePhotoId === "extra" ? Promise.resolve(new Response("changed")) : download(photo);
-      await expect(downloadAndGroupSnapshot(deps, runId)).rejects.toMatchObject({ code: "photo_asset_content_changed", retryable: false });
+      await expect(downloadAndGroupSnapshot(deps, nextRun)).rejects.toMatchObject({ code: "photo_asset_content_changed", retryable: false });
       expect((await deps.repo.findAssetByApplePhotoId(deps.sourceAlbumId, "extra"))?.r2Key).toBeNull();
     } else {
-      const result = await downloadAndGroupSnapshot(deps, runId);
+      const result = await downloadAndGroupSnapshot(deps, nextRun);
       expect(result.pendingGroups[0]?.attachablePhotos.map(p => p.applePhotoId)).toContain("extra");
       expect((await deps.repo.findAssetByApplePhotoId(deps.sourceAlbumId, "extra"))?.r2Key).toEqual(expect.any(String));
     }

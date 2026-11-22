@@ -67,7 +67,7 @@ it('delayed results retain original data when a later day supplies the reply tok
 it.each([400,503])('retains safe provider evidence for a %s reply response',async status=>{
  const h=await fixture();h.deps.line=createLineClient({channelAccessToken:'private',fetch:async()=>Response.json({message:'Invalid messages'},{status,headers:{'x-line-request-id':'line-evidence'}})});
  await deliverEventReply(h.input,h.deps);
- expect(await testEnv().DB.prepare('SELECT request_id,http_status FROM line_reply_dispatches WHERE event_id=?').bind(h.input.eventId).first()).toEqual({request_id:'line-evidence',http_status:status});
+ expect(await testEnv().DB.prepare('SELECT request_id,http_status,rejection_proven FROM line_reply_dispatches WHERE event_id=?').bind(h.input.eventId).first()).toEqual({request_id:'line-evidence',http_status:status,rejection_proven:status===400?1:0});
 });
 
 it('a command losing the reservation race replies once without stealing the reserved result',async()=>{
@@ -93,4 +93,159 @@ it('an actual delayed terminal card keeps its original date, destination and lin
  expect(JSON.stringify(h.requests[0].body)).toContain('https://airtable.com/oldBase/oldTable/originalRun');
  expect(JSON.stringify(h.requests[0].body)).not.toContain('new-worker');
  expect(await testEnv().DB.prepare('SELECT group_id FROM line_reply_dispatches WHERE event_id=?').bind(h.input.eventId).first()).toEqual({group_id:h.groupId});
+});
+
+it('repairs a committed publication intent using its original display facts',async()=>{
+ const db=testEnv().DB, groupId=crypto.randomUUID(), runId=crypto.randomUUID(), clock=fixedClock('2026-11-20T08:00:00Z');
+ await db.prepare(`INSERT INTO publication_jobs(publication_run_id,publication_date,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,?,'generating',?,'x','x',2,1,?)`).bind(runId,'2026-11-19',runId,JSON.stringify({replyGroupId:groupId})).run();
+ const {createWorkflowFeedbackRepository}=await import('../../src/db/workflow-feedback');
+ const feedback=createWorkflowFeedbackRepository(db), resultKey=crypto.randomUUID();
+ await feedback.commitOutcome({kind:'publication',runId,generation:2,notificationCycle:1,groupId},{stage:'prepare product images',failureCode:'product_image_too_large',action:'verify',outcome:'unconfirmed',resultKey,references:{imageDiagnostic:{productId:'A-1001',position:1,code:'product_image_too_large'},thaiDate:'19 พฤศจิกายน 2569',airtableRunUrl:`https://airtable.com/oldBase/oldTable/${runId}`,publicBaseUrl:'https://old-worker.test'}});
+ const requests:any[]=[]; const repo=createLineReplyRepository(db,clock);
+ const line=createLineClient({channelAccessToken:'x',fetch:async(_url,init)=>{requests.push(JSON.parse(String(init?.body)));return Response.json({});}});
+ const input={eventId:crypto.randomUUID(),groupId,workflowId:'wf',receivedAt:clock.now().toISOString(),replyToken:'fresh',commandReply:null,drainQueue:true,publicBaseUrl:'https://new-worker.test'};
+ const deps={repo,line,clock,isGroupAllowed:async()=>true,feedback};
+ await deliverEventReply(input,deps);
+ await deliverEventReply({...input,eventId:crypto.randomUUID()},deps);
+ expect(requests).toHaveLength(1); expect(JSON.stringify(requests)).toContain(`https://airtable.com/oldBase/oldTable/${runId}`); expect(JSON.stringify(requests)).toContain('19 พฤศจิกายน 2569');
+ expect(JSON.stringify(requests)).toContain('A-1001'); expect(JSON.stringify(requests)).toContain('รูปที่ 2'); expect(JSON.stringify(requests)).toContain('20 MB'); expect(JSON.stringify(requests)).toContain('ยังยืนยัน');
+ expect(await feedback.pendingByGroup(groupId,10)).toHaveLength(0);
+ expect(await db.prepare('SELECT group_id FROM line_reply_dispatches WHERE event_id=?').bind(input.eventId).first()).toEqual({group_id:groupId});
+});
+
+it('delivers bounded text when a saved publication card cannot render, only to its group and only once',async()=>{
+ const db=testEnv().DB, groupId=crypto.randomUUID(), runId=crypto.randomUUID(), clock=fixedClock('2026-11-20T08:00:00Z');
+ await db.prepare(`INSERT INTO publication_jobs(publication_run_id,publication_date,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,?,'generating',?,'x','x',2,1,?)`).bind(runId,runId,runId,JSON.stringify({replyGroupId:groupId})).run();
+ const {createWorkflowFeedbackRepository}=await import('../../src/db/workflow-feedback');
+ const feedback=createWorkflowFeedbackRepository(db), key=JSON.stringify(['publication',runId,2,1,'terminal']);
+ await feedback.commitOutcome({kind:'publication',runId,generation:2,notificationCycle:1,groupId},{stage:'prepare',action:'verify',outcome:'unconfirmed',resultKey:key,references:{thaiDate:'วันที่'.repeat(2000),airtableRunUrl:`https://airtable.com/base/table/${runId}`,publicBaseUrl:'invalid url'}});
+ const requests:LineReplyMessage[][]=[], repo=createLineReplyRepository(db,clock);
+ const input={eventId:crypto.randomUUID(),groupId,workflowId:'wf',receivedAt:clock.now().toISOString(),replyToken:'fresh',commandReply:{kind:'text' as const,text:'command'},drainQueue:true,publicBaseUrl:'https://new.test'};
+ const deps={repo,feedback,clock,isGroupAllowed:async()=>true,line:{sendReplyMessages:async (_token:string,messages:LineReplyMessage[])=>{requests.push(messages);return {requestId:null};}}};
+ await deliverEventReply({...input,groupId:crypto.randomUUID()},deps);
+ expect(requests[0]).toEqual([{type:'text',text:'command'}]);
+ expect(await deliverEventReply({...input,eventId:crypto.randomUUID()},deps)).toBe('accepted');
+ const notice=requests[1]![1]!;
+ expect(notice.type).toBe('text'); expect(String(notice.text).length).toBeLessThanOrEqual(5000);
+ expect(notice.text).toContain('ยังยืนยัน'); expect(notice.text).toContain(runId);
+ await deliverEventReply({...input,eventId:crypto.randomUUID(),commandReply:null},deps);
+ expect(requests).toHaveLength(2);
+ expect((await db.prepare('SELECT sequence,state FROM line_result_outbox WHERE result_key=?').bind(key).all()).results).toHaveLength(1);
+ expect(await feedback.pendingByGroup(groupId,10)).toHaveLength(0);
+});
+
+it('keeps a command reply available when intent repair fails',async()=>{
+ const h=await fixture();
+ const feedback={pendingByGroup:async()=>{throw new Error('repair failed');}} as unknown as ReturnType<typeof import('../../src/db/workflow-feedback').createWorkflowFeedbackRepository>;
+ await deliverEventReply({...h.input,commandReply:{kind:'text',text:'command'}},{...h.deps,feedback});
+ expect(h.requests[0].body.messages[0]).toEqual({type:'text',text:'command'});
+});
+
+it.each(['confirmed_acceptance', 'close_unverifiable'] as const)('owner %s advances FIFO and a late receipt never resends', async decision => {
+ const h = await fixture(200, true);
+ await h.repo.enqueueResult({resultKey:h.groupId+'-next',groupId:h.groupId,result:{schemaVersion:1,kind:'import',runId:'next',generation:1,notificationCycle:1,outcome:'success',messages:[{type:'text',text:'next'}]}});
+ expect(await deliverEventReply(h.input,h.deps)).toBe('uncertain');
+ const sequence=(await h.repo.head(h.groupId))!.sequence;
+ expect(await h.repo.recordOwnerDisposition({eventId:h.input.eventId,groupId:h.groupId,sequence,decision,actor:'owner',reason:'reviewed'})).toBe(true);
+ await h.repo.accept(h.input.eventId,'late-receipt');
+ const requests: LineReplyMessage[][]=[];
+ const deps={...h.deps,line:{sendReplyMessages:async (_token:string,messages:LineReplyMessage[])=>{requests.push(messages);return {requestId:'next-receipt'};}}};
+ expect(await deliverEventReply({...h.input,eventId:crypto.randomUUID()},deps)).toBe('accepted');
+ expect(requests).toEqual([[{type:'text',text:'next'}]]);
+ expect(await h.repo.head(h.groupId)).toBeNull();
+ expect(await deliverEventReply(h.input,deps)).toBe('ignored');
+ expect(requests).toHaveLength(1);
+});
+
+it('keeps a malformed queue head in place while sending the ordinary command', async () => {
+ const h=await fixture();
+ await testEnv().DB.prepare('UPDATE line_result_outbox SET result_json=? WHERE group_id=?').bind('{',h.groupId).run();
+ expect(await deliverEventReply({...h.input,commandReply:{kind:'text',text:'command'}},h.deps)).toBe('accepted');
+ expect(h.requests[0].body.messages).toEqual([{type:'text',text:'command'}]);
+ expect(await testEnv().DB.prepare('SELECT state FROM line_result_outbox WHERE group_id=?').bind(h.groupId).first()).toEqual({state:'pending'});
+});
+
+it.each(['unsent','rejected','abandoned','mixed'])('repairs a %s malformed publication head in place and does not duplicate on replay',async history=>{
+ const db=testEnv().DB, groupId=crypto.randomUUID(), runId=crypto.randomUUID(), clock=fixedClock('2026-11-20T08:00:00Z');
+ await db.prepare(`INSERT INTO publication_jobs(publication_run_id,publication_date,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,?,'generating',?,'x','x',2,1,?)`).bind(runId,runId,runId,JSON.stringify({replyGroupId:groupId})).run();
+ const {createWorkflowFeedbackRepository}=await import('../../src/db/workflow-feedback');
+ const feedback=createWorkflowFeedbackRepository(db), key=JSON.stringify(['publication',runId,2,1,'terminal']);
+ await feedback.commitOutcome({kind:'publication',runId,generation:2,notificationCycle:1,groupId},{stage:'prepare',action:'verify',outcome:'unconfirmed',resultKey:key,references:{thaiDate:'19 พฤศจิกายน 2569',airtableRunUrl:`https://airtable.com/base/table/${runId}`,publicBaseUrl:'https://old.test'}});
+ await db.prepare('INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at) VALUES (?,?,?,?)').bind(key,groupId,'{','x').run();
+ await feedback.markMaterialized(key,groupId);
+ const before=await db.prepare('SELECT sequence,group_id FROM line_result_outbox WHERE result_key=?').bind(key).first();
+ const sequence=(before as {sequence:number}).sequence, evidence=crypto.randomUUID();
+ await db.prepare("INSERT INTO line_reply_dispatches(event_id,group_id,workflow_id,received_at,candidate_sequence,messages_json,phase,updated_at) VALUES (?,?,'wf','x',?,'[]','rejected','x')").bind(evidence,groupId,sequence).run();
+ await feedback.replaceUnsentHead(groupId,sequence,'{',{bad:'replacement'});
+ expect(await db.prepare('SELECT result_json FROM line_result_outbox WHERE sequence=?').bind(sequence).first('result_json')).toBe('{');
+ if(history==='unsent' || history==='abandoned') await db.prepare('DELETE FROM line_reply_dispatches WHERE event_id=?').bind(evidence).run();
+ else await db.prepare("UPDATE line_reply_dispatches SET rejection_proven=1,http_status=400,disposition='blocked_payload',request_id='original-receipt' WHERE event_id=?").bind(evidence).run();
+ if(history==='abandoned' || history==='mixed') await db.prepare("INSERT INTO line_reply_dispatches(event_id,group_id,workflow_id,received_at,candidate_sequence,messages_json,phase,updated_at) VALUES (?,?,'wf','x',?,'[]','abandoned','x')").bind(crypto.randomUUID(),groupId,sequence).run();
+ const requests:LineReplyMessage[][]=[], repo=createLineReplyRepository(db,clock);
+ const input={eventId:crypto.randomUUID(),groupId,workflowId:'wf',receivedAt:clock.now().toISOString(),replyToken:'fresh',commandReply:null,drainQueue:true,publicBaseUrl:'https://new.test'};
+ const deps={repo,feedback,clock,isGroupAllowed:async()=>true,line:{sendReplyMessages:async (_token:string,messages:LineReplyMessage[])=>{requests.push(messages);return {requestId:null};}}};
+ expect(await deliverEventReply(input,deps)).toBe('accepted');
+ await deliverEventReply({...input,eventId:crypto.randomUUID()},deps);
+ expect(requests).toHaveLength(1);
+ if(history==='rejected') expect(await db.prepare('SELECT phase,request_id FROM line_reply_dispatches WHERE event_id=?').bind(evidence).first()).toEqual({phase:'rejected',request_id:'original-receipt'});
+ expect(JSON.stringify(requests)).toContain(`https://airtable.com/base/table/${runId}`);
+ expect((await db.prepare('SELECT sequence,group_id FROM line_result_outbox WHERE result_key=?').bind(key).all()).results).toEqual([before]);
+});
+
+it('repairs only a head with exclusively proven rejected dispatches', async () => {
+ const db=testEnv().DB, groupId=crypto.randomUUID(), key=crypto.randomUUID();
+ await db.prepare("INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at) VALUES (?,?,'{','x')").bind(key,groupId).run();
+ const sequence=await db.prepare('SELECT sequence FROM line_result_outbox WHERE result_key=?').bind(key).first<number>('sequence');
+ const {createWorkflowFeedbackRepository}=await import('../../src/db/workflow-feedback');
+ const feedback=createWorkflowFeedbackRepository(db), event=crypto.randomUUID();
+ await db.prepare("INSERT INTO line_reply_dispatches(event_id,group_id,workflow_id,received_at,candidate_sequence,messages_json,phase,updated_at,http_status,disposition,rejection_proven) VALUES (?,?,'wf','x',?,'[]','rejected','x',400,'blocked_payload',1)").bind(event,groupId,sequence).run();
+ await feedback.replaceRejectedHead(groupId,sequence!,'{',{fixed:true});
+ expect(await db.prepare('SELECT result_json FROM line_result_outbox WHERE sequence=?').bind(sequence).first('result_json')).toBe('{"fixed":true}');
+ await db.prepare("UPDATE line_result_outbox SET result_json='{' WHERE sequence=?").bind(sequence).run();
+ for(const phase of ['uncertain','accepted','prepared','dispatched','rejected']) {
+  const mixed=crypto.randomUUID();
+  await db.prepare("INSERT INTO line_reply_dispatches(event_id,group_id,workflow_id,received_at,candidate_sequence,messages_json,phase,updated_at) VALUES (?,?,'wf','x',?,'[]',?,'x')").bind(mixed,groupId,sequence,phase).run();
+  await feedback.replaceRejectedHead(groupId,sequence!,'{',{fixed:true});
+  expect(await db.prepare('SELECT result_json FROM line_result_outbox WHERE sequence=?').bind(sequence).first('result_json')).toBe('{');
+  await db.prepare('DELETE FROM line_reply_dispatches WHERE event_id=?').bind(mixed).run();
+ }
+ const contradictory=crypto.randomUUID();
+ await db.prepare("INSERT INTO line_reply_dispatches(event_id,group_id,workflow_id,received_at,candidate_sequence,messages_json,phase,updated_at,http_status) VALUES (?,?,'wf','x',?,'[]','abandoned','x',503)").bind(contradictory,groupId,sequence).run();
+ await feedback.replaceRejectedHead(groupId,sequence!,'{',{fixed:true});
+ expect(await db.prepare('SELECT result_json FROM line_result_outbox WHERE sequence=?').bind(sequence).first('result_json')).toBe('{');
+ await db.prepare('DELETE FROM line_reply_dispatches WHERE event_id=?').bind(contradictory).run();
+ await db.prepare("INSERT INTO line_reply_owner_dispositions(event_id,sequence,group_id,decision,actor,reason,created_at) VALUES (?,?,?,'close_unverifiable','owner','reviewed','x')").bind(event,sequence,groupId).run();
+ await feedback.replaceRejectedHead(groupId,sequence!,'{',{fixed:true});
+ expect(await db.prepare('SELECT result_json FROM line_result_outbox WHERE sequence=?').bind(sequence).first('result_json')).toBe('{');
+});
+
+it.each(['invalid', 'conflict'] as const)('holds a %s correction and later results while preserving command replies', async problem => {
+ const db=testEnv().DB, groupId=crypto.randomUUID(), runId=crypto.randomUUID(), clock=fixedClock('2026-11-20T08:00:00Z');
+ await db.prepare(`INSERT INTO publication_jobs(publication_run_id,publication_date,state,correlation_id,created_at,updated_at,generation,notification_cycle,settings_context_json) VALUES (?,?,'generating',?,'x','x',2,1,?)`).bind(runId,runId,runId,JSON.stringify({replyGroupId:groupId})).run();
+ const {createWorkflowFeedbackRepository}=await import('../../src/db/workflow-feedback');
+ const feedback=createWorkflowFeedbackRepository(db), repo=createLineReplyRepository(db,clock), key=JSON.stringify(['publication',runId,2,1,'terminal']);
+ await feedback.commitOutcome({kind:'publication',runId,generation:2,notificationCycle:1,groupId},{stage:'prepare',action:'verify',outcome:'unconfirmed',resultKey:key});
+ await db.prepare("INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at,state) VALUES (?,?,?,'x','accepted')").bind(key,groupId,'{}').run();
+ await feedback.markMaterialized(key,groupId);
+ const correction=key+':revision:1', result={schemaVersion:1 as const,kind:'publication',runId,generation:2,notificationCycle:1,outcome:'failed',messages:[{type:'text',text:problem==='invalid'?'': 'verified'}]};
+ await db.prepare("INSERT INTO workflow_feedback_results(kind,run_id,generation,notification_cycle,revision,result_key,outcome_json,group_id) VALUES ('publication',?,2,1,1,?,?,?)").bind(runId,correction,JSON.stringify({action:'verified',outcome:'failed',result}),groupId).run();
+ if(problem==='conflict') await repo.enqueueResult({resultKey:correction,groupId,result:{...result,kind:'publication',outcome:'failed',messages:[{type:'text',text:'conflicting'}]}});
+ await repo.enqueueResult({resultKey:groupId+'later',groupId,result:{schemaVersion:1,kind:'import',runId:'later',generation:1,notificationCycle:1,outcome:'success',messages:[{type:'text',text:'later'}]}});
+ const requests:LineReplyMessage[][]=[];
+ const input={eventId:crypto.randomUUID(),groupId,workflowId:'wf',receivedAt:clock.now().toISOString(),replyToken:'fresh',commandReply:{kind:'text' as const,text:'command'},drainQueue:true,publicBaseUrl:'https://app.test'};
+ const deps={repo,feedback,clock,isGroupAllowed:async()=>true,line:{sendReplyMessages:async (_token:string,messages:LineReplyMessage[])=>{requests.push(messages);return {requestId:null};}}};
+ await deliverEventReply(input,deps);
+ await deliverEventReply({...input,eventId:crypto.randomUUID()},deps);
+ expect(requests).toEqual([[{type:'text',text:'command'}],[{type:'text',text:'command'}]]);
+ expect(await feedback.pendingByGroup(groupId,10)).toHaveLength(1);
+ expect((await repo.head(groupId))?.state).toBe('pending');
+ if(problem==='invalid') {
+  await db.prepare('DELETE FROM line_result_outbox WHERE result_key=?').bind(groupId+'later').run();
+  await deliverEventReply({...input,eventId:crypto.randomUUID()},deps);
+  expect(JSON.stringify(requests[2])).toContain('ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed');
+  expect(JSON.stringify(requests[2])).toContain(runId);
+  await deliverEventReply({...input,eventId:crypto.randomUUID(),commandReply:null},deps);
+  expect(requests).toHaveLength(3);
+  expect(await feedback.pendingByGroup(groupId,10)).toHaveLength(0);
+ }
 });

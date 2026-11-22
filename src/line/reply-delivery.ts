@@ -1,8 +1,27 @@
+import { earlySetupResult } from './early-setup-notice';
+import { docsUnconfirmedCard, publicationFailureGuidance } from './docs-summary-card';
+import type { createWorkflowFeedbackRepository } from '../db/workflow-feedback';
 import type { LineReplyRepository } from '../db/line-reply-repository';
 import type { Clock } from '../shared/time';
 import { LineReplyError, validateReplyMessages, type LineClient } from './client';
 import { renderCommandReply } from './reply-renderer';
 import type { CommandReply } from './soldout';
+import type { TerminalResultV1 } from './reply-types';
+
+function unconfirmedPublicationResult(row:{run_id:string;generation:number;notification_cycle:number}, facts:{thaiDate:string;airtableRunUrl:string;publicBaseUrl:string;stage?:string;failureCode?:string;imageDiagnostic?:unknown}):TerminalResultV1 {
+  let messages:TerminalResultV1['messages'];
+  try {
+    const card=docsUnconfirmedCard({thaiDate:facts.thaiDate,airtableRunUrl:facts.airtableRunUrl,...(facts.stage ? {reason:publicationFailureGuidance(facts.stage,facts.failureCode,facts.imageDiagnostic)} : {})},facts.publicBaseUrl);
+    messages=[{type:'flex',altText:card.text,contents:card.contents}];
+    validateReplyMessages(messages);
+  } catch {
+    const date=facts.thaiDate.slice(0,500).replace(/[\uD800-\uDBFF]$/, '');
+    const link=facts.airtableRunUrl.length<=2000 ? `\n${facts.airtableRunUrl}` : '';
+    const text=`${facts.stage ? publicationFailureGuidance(facts.stage,facts.failureCode,facts.imageDiagnostic) + "\n" : ""}ยังยืนยันสถานะงานเอกสารไม่ได้\nกรุณาตรวจสอบงานเดิมก่อนส่ง /docs ซ้ำ\nอ้างอิง: ${row.run_id.slice(0,200)}\nวันที่: ${date}${link}`;
+    messages=[{type:'text',text}];
+  }
+  return {schemaVersion:1,kind:'publication',runId:row.run_id,generation:row.generation,notificationCycle:row.notification_cycle,outcome:'unconfirmed',messages};
+}
 
 export async function retryReplyPersistence<T>(operation:()=>Promise<T>):Promise<T> {
   for(let attempt=0;;attempt++) {
@@ -13,13 +32,90 @@ export async function retryReplyPersistence<T>(operation:()=>Promise<T>):Promise
 export async function deliverEventReply(input: {
   eventId:string; groupId:string; workflowId:string; receivedAt:string; replyToken:string;
   commandReply:CommandReply|null; drainQueue:boolean; publicBaseUrl:string;
-}, deps: {repo:LineReplyRepository;line:Pick<LineClient,'sendReplyMessages'>;clock:Clock;isGroupAllowed(groupId:string):Promise<boolean>})
+}, deps: {repo:LineReplyRepository;line:Pick<LineClient,'sendReplyMessages'>;clock:Clock;isGroupAllowed(groupId:string):Promise<boolean>;feedback?:ReturnType<typeof createWorkflowFeedbackRepository>})
 :Promise<'accepted'|'rejected'|'uncertain'|'ignored'|'duplicate'> {
   const fresh=()=>Number.isFinite(Date.parse(input.receivedAt)) && deps.clock.now().getTime()-Date.parse(input.receivedAt)<=45000;
   if(!input.replyToken.trim() || !fresh() || !await deps.isGroupAllowed(input.groupId))return 'ignored';
   const normal=input.commandReply ? renderCommandReply(input.commandReply,input.publicBaseUrl):[];
-  const head=input.drainQueue ? await deps.repo.head(input.groupId):null;
-  const candidate=head?.state==='pending' && normal.length+head.result.messages.length<=5 ? head:null;
+  let repairBlocked=false;
+  if(input.drainQueue && deps.feedback) {
+    try {
+      const rows=await deps.feedback.pendingByGroup(input.groupId,1);
+      const row=rows[0] as {kind:string;run_id:string;generation:number;notification_cycle:number;result_key:string;outcome_json:string;revision:number}|undefined;
+      if(row) {
+        repairBlocked=true;
+        if(row.kind==='publication' && row.revision>0) {
+          if(!await deps.feedback.ownsPublicationResult(row.run_id,row.generation,row.notification_cycle,input.groupId)) throw new Error('invalid_notice_owner');
+          const outcome=JSON.parse(row.outcome_json) as {action?:string;outcome?:string;result?:TerminalResultV1};
+          const saved=outcome.result;
+          if(outcome.action!=='verified' || !saved || saved.schemaVersion!==1 || saved.kind!==row.kind || saved.runId!==row.run_id || saved.generation!==row.generation || saved.notificationCycle!==row.notification_cycle || saved.outcome!==outcome.outcome || !['success','failed','unconfirmed'].includes(saved.outcome)) throw new Error('invalid_verified_result');
+          let messages:TerminalResultV1['messages'];
+          try { messages=[{type:'text',text:'ผลการตรวจสอบเปลี่ยนจากข้อความก่อนหน้า'},...saved.messages]; validateReplyMessages(messages); }
+          catch { messages=[{type:'text',text:`ผลการตรวจสอบเปลี่ยนจากข้อความก่อนหน้า\n${saved.outcome==='success' ? 'ตรวจสอบแล้ว สร้างเอกสารสำเร็จ' : saved.outcome==='failed' ? 'ตรวจสอบแล้ว สถานะงานใน Airtable เป็น Failed และไม่มีเอกสารที่บันทึกไว้' : 'ยังยืนยันผลการสร้างเอกสารไม่ได้ กรุณาตรวจสอบก่อนส่ง /docs ซ้ำ'}\nอ้างอิง: ${row.run_id.slice(0,200)}`}]; }
+          const result={...saved,messages};
+          const exists=await deps.feedback.hasOutbox(row.result_key,input.groupId);
+          const head=await deps.repo.head(input.groupId);
+          if(!exists && head) {
+            if(await deps.feedback.earlierHead(input.groupId,head.sequence,row.result_key)) repairBlocked=false;
+            else throw new Error('notice_order_unresolved');
+          } else {
+            await deps.feedback.enqueueCorrection(row.result_key,input.groupId,row.outcome_json,result);
+            await deps.feedback.markMaterialized(row.result_key,input.groupId,JSON.stringify(result),row.outcome_json);
+          }
+        } else {
+          if(!await deps.feedback.hasOutbox(row.result_key,input.groupId)) {
+            const outcome=JSON.parse(row.outcome_json) as {outcome?:string;stage?:string;failureCode?:string;result?:{messages:{type:string;text?:string}[]};references?:{thaiDate?:string;airtableRunUrl?:string;publicBaseUrl?:string;notice?:string;imageDiagnostic?:unknown}};
+            const facts=outcome.references;
+            if ((row.kind==='import' || row.kind==='publication') && facts?.notice==='early_setup') {
+              await deps.repo.enqueueResult({resultKey:row.result_key,groupId:input.groupId,result:earlySetupResult({kind:row.kind,runId:row.run_id,generation:row.generation,notificationCycle:row.notification_cycle,groupId:input.groupId})});
+            }
+            if(row.kind==='publication' && outcome.result) {
+              const result=outcome.result;
+              result.messages=[{type:'text',text:'ผลการตรวจสอบเปลี่ยนจากข้อความก่อนหน้า'},...result.messages];
+              await deps.repo.enqueueResult({resultKey:row.result_key,groupId:input.groupId,result:result as Parameters<LineReplyRepository['enqueueResult']>[0]['result']});
+            }
+            if(row.kind==='publication' && outcome.outcome==='unconfirmed' && facts?.thaiDate && facts.airtableRunUrl && facts.publicBaseUrl) {
+              await deps.repo.enqueueResult({resultKey:row.result_key,groupId:input.groupId,result:unconfirmedPublicationResult(row,{...facts,stage:outcome.stage,failureCode:outcome.failureCode} as {thaiDate:string;airtableRunUrl:string;publicBaseUrl:string;stage?:string;failureCode?:string;imageDiagnostic?:unknown})});
+            }
+          }
+          await deps.feedback.markMaterialized(row.result_key,input.groupId);
+        }
+        if(repairBlocked) {
+          const pending=(await deps.feedback.pendingByGroup(input.groupId,1))[0] as {result_key:string}|undefined;
+          const head=pending ? await deps.repo.head(input.groupId) : null;
+          repairBlocked=!!pending && !(head && await deps.feedback.earlierHead(input.groupId,head.sequence,pending.result_key));
+        }
+      }
+    } catch(error) { repairBlocked=true; console.error('workflow_feedback_repair_failed',error); }
+  }
+  if(input.drainQueue && deps.feedback) {
+    try {
+      const row=await deps.feedback.publicationHead(input.groupId);
+      if(row && row.result_key===JSON.stringify(['publication',row.run_id,row.generation,row.notification_cycle,'terminal'])) {
+        let malformed=false;
+        try { const result=JSON.parse(row.result_json); validateReplyMessages(result.messages); } catch { malformed=true; }
+        if(malformed) {
+          const outcome=JSON.parse(row.outcome_json) as {outcome?:string;stage?:string;failureCode?:string;result?:{messages:{type:string;text?:string}[]};references?:{thaiDate?:string;airtableRunUrl?:string;publicBaseUrl?:string;imageDiagnostic?:unknown}};
+          const facts=outcome.references;
+          if(outcome.outcome==='unconfirmed' && facts?.thaiDate && facts.airtableRunUrl && facts.publicBaseUrl) {
+            const replacement=unconfirmedPublicationResult(row,{...facts,stage:outcome.stage,failureCode:outcome.failureCode} as {thaiDate:string;airtableRunUrl:string;publicBaseUrl:string;stage?:string;failureCode?:string;imageDiagnostic?:unknown});
+            await deps.feedback.replaceUnsentHead(input.groupId,row.sequence,row.result_json,replacement);
+            await deps.feedback.replaceRejectedHead(input.groupId,row.sequence,row.result_json,replacement);
+          }
+        }
+      }
+    } catch(error) { console.error('workflow_feedback_repair_failed',error); }
+  }
+  let head:Awaited<ReturnType<LineReplyRepository['head']>>=null;
+  try { if(input.drainQueue && !repairBlocked) head=await deps.repo.head(input.groupId); }
+  catch(error) { if(!(error instanceof SyntaxError))throw error; }
+  let candidate:typeof head=null;
+  if(head?.state==='pending') {
+    try {
+      validateReplyMessages(head.result.messages);
+      if(normal.length+head.result.messages.length<=5)candidate=head;
+    } catch { /* Keep the malformed head for owner inspection. */ }
+  }
   let messages=candidate ? [...normal,...candidate.result.messages]:normal;
   if(!messages.length)return 'ignored';
   validateReplyMessages(messages);
