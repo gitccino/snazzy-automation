@@ -54,10 +54,14 @@ function productCard(
   const date = uploadDate
     ? `${Number(uploadDate[3])}/${Number(uploadDate[2])}/${uploadDate[1]}`
     : product.uploadDate ?? "ไม่พบข้อมูล";
+  const albumNames = album?.status === "found" ? album.albums.map(a=>a.name).join("\n") : null;
   const albumText = !album ? null : album.status === "found"
-    ? `${album.albums.length === 2 ? "สินค้านี้อาจอยู่ในอัลบั้มใดอัลบั้มหนึ่ง\n" : "อัลบั้ม iCloud\n"}${album.albums.map(a=>a.name).join("\n")}`
+    ? `${album.albums.length === 2 ? "สินค้านี้อาจอยู่ในอัลบั้มใดอัลบั้มหนึ่ง\n" : ""}${albumNames}`
     : album.status === "unavailable" ? "ตรวจสอบอัลบั้ม iCloud ไม่สำเร็จ กรุณาลอง /search อีกครั้ง"
     : "ไม่สามารถระบุอัลบั้ม iCloud ของสินค้านี้ได้";
+  const albumNote = album?.status === "found"
+    ? album.albums.length === 2 ? "สินค้านี้อาจอยู่ในอัลบั้มใดอัลบั้มหนึ่ง" : null
+    : albumText;
   const albumButtons = album?.status === "found" ? album.albums.map((a,index)=>a.url ? ({
     type: "button", style: "secondary", height: "sm",
     action: {type: "uri", label: album.albums.length === 1 ? "เปิดบน iCloud.com" : `เปิดบน iCloud.com ${index+1}`, uri: a.url},
@@ -104,9 +108,10 @@ function productCard(
                 ? row("ราคา", `${soldPrice.toLocaleString("en-US")} บาท`)
                 : row(product.brandName ? "แบรนด์" : "รุ่น", product.brandName || product.modelName || "ไม่พบข้อมูล"),
               ...(product.uploadDate !== undefined || soldPrice === undefined ? [row("วันที่อัปโหลด", date)] : []),
+              ...(albumNames ? [{type: "text", text: albumNames, color: ink, size: "sm", align: "end", wrap: true, margin: "xs"}] : []),
             ],
           },
-          ...(albumText ? [{type: "text", text: albumText, color: muted, size: "sm", wrap: true, margin: "lg"}] : []),
+          ...(albumNote ? [{type: "text", text: albumNote, color: muted, size: "sm", wrap: true, margin: "lg"}] : []),
         ],
       },
       ...(product.airtableUrl || albumButtons.length ? { footer: {
