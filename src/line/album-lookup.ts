@@ -10,7 +10,7 @@ const sharedUrl = z.string().max(1000).refine(value => {
   try {
     const u = new URL(value);
     return u.href === value && u.protocol === 'https:' && u.hostname === 'www.icloud.com' && !u.port && !u.username && !u.password
-      && u.pathname === '/sharedalbum/' && !u.search && /^#[A-Za-z0-9]+$/.test(u.hash);
+      && u.pathname === '/sharedalbum/' && !u.search && /^#[A-Za-z0-9_-]+$/.test(u.hash);
   } catch { return false; }
 });
 const albumSchema = z.strictObject({

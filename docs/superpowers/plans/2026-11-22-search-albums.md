@@ -52,3 +52,11 @@ Implemented on `feature/search-icloud-albums` without deployment, remote writes 
 Ruling: extend `src/db/execution-context-repository.ts`'s strict context schema with optional `icloudAlbums`; otherwise new D1 settings snapshots break accepted Workflow context persistence. Preserve old contexts without inventing the field. New regression covers both formats.
 
 Ruling: retain default-empty registry, API-only configuration, and no guessed real album IDs/dates/URLs. See `docs/runbooks/search-albums.md` for data prerequisites, exact PATCH endpoint, revision semantics, compatibility and rollback. The twenty requested albums still require date-added verification and configured mappings before this can identify them in use. LINE configuration commands and a registry settings form remain outside scope.
+
+## Follow-up: real Photos link inspection
+
+Photos exposed existing website URLs for 11 of the 20 albums. Nine albums exposed no URL in this account's participant settings; no sharing options were changed. Actual links are saved privately outside Git in `/Users/gitccino/.t3/userdata/album-inspection/2026-11-22-icloud-album-links.json`; do not publish them as repository fixtures. Date-added evidence is recorded separately in `docs/research/2026-11-22-icloud-album-date-ranges.json`.
+
+The actual tokens use URL-safe `_` and `-`, which the original alphanumeric-only fragment validator rejected. A synthetic regression failed first, then passed after allowing these two characters within the same strict origin/path/canonical URL and length guards. All 11 retrieved links were checked locally against the corrected schema without contacting their websites. Focused tests: 57/57; typecheck and diff check passed. Root `npm test`: Node owner CLI passed; Vitest completed 1,392 passed and the same nine baseline failures listed above. Existing Miniflare Workflow errors and missing-source-map warnings remain. No mobile opening, deployment or live registry configuration was performed.
+
+LINE's documented URI action opens its in-app browser and supports http/https/line/tel; no supported Photos-specific URI action is configured. Native handoff to a specific shared album is not promised. See https://developers.line.biz/en/reference/messaging-api/#uri-action and Apple's shared album documentation https://support.apple.com/en-us/108314.

@@ -1,0 +1,155 @@
+{
+  "inspectedOn": "2026-11-22",
+  "source": "macOS Photos > each named Shared Album > Activity, first and last sharing events at scroll boundaries",
+  "dateMeaning": "Photo sharing-event date as displayed by Photos, not photo capture date",
+  "calendarConversion": "Photos BE 2568/2569 converted to Gregorian 2025/2026 by subtracting 543",
+  "airtableAssumption": "User confirmed Upload Date may be assumed to represent album-added date",
+  "limits": [
+    "Current visible sharing history only; deleted content and external changes were not independently audited.",
+    "Times transcribed as displayed by this Mac; no independent timezone conversion was performed.",
+    "URLs and source album IDs are not established by this inspection.",
+    "No remote registry settings were changed."
+  ],
+  "albums": [
+    {
+      "name": "Shared album 32",
+      "startDate": "2025-01-21",
+      "endDate": "2025-02-10",
+      "earliestSharedTime": "18:07",
+      "latestSharedTime": "21:08"
+    },
+    {
+      "name": "Shared album 33",
+      "startDate": "2025-02-11",
+      "endDate": "2025-03-02",
+      "earliestSharedTime": "22:54",
+      "latestSharedTime": "19:09"
+    },
+    {
+      "name": "Shared album 34",
+      "startDate": "2025-03-03",
+      "endDate": "2025-03-18",
+      "earliestSharedTime": "21:06",
+      "latestSharedTime": "18:20"
+    },
+    {
+      "name": "Shared album 35",
+      "startDate": "2025-03-19",
+      "endDate": "2025-04-08",
+      "earliestSharedTime": "20:58",
+      "latestSharedTime": "22:45"
+    },
+    {
+      "name": "Shared album 36",
+      "startDate": "2025-04-09",
+      "endDate": "2025-05-01",
+      "earliestSharedTime": "18:18",
+      "latestSharedTime": "18:51"
+    },
+    {
+      "name": "Shared album 39",
+      "startDate": "2025-06-19",
+      "endDate": "2025-07-13",
+      "earliestSharedTime": "19:34",
+      "latestSharedTime": "19:19"
+    },
+    {
+      "name": "Shared album 40",
+      "startDate": "2025-07-14",
+      "endDate": "2025-08-08",
+      "earliestSharedTime": "18:02",
+      "latestSharedTime": "18:33"
+    },
+    {
+      "name": "Shared album 42",
+      "startDate": "2025-09-03",
+      "endDate": "2025-09-13",
+      "earliestSharedTime": "18:32",
+      "latestSharedTime": "03:09"
+    },
+    {
+      "name": "Shared album 43",
+      "startDate": "2025-09-15",
+      "endDate": "2025-10-07",
+      "earliestSharedTime": "18:13",
+      "latestSharedTime": "16:27"
+    },
+    {
+      "name": "Shared album 44",
+      "startDate": "2025-10-06",
+      "endDate": "2025-11-06",
+      "earliestSharedTime": "18:06",
+      "latestSharedTime": "17:13"
+    },
+    {
+      "name": "Shared album 45",
+      "startDate": "2025-10-30",
+      "endDate": "2025-11-26",
+      "earliestSharedTime": "18:20",
+      "latestSharedTime": "18:29"
+    },
+    {
+      "name": "Shared album 49",
+      "startDate": "2026-02-10",
+      "endDate": "2026-03-09",
+      "earliestSharedTime": "21:48",
+      "latestSharedTime": "18:24"
+    },
+    {
+      "name": "Shared album 50",
+      "startDate": "2026-03-10",
+      "endDate": "2026-04-11",
+      "earliestSharedTime": "18:59",
+      "latestSharedTime": "18:24"
+    },
+    {
+      "name": "Shared album 51",
+      "startDate": "2026-04-13",
+      "endDate": "2026-05-12",
+      "earliestSharedTime": "15:36",
+      "latestSharedTime": "22:34"
+    },
+    {
+      "name": "Shared album 52",
+      "startDate": "2026-05-13",
+      "endDate": "2026-07-15",
+      "earliestSharedTime": "18:57",
+      "latestSharedTime": "17:15"
+    },
+    {
+      "name": "Shared album 53",
+      "startDate": "2026-06-18",
+      "endDate": "2026-07-18",
+      "earliestSharedTime": "17:49",
+      "latestSharedTime": "19:33"
+    },
+    {
+      "name": "Shared album 54",
+      "startDate": "2026-07-20",
+      "endDate": "2026-08-21",
+      "earliestSharedTime": "20:45",
+      "latestSharedTime": "18:28"
+    },
+    {
+      "name": "Shared album 55",
+      "startDate": "2026-08-22",
+      "endDate": "2026-10-10",
+      "earliestSharedTime": "18:30",
+      "latestSharedTime": "17:55"
+    },
+    {
+      "name": "Shared album 56",
+      "startDate": "2026-10-01",
+      "endDate": "2026-11-03",
+      "earliestSharedTime": "22:22",
+      "latestSharedTime": "20:43"
+    },
+    {
+      "name": "Shared album 57",
+      "startDate": "2026-11-04",
+      "endDate": "2026-11-20",
+      "earliestSharedTime": "16:24",
+      "latestSharedTime": "20:25"
+    }
+  ]
+}

@@ -37,3 +37,7 @@ it('rejects raw whitespace that URL parsing would silently discard',()=>{
   expect(albumRegistrySchema.safeParse([{...a,url}]).success).toBe(false);
  }
 });
+
+it('accepts the URL-safe token alphabet used by Photos sharing links',()=>{
+ expect(albumRegistrySchema.safeParse([{...a,url:'https://www.icloud.com/sharedalbum/#D1zv3AbC_def-123'}]).success).toBe(true);
+});
