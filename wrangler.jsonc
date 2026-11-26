@@ -91,13 +91,23 @@
     },
     "production": {
       "name": "snazzy-automation-production",
+      "account_id": "1faf55af4ab8b3f083d8aba5bd88f28a",
+      "limits": { "cpu_ms": 300000 },
+      "observability": { "logs": { "enabled": true, "invocation_logs": true } },
+      "vars": {
+        "CONFIGURATION_MODE": "d1",
+        "ENVIRONMENT": "production",
+        "PUBLIC_BASE_URL": "https://snazzy-automation-production.snazzybrandnamedev.workers.dev",
+        "GOOGLE_OAUTH_CLIENT_ID": "235458426284-5d40epfpei5f29u8svlcfi8e3qvqsedk.apps.googleusercontent.com"
+      },
       "triggers": {
-        "crons": ["45 22 * * *", "0 23 * * *", "30 23 * * *"]
+        "crons": []
       },
       "d1_databases": [
         {
           "binding": "DB",
           "database_name": "snazzy-automation-production",
+          "database_id": "7a7403ac-9e48-4cd1-8c2c-7abdf7958585",
           "migrations_dir": "migrations"
         }
       ],
