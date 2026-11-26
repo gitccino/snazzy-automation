@@ -100,13 +100,53 @@ describe("createICloudClient.getSnapshot", () => {
     expect(snapshot.photos).toHaveLength(2);
     expect(snapshot.photos[0]).toMatchObject({
       applePhotoId: "AAAA-1111",
-      position: 1,
+      position: 0,
       mediaType: "image/jpeg",
     });
     expect(snapshot.photos[0]!.derivativeUrl).toBe(
       "https://cvws.icloud-content.com/A/aaaa?o=1&v=1&x=1&s=1&a=1&k=1&e=1"
     );
     expect(snapshot.photos[1]!.applePhotoId).toBe("BBBB-2222");
+  });
+
+  async function readLegacy(ids: string[], dates: Array<string | null | undefined>) {
+    const photos = ids.map((photoGuid, i) => ({photoGuid, dateCreated: dates[i], derivatives: {"2048": {checksum: photoGuid}}}));
+    return createICloudClient("TOKEN-XYZ", scriptedFetcher([
+      {status: 200, body: {photos}}, {status: 200, body: {photos}},
+      {status: 200, body: {items: Object.fromEntries(ids.map(id => [id, {url_location: "cvws.icloud-content.com", url_path: `/${id}`}]))}},
+    ])).getSnapshot();
+  }
+
+  it("recovers product and ignore boundaries from shuffled capture instants without changing strings", async () => {
+    const ids = ["old-marker", "old-1", "old-2", "old-3", "old-4", "new-marker", "new-1", "new-2", "new-3", "new-4", "ignore", "ignored-1", "ignored-2", "ignored-3", "ignored-4"];
+    const dates = ids.map((_, i) => `2026-09-01T09:00:${String(i).padStart(2, "0")}Z`);
+    dates[1] = "2026-09-01T16:00:01+07:00";
+    dates[2] = "2026-09-01T09:00:02.0001Z";
+    dates[3] = "2026-09-01T09:00:02.0002Z";
+    const results = [];
+    for (const order of [[5, 3, 12, 0, 14, 2, 10, 8, 1, 6, 13, 4, 9, 11, 7], [14, 0, 8, 1, 7, 10, 4, 11, 2, 12, 3, 13, 5, 9, 6]]) {
+      const snapshot = await readLegacy(order.map(i => ids[i]!), order.map(i => dates[i]!));
+      expect([...snapshot.photos].sort((a,b) => a.position-b.position).map(p => p.applePhotoId)).toEqual(ids);
+      expect(snapshot.photos.find(p => p.applePhotoId === "old-1")?.captureAt).toBe(dates[1]);
+      const grouped = groupByMarkers(snapshot.photos.map(p => ({...p, isMarker: p.applePhotoId.endsWith("marker"), markerKind: p.applePhotoId === "ignore" ? "ignore_start" as const : p.applePhotoId.endsWith("marker") ? "product_start" as const : "none" as const, r2Key: p.applePhotoId})));
+      expect(grouped.groups.map(g => g.photos.map(p => p.applePhotoId))).toEqual([ids.slice(0,5), ids.slice(5,10)]);
+      expect(grouped.ignoredPhotos.map(p => p.applePhotoId)).toEqual(ids.slice(10));
+      expect(grouped.orphanPhotos).toEqual([]);
+      results.push(grouped);
+    }
+    expect(results[0]).toEqual(results[1]);
+  });
+
+  it.each([null, undefined, "bad-date", "2026-02-30T09:00:00Z", "2026-09-01T09:00:00"])("rejects unusable capture time %s", async date => {
+    await expect(readLegacy(["marker"], [date])).rejects.toMatchObject({code: "icloud_invalid_photo_order", retryable: false});
+  });
+
+  it.each(["2026-09-01T09:00:00.000Z", "2026-09-01T16:00:00+07:00"])("rejects tied instants %s", async date => {
+    await expect(readLegacy(["marker", "photo"], ["2026-09-01T09:00:00Z", date])).rejects.toMatchObject({code: "icloud_ambiguous_photo_order", retryable: false});
+  });
+
+  it("accepts an empty snapshot", async () => {
+    expect((await readLegacy([], [])).photos).toEqual([]);
   });
 
   it("requests webasseturls using photoGuids, not checksums", async () => {
@@ -180,8 +220,8 @@ describe("createICloudClient.getSnapshot", () => {
         position,
       })),
     ).toEqual([
-      { applePhotoId: "AAAA-1111", position: 1 },
-      { applePhotoId: "BBBB-2222", position: 0 },
+      { applePhotoId: "AAAA-1111", position: 0 },
+      { applePhotoId: "BBBB-2222", position: 1 },
     ]);
     expect(
       after.photos.map(({ applePhotoId, position }) => ({
@@ -190,8 +230,8 @@ describe("createICloudClient.getSnapshot", () => {
       })),
     ).toEqual([
       { applePhotoId: "CCCC-3333", position: 2 },
-      { applePhotoId: "AAAA-1111", position: 1 },
-      { applePhotoId: "BBBB-2222", position: 0 },
+      { applePhotoId: "AAAA-1111", position: 0 },
+      { applePhotoId: "BBBB-2222", position: 1 },
     ]);
   });
 });

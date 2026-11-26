@@ -220,6 +220,8 @@ export async function downloadAndGroupSnapshot(
   const heldGroups: NonNullable<DownloadAndGroupOutcome["heldGroups"]> = [];
   for (const group of groups) {
     const groupHash = await computeGroupHash(deps.sourceAlbumId, group.photos);
+    const confirmed = await deps.repo.findConfirmedGroup(deps.sourceAlbumId, group.photos.map(photo => photo.applePhotoId));
+    if (confirmed && confirmed.importRunId !== importRunId) continue;
     const row = await deps.repo.upsertPendingGroup({
       id: deps.ids.next(),
       importRunId,

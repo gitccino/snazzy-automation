@@ -1709,6 +1709,43 @@ describe("ignore marker storage and minimum photos", () => {
     return { deps, runId, snapshot };
   }
 
+  it.each(["exact", "partial", "different-marker", "missing-members", "corrupt-hash", "competing"])("handles reordered historical membership: %s", async scenario => {
+    const {deps, runId, snapshot} = await setup(["m1", "p2", "p1", "p4", "p3"]);
+    const original = (await downloadAndGroupSnapshot(deps, runId)).pendingGroups[0]!;
+    await deps.repo.setGroupState(original.groupRowId, "succeeded", {productId: `A-old-${runId}`, airtableRecordId: "rec-old"});
+    expect((await downloadAndGroupSnapshot(deps, runId)).pendingGroups).toEqual([original]);
+    await finalizeImportRun(deps.repo, runId, deps.sourceAlbumId, false, 0, 5);
+    const db = testEnv().DB;
+    const readHistory = () => db.prepare("SELECT * FROM product_group_image_members WHERE group_id=? ORDER BY ordinal").bind(original.groupRowId).all();
+    const history = await readHistory();
+    if (scenario === "missing-members") await db.prepare("DELETE FROM product_group_image_members WHERE group_id=?").bind(original.groupRowId).run();
+    if (scenario === "corrupt-hash") await db.prepare("UPDATE product_groups SET group_hash='corrupt' WHERE id=?").bind(original.groupRowId).run();
+    if (scenario === "competing") {
+      const other = await deps.repo.upsertPendingGroup({id:crypto.randomUUID(), importRunId:runId, ordinal:1, groupHash:crypto.randomUUID(), firstPhotoId:"other", lastPhotoId:"p1", photos:[{applePhotoId:"other",r2Key:"key"},{applePhotoId:"p1",r2Key:"key"}]});
+      await deps.repo.setGroupState(other.id, "succeeded", {productId:`A-other-${runId}`,airtableRecordId:"rec-other"});
+    }
+    let oldIds = ["m1", "p1", "p2", "p3", "p4"];
+    if (scenario === "partial") oldIds = ["m1", "p1", "p2", "p3"];
+    if (scenario === "different-marker") oldIds[0] = "m2";
+    const ids = [...oldIds, "m2-new", "q1", "q2", "q3", "q4", "ignore", "extra", "extra2", "extra3", "extra4"];
+    snapshot.photos = ids.map((id,i) => ({...sourcePhoto(id,i+1),sourceAlbumId:deps.sourceAlbumId}));
+    const detect = deps.marker.detect;
+    deps.marker.detect = async bytes => new TextDecoder().decode(bytes).includes("m2-new") ? "product_start" : detect(bytes);
+    const next = crypto.randomUUID();
+    await deps.repo.createImportRun({id:next, sourceAlbumId:deps.sourceAlbumId, trigger:"line"});
+    const outcome = await downloadAndGroupSnapshot(deps,next);
+    expect(outcome.pendingGroups.map(g => g.attachablePhotos.map(p => p.applePhotoId))).toEqual([["q1","q2","q3","q4"]]);
+    expect(outcome.heldGroups).toHaveLength(scenario === "exact" ? 0 : 1);
+    expect(outcome.ignoredGroupCount).toBe(1);
+    expect(outcome.orphanRange).toBeNull();
+    if (scenario === "exact") {
+      expect((await readHistory()).results).toEqual(history.results);
+      expect(await deps.repo.findGroupByHash(original.groupId)).toMatchObject({state:"succeeded",productId:`A-old-${runId}`,airtableRecordId:"rec-old",importRunId:runId});
+      expect((await db.prepare("SELECT id FROM product_groups WHERE import_run_id=?").bind(next).all()).results).toHaveLength(1);
+      expect((await downloadAndGroupSnapshot(deps,next)).pendingGroups).toEqual(outcome.pendingGroups);
+    }
+  });
+
   it.each([
     [["ignore", "extra"], { ignoredGroupCount: 1, orphanRange: null, checkpointPosition: 2 }],
     [["extra"], { ignoredGroupCount: 0, orphanRange: { firstApplePhotoId: "extra", lastApplePhotoId: "extra", count: 1 }, checkpointPosition: 1 }],

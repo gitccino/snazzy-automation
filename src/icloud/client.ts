@@ -51,6 +51,29 @@ function pickBestDerivativeChecksum(photo: WebstreamPhoto): string {
   return photo.derivatives[bestKey]!.checksum;
 }
 
+function captureOrder(photos: WebstreamPhoto[]): Map<WebstreamPhoto, number> {
+  const ordered = photos.map(photo => {
+    const capture = photo.dateCreated;
+    if (!capture || !z.iso.datetime({ offset: true }).safeParse(capture).success) {
+      throw new OperationalError("icloud_invalid_photo_order", "Album photos need valid capture timestamps with UTC offsets; marker order cannot be established safely", false);
+    }
+    // Compare fractional seconds exactly, including precision beyond JavaScript milliseconds.
+    const fraction = /\.(\d+)/.exec(capture)?.[1]?.replace(/0+$/, "") ?? "";
+    const second = Date.parse(capture.replace(/\.\d+/, ""));
+    if (!Number.isFinite(second)) {
+      throw new OperationalError("icloud_invalid_photo_order", "Album capture timestamps cannot establish marker order safely", false);
+    }
+    return { photo, second, fraction };
+  });
+  const compare = (a: typeof ordered[number], b: typeof ordered[number]) => a.second - b.second ||
+    a.fraction.padEnd(Math.max(a.fraction.length, b.fraction.length), "0").localeCompare(b.fraction.padEnd(Math.max(a.fraction.length, b.fraction.length), "0"));
+  ordered.sort(compare);
+  if (ordered.some((entry, i) => i > 0 && compare(entry, ordered[i - 1]!) === 0)) {
+    throw new OperationalError("icloud_ambiguous_photo_order", "Album photos share a capture timestamp; marker order cannot be established safely", false);
+  }
+  return new Map(ordered.map(({photo}, position) => [photo, position]));
+}
+
 function parseAlbumSource(input: string): { key: string; cloudKit: boolean } {
   const value = input.trim();
   if (/^[A-Za-z0-9_-]+$/.test(value)) return { key: value, cloudKit: false };
@@ -98,6 +121,7 @@ export function createICloudClient(input: string, fetcher: Fetcher): ImageSource
       WebstreamResponseSchema,
       "icloud_invalid_webstream_response",
     );
+    const positions = captureOrder(webstream.photos);
     const photoGuids = webstream.photos.map((photo) => photo.photoGuid);
 
     const assetUrlsRes = await safeFetch(
@@ -115,7 +139,7 @@ export function createICloudClient(input: string, fetcher: Fetcher): ImageSource
       "icloud_invalid_asset_urls_response",
     );
 
-    const photos: SourcePhoto[] = webstream.photos.map((photo, index) => {
+    const photos: SourcePhoto[] = webstream.photos.map((photo) => {
       const checksum = pickBestDerivativeChecksum(photo);
       const asset = assetUrls.items[checksum];
       if (!asset) {
@@ -128,7 +152,7 @@ export function createICloudClient(input: string, fetcher: Fetcher): ImageSource
       return {
         sourceAlbumId,
         applePhotoId: photo.photoGuid,
-        position: webstream.photos.length - 1 - index,
+        position: positions.get(photo)!,
         captureAt: photo.dateCreated ?? null,
         derivativeUrl: `https://${asset.url_location}${asset.url_path}`,
         mediaType: "image/jpeg",

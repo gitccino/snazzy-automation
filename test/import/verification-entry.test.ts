@@ -134,3 +134,31 @@ it.each(['classification', 'scan', 'checkpoint'])('rejects %s changed between re
   if (change === 'scan') expect(await db.prepare('SELECT scan_evidence_json FROM import_runs WHERE id=?').bind(runId).first('scan_evidence_json')).toBe('[]');
   if (change === 'checkpoint') expect(await db.prepare('SELECT last_position FROM import_checkpoints WHERE source_album_id=?').bind(album).first('last_position')).toBe(99);
 });
+
+it.each(['unchanged', 'membership', 'state', 'competing'])('fences reordered confirmed history during verification: %s', async change => {
+  const {computeGroupHash} = await import('../../src/import/grouping');
+  const {readImportVerificationGroupingCandidate, completeImportVerification} = await import('../../src/db/import-repository');
+  const db = testEnv().DB, runId = crypto.randomUUID(), oldRun = crypto.randomUUID(), album = crypto.randomUUID(), group = crypto.randomUUID();
+  const owner = crypto.randomUUID(), contextJson = JSON.stringify({replyGroupId:owner});
+  const scan = ['m', 'p1', 'p2'].map((applePhotoId,position) => ({applePhotoId,position,captureAt:null,mediaType:'image/jpeg'}));
+  const facts = {version:1,savedCheckpoint:null,firstImportCutoffDate:null,countedIgnoreMarkerIds:[],ignoredGroupCount:0,orphanRange:null,checkpointPosition:2};
+  await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at) VALUES(?,?,'line','completed','now')").bind(oldRun,album).run();
+  await db.prepare("INSERT INTO import_runs(id,source_album_id,trigger,status,started_at,settings_context_json,scan_evidence_json,grouping_evidence_json) VALUES(?,?,'line','running','now',?,?,?)").bind(runId,album,contextJson,JSON.stringify(scan),JSON.stringify(facts)).run();
+  const hash = await computeGroupHash(album,['m','p2','p1'].map(applePhotoId => ({applePhotoId})));
+  await db.prepare("INSERT INTO product_groups(id,import_run_id,ordinal,group_hash,state,product_id,airtable_record_id,first_photo_id,last_photo_id,created_at,updated_at) VALUES(?,?,0,?,'succeeded',?,'rec-old','m','p1','now','now')").bind(group,oldRun,hash,crypto.randomUUID()).run();
+  for (const [i,id] of ['m','p2','p1'].entries()) await db.prepare('INSERT INTO product_group_image_members VALUES(?,?,?,?)').bind(group,i,id,`key-${id}`).run();
+  for (const p of scan) await db.prepare("INSERT INTO photo_assets(id,source_album_id,apple_photo_id,content_hash,r2_key,position,is_marker,marker_kind,import_run_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,'now')")
+    .bind(crypto.randomUUID(),album,p.applePhotoId,crypto.randomUUID(),`key-${p.applePhotoId}`,p.position,p.position === 0 ? 1 : 0,p.position === 0 ? 'product_start' : 'none',oldRun).run();
+  const input = {runId,albumId:album,workflowId:importWorkflowId(runId),groupId:owner,contextJson};
+  await claimImportVerification(db,input);
+  const verifier = `import-verification-${runId}`;
+  const grouping = await readImportVerificationGroupingCandidate(db,runId,verifier);
+  expect(grouping).not.toBeNull();
+  if (change === 'membership') await db.prepare("UPDATE product_group_image_members SET apple_photo_id='changed' WHERE group_id=? AND ordinal=1").bind(group).run();
+  if (change === 'state') await db.prepare("UPDATE product_groups SET state='failed' WHERE id=?").bind(group).run();
+  if (change === 'competing') await db.prepare("INSERT INTO product_groups(id,import_run_id,ordinal,group_hash,state,first_photo_id,last_photo_id,created_at,updated_at) VALUES(?,?,1,?,'succeeded','other','p2','now','now')").bind(crypto.randomUUID(),oldRun,crypto.randomUUID()).run();
+  const result = {schemaVersion:1 as const,kind:'import' as const,runId,generation:1,notificationCycle:1,outcome:'success' as const,messages:[{type:'text' as const,text:'done'}]};
+  expect(await completeImportVerification(db,input,verifier,result,false,grouping!)).toBe(change === 'unchanged');
+  expect(await db.prepare('SELECT status FROM import_runs WHERE id=?').bind(runId).first('status')).toBe(change === 'unchanged' ? 'completed' : 'running');
+  expect(await db.prepare('SELECT group_hash FROM product_groups WHERE id=?').bind(group).first('group_hash')).toBe(hash);
+});
