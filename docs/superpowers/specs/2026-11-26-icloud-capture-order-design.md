@@ -1,0 +1,14 @@
+# Order iCloud imports by capture time
+
+The staging run at 17:54 Bangkok time scanned a legacy shared album containing a four-photo handbag group already imported as A-12687 and a new batch with four product photos and four ignore photos. Between scans, the legacy endpoint changed the position of the old marker relative to its photos. The workflow held one overlapping group, found four orphan photos, and created A-12688 with six photos, including two from the ignore block. Both markers were recognized. A local replay of the saved scan sorted by capture time recovered the old four-photo group, one new four-photo group, one ignored block, and zero orphans.
+
+## Behavior
+
+- For both supported share-link formats, order album photos by the capture instant, oldest first, and assign positions from that order before import grouping. Compare instants numerically or with an equivalent exact comparison, including timestamps with different UTC offsets or precision. Preserve the capture strings consumed by existing cutoff and replay logic. Keep provider IDs, links, and the deployed cutoff semantics.
+- A nonempty snapshot with a missing, invalid, or ambiguous capture timestamp must stop with a safe, actionable error when it cannot establish marker order. Use the existing newer-reader ambiguity policy for ties. An empty snapshot remains valid. Keep the existing newer-reader behavior and error contracts where they already satisfy this specification.
+- Previously saved scans and grouping evidence remain authoritative for replay of admitted runs. Apply new sorting when taking a new snapshot. Preserve previously approved group identities. When a new ordered scan matches a previously successful group by its original start marker and **complete set** of Apple photo IDs in the same source, skip it rather than changing or duplicating its Airtable record. A partial match, a different marker, unavailable membership evidence, or competing overlaps still requires owner review. Preserve the old stored group hash and member order as history.
+- Verify that the new normal group receives only its four product photos and the ignore marker starts the ignored block, independently of Apple response order. Repeated scans of the same input should produce the same positions, group membership, and ordered hashes for newly imported groups.
+
+## Rollout and verification
+
+Build a focused fix against main. Include a reader regression using a shuffled legacy snapshot and an integration test with a previously confirmed group whose members are the same but out of order. Cover genuinely changed membership, ignore handling, and representative malformed or ambiguous timestamps. Leave Airtable records, album mappings, and production settings in place. Correcting staging record A-12688 and redeploying staging are separate operations.
