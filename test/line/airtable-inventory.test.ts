@@ -128,7 +128,7 @@ it("reads every daily-sales page with Bangkok boundaries and requested fields", 
   expect(calls[1]!.searchParams.get("offset")).toBe("page2");
   expect(calls[0]!.searchParams.get("filterByFormula")).toContain("2026-10-06T17:00:00.000Z");
   expect(calls[0]!.searchParams.get("filterByFormula")).toContain("2026-10-07T17:00:00.000Z");
-  expect(calls[0]!.searchParams.getAll("fields[]")).toEqual(["Product ID", "Inventory Status", "Brand Name", "Model Name", "Sold Price", "Sold At"]);
+  expect(calls[0]!.searchParams.getAll("fields[]")).toEqual(["Product ID", "Inventory Status", "Brand Name", "Model Name", "Sold Price", "Sold At", "Product Cost"]);
 });
 
 it.each(["repeated offset", "second page fails", "duplicate product", "duplicate record", "missing price", "In", "invalid timestamp", "end boundary", "before start", "network", "bad date", "malformed response"])("rejects daily report %s without a partial result", async scenario => {

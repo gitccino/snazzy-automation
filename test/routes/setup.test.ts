@@ -9,6 +9,16 @@ import {
 import type { Env } from "../../src/env";
 import { createTestEnv, testEnv } from "../helpers/env";
 
+it("reports a missing iCloud secret without preventing other setup probes", async () => {
+  const env = { ...testEnv(), ...createTestEnv() };
+  delete (env as Partial<Env>).ICLOUD_SHARED_ALBUM_TOKEN;
+  const fetcher = vi.fn();
+  const probes = await createSetupExternalProbes(env, fetcher, { now: () => new Date("2026-11-23T00:00:00.000Z") });
+  await expect(probes.verifyICloudSnapshotAccess()).rejects.toThrow("ICLOUD_SHARED_ALBUM_TOKEN missing");
+  expect(fetcher).not.toHaveBeenCalled();
+  expect(probes.verifyGoogleTemplateAccess).toBeTypeOf("function");
+});
+
 const productsFields = [
   "Product ID",
   "System Group ID",

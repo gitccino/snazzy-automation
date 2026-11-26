@@ -306,10 +306,6 @@ export async function createSetupExternalProbes(
     clock,
     fetcher,
   );
-  const imageSource = createICloudClient(
-    env.ICLOUD_SHARED_ALBUM_TOKEN,
-    fetcher,
-  );
 
   async function googleFetch(
     url: string,
@@ -495,6 +491,9 @@ export async function createSetupExternalProbes(
         throw new Error(`Anthropic returned unexpected model ${model.id}`);
     },
     async verifyICloudSnapshotAccess() {
+      if (!env.ICLOUD_SHARED_ALBUM_TOKEN)
+        throw new Error("ICLOUD_SHARED_ALBUM_TOKEN missing");
+      const imageSource = createICloudClient(env.ICLOUD_SHARED_ALBUM_TOKEN, fetcher);
       return (await imageSource.getSnapshot()).photos.length;
     },
   };
