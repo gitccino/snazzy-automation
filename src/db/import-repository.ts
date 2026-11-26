@@ -55,6 +55,7 @@ export interface ImportRepository {
   setAssetR2Key(sourceAlbumId: string, applePhotoId: string, r2Key: string): Promise<void>;
   recordPhotoAsset(input: Omit<PhotoAssetRow, "createdAt">): Promise<void>;
   findGroupByHash(groupHash: string): Promise<ProductGroupRow | null>;
+  findConfirmedGroup(sourceAlbumId: string, photoIds: string[]): Promise<ProductGroupRow | null>;
   findConfirmedOverlap(sourceAlbumId: string, groupHash: string, photoIds: string[]): Promise<boolean>;
   listHistoricalHolds(runId: string): Promise<Array<{ groupId: string; productId: string | null; errorCode: string }>>;
   upsertPendingGroup(input: { id: string; importRunId: string; ordinal: number; groupHash: string; firstPhotoId: string; lastPhotoId: string; photos?: Array<{ applePhotoId: string; r2Key: string | null }> }): Promise<ProductGroupRow>;
@@ -347,6 +348,10 @@ export function createImportRepository(db: D1Database, _ids: IdGenerator, clock:
       return row === null ? null : toGroupRow(row as Record<string, unknown>);
     },
 
+    async findConfirmedGroup(sourceAlbumId, photoIds) {
+      return (await readConfirmedGroup(db, sourceAlbumId, photoIds))?.group ?? null;
+    },
+
     async findConfirmedOverlap(sourceAlbumId, groupHash, photoIds) {
       const row = await db.prepare(`SELECT 1 FROM product_groups g
         JOIN import_runs r ON r.id = g.import_run_id
@@ -531,8 +536,35 @@ export async function readImportVerificationGroupingCandidate(db: D1Database, ru
   const {groups, orphanPhotos} = groupByMarkers(photos);
   const orphanRange = orphanPhotos.length ? {firstApplePhotoId:orphanPhotos[0]!.applePhotoId,lastApplePhotoId:orphanPhotos[orphanPhotos.length-1]!.applePhotoId,count:orphanPhotos.length} : null;
   const checkpointPosition = scan.reduce((max,p) => Math.max(max,p.position), facts.savedCheckpoint ?? -1);
-  if (groups.length || (facts.countedIgnoreMarkerIds && JSON.stringify(countedIds) !== JSON.stringify(facts.countedIgnoreMarkerIds)) || ignoredGroupCount !== facts.ignoredGroupCount || checkpointPosition !== facts.checkpointPosition || JSON.stringify(orphanRange) !== JSON.stringify(facts.orphanRange)) return null;
-  return {...facts, scanEvidenceJson:row.scan_evidence_json, groupingEvidenceJson:row.grouping_evidence_json, photos};
+  const confirmedGroups = [];
+  for (const group of groups) {
+    const confirmed = await readConfirmedGroup(db, row.source_album_id, group.photos.map(p => p.applePhotoId));
+    if (!confirmed) return null;
+    confirmedGroups.push(confirmed);
+  }
+  if ((facts.countedIgnoreMarkerIds && JSON.stringify(countedIds) !== JSON.stringify(facts.countedIgnoreMarkerIds)) || ignoredGroupCount !== facts.ignoredGroupCount || checkpointPosition !== facts.checkpointPosition || JSON.stringify(orphanRange) !== JSON.stringify(facts.orphanRange)) return null;
+  return {...facts, scanEvidenceJson:row.scan_evidence_json, groupingEvidenceJson:row.grouping_evidence_json, photos, confirmedGroups};
+}
+
+/** Accept reordered history only when one confirmed overlap proves the entire original identity. */
+async function readConfirmedGroup(db: D1Database, sourceAlbumId: string, photoIds: string[]) {
+  if (!photoIds.length || new Set(photoIds).size !== photoIds.length) return null;
+  const overlaps = (await db.prepare(`SELECT g.* FROM product_groups g JOIN import_runs r ON r.id=g.import_run_id
+    WHERE r.source_album_id=? AND g.state='succeeded'
+      AND (g.first_photo_id IN (SELECT value FROM json_each(?)) OR g.last_photo_id IN (SELECT value FROM json_each(?))
+        OR EXISTS (SELECT 1 FROM product_group_image_members m WHERE m.group_id=g.id AND m.apple_photo_id IN (SELECT value FROM json_each(?))))`)
+    .bind(sourceAlbumId, JSON.stringify(photoIds), JSON.stringify(photoIds), JSON.stringify(photoIds)).all()).results;
+  if (overlaps.length !== 1) return null;
+  const row = toGroupRow(overlaps[0]!);
+  if (row.firstPhotoId !== photoIds[0] || !row.productId || !row.airtableRecordId) return null;
+  const members = (await db.prepare("SELECT ordinal, apple_photo_id, r2_key FROM product_group_image_members WHERE group_id=? ORDER BY ordinal")
+    .bind(row.id).all<{ordinal:number; apple_photo_id:string; r2_key:string | null}>()).results;
+  const wanted = new Set(photoIds);
+  if (members.length !== wanted.size || members.some((m,i) => m.ordinal !== i || !m.r2_key || !wanted.has(m.apple_photo_id)) ||
+    new Set(members.map(m => m.apple_photo_id)).size !== wanted.size ||
+    members[0]?.apple_photo_id !== row.firstPhotoId || members.at(-1)?.apple_photo_id !== row.lastPhotoId ||
+    await computeGroupHash(sourceAlbumId, members.map(m => ({applePhotoId:m.apple_photo_id}))) !== row.groupHash) return null;
+  return {group: row, members};
 }
 
 /** Read only complete candidate identities belonging to the active verifier and captured target. */
@@ -609,12 +641,24 @@ export async function completeImportVerification(
         ${grouping ? `AND r.scan_evidence_json=? AND r.grouping_evidence_json=?
         AND (SELECT last_position FROM import_checkpoints WHERE source_album_id=r.source_album_id) IS ?
         AND NOT EXISTS (SELECT 1 FROM product_groups g WHERE g.import_run_id=r.id)
-        AND NOT EXISTS (SELECT 1 FROM product_groups g JOIN import_runs gr ON gr.id=g.import_run_id JOIN json_each(?) p ON g.first_photo_id=json_extract(p.value,'$.applePhotoId') OR g.last_photo_id=json_extract(p.value,'$.applePhotoId') OR EXISTS (SELECT 1 FROM product_group_image_members m WHERE m.group_id=g.id AND m.apple_photo_id=json_extract(p.value,'$.applePhotoId')) WHERE gr.source_album_id=r.source_album_id)
+        AND NOT EXISTS (SELECT 1 FROM product_groups g JOIN import_runs gr ON gr.id=g.import_run_id JOIN json_each(?) p ON g.first_photo_id=json_extract(p.value,'$.applePhotoId') OR g.last_photo_id=json_extract(p.value,'$.applePhotoId') OR EXISTS (SELECT 1 FROM product_group_image_members m WHERE m.group_id=g.id AND m.apple_photo_id=json_extract(p.value,'$.applePhotoId')) WHERE gr.source_album_id=r.source_album_id AND g.id NOT IN (SELECT json_extract(value,'$.group.id') FROM json_each(?)))
+        AND NOT EXISTS (SELECT 1 FROM json_each(?) h WHERE NOT EXISTS (
+          SELECT 1 FROM product_groups g JOIN import_runs gr ON gr.id=g.import_run_id
+          WHERE g.id=json_extract(h.value,'$.group.id') AND gr.source_album_id=r.source_album_id
+            AND g.import_run_id=json_extract(h.value,'$.group.importRunId') AND g.state='succeeded'
+            AND g.group_hash=json_extract(h.value,'$.group.groupHash')
+            AND g.product_id=json_extract(h.value,'$.group.productId') AND g.airtable_record_id=json_extract(h.value,'$.group.airtableRecordId')
+            AND g.first_photo_id=json_extract(h.value,'$.group.firstPhotoId') AND g.last_photo_id=json_extract(h.value,'$.group.lastPhotoId')
+            AND (SELECT count(*) FROM product_group_image_members m WHERE m.group_id=g.id)=json_array_length(h.value,'$.members')
+            AND NOT EXISTS (SELECT 1 FROM json_each(h.value,'$.members') expected WHERE NOT EXISTS (
+              SELECT 1 FROM product_group_image_members m WHERE m.group_id=g.id
+                AND m.ordinal=json_extract(expected.value,'$.ordinal') AND m.apple_photo_id=json_extract(expected.value,'$.apple_photo_id')
+                AND m.r2_key=json_extract(expected.value,'$.r2_key')))))
         AND NOT EXISTS (SELECT 1 FROM json_each(?) p WHERE NOT EXISTS (SELECT 1 FROM photo_assets a
           WHERE a.source_album_id=r.source_album_id AND a.apple_photo_id=json_extract(p.value,'$.applePhotoId')
             AND a.marker_kind=json_extract(p.value,'$.markerKind') AND a.is_marker=json_extract(p.value,'$.isMarker')
             AND a.r2_key IS json_extract(p.value,'$.r2Key'))) ` : ''})`)
-    .bind(JSON.stringify(result), input.runId, input.albumId, input.workflowId, input.groupId, input.contextJson, verifierId, ...(grouping ? [grouping.scanEvidenceJson, grouping.groupingEvidenceJson, grouping.savedCheckpoint, JSON.stringify(grouping.photos), JSON.stringify(grouping.photos)] : []));
+    .bind(JSON.stringify(result), input.runId, input.albumId, input.workflowId, input.groupId, input.contextJson, verifierId, ...(grouping ? [grouping.scanEvidenceJson, grouping.groupingEvidenceJson, grouping.savedCheckpoint, JSON.stringify(grouping.photos), JSON.stringify(grouping.confirmedGroups), JSON.stringify(grouping.confirmedGroups), JSON.stringify(grouping.photos)] : []));
   const insert = db.prepare(`INSERT INTO line_result_outbox(result_key,group_id,result_json,created_at)
     SELECT ?, group_id, result_json, ? FROM import_verification_claims
     WHERE import_run_id=? AND verifier_id=? AND changes()=1

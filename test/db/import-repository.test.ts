@@ -514,3 +514,20 @@ it.each([[1, "product_start"], [0, "none"]] as const)("reads old-worker rows wit
   await testEnv().DB.prepare(`INSERT INTO photo_assets (id, source_album_id, apple_photo_id, content_hash, r2_key, position, is_marker, import_run_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(crypto.randomUUID(), sourceAlbumId, "legacy", crypto.randomUUID(), "assets/legacy.jpg", 1, flag, importRunId, "2026-10-08T00:00:00Z").run();
   expect((await r.findAssetByApplePhotoId(sourceAlbumId, "legacy"))?.markerKind).toBe(kind);
 });
+
+it('requires complete, valid, same-source history to skip reordered confirmed groups', async () => {
+  const {computeGroupHash} = await import('../../src/import/grouping');
+  const db = testEnv().DB, r = repo(), album = crypto.randomUUID(), run = crypto.randomUUID();
+  await r.createImportRun({id:run,sourceAlbumId:album,trigger:'cron'});
+  const groupHash = await computeGroupHash(album, ['marker','b','a'].map(applePhotoId => ({applePhotoId})));
+  const group = await r.upsertPendingGroup({id:crypto.randomUUID(),importRunId:run,ordinal:0,groupHash,firstPhotoId:'marker',lastPhotoId:'a',photos:['marker','b','a'].map(applePhotoId => ({applePhotoId,r2Key:`key-${applePhotoId}`}))});
+  await r.setGroupState(group.id,'succeeded',{productId:crypto.randomUUID(),airtableRecordId:'rec'});
+  expect(await r.findConfirmedGroup(album,['marker','a','b'])).toMatchObject({id:group.id,groupHash});
+  expect(await r.findConfirmedGroup('other-album',['marker','a','b'])).toBeNull();
+  expect(await r.findConfirmedGroup(album,['marker','a','b','extra'])).toBeNull();
+  expect(await r.findConfirmedGroup(album,['marker','a','a'])).toBeNull();
+  await db.prepare('UPDATE product_group_image_members SET ordinal=5 WHERE group_id=? AND ordinal=2').bind(group.id).run();
+  expect(await r.findConfirmedGroup(album,['marker','a','b'])).toBeNull();
+  await db.prepare('UPDATE product_group_image_members SET ordinal=2,r2_key=NULL WHERE group_id=? AND ordinal=5').bind(group.id).run();
+  expect(await r.findConfirmedGroup(album,['marker','a','b'])).toBeNull();
+});
