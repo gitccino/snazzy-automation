@@ -29,12 +29,12 @@ it("searches technical keys and keeps changes local until Save", async () => {
     target: { value: "" },
   });
   fireEvent.click(screen.getByRole("button", { name: "Documents" }));
-  fireEvent.click(screen.getByLabelText("AI auto-captioning"));
+  fireEvent.click(screen.getByRole("switch", { name: "AI auto-captioning" }));
   expect(fetcher).toHaveBeenCalledTimes(1);
   fireEvent.click(screen.getByRole("button", { name: "Discard" }));
   expect(
-    (screen.getByLabelText("AI auto-captioning") as HTMLInputElement).checked,
-  ).toBe(false);
+    screen.getByRole("switch", { name: "AI auto-captioning" }).getAttribute("aria-checked"),
+  ).toBe("false");
 });
 it("saves only the edited section and preserves a draft in another section", async () => {
   const view = sampleView();
@@ -63,7 +63,7 @@ it("saves only the edited section and preserves a draft in another section", asy
   const input = await screen.findByLabelText("Airtable base");
   fireEvent.change(input, { target: { value: "appDraft" } });
   fireEvent.click(screen.getByRole("button", { name: "Documents" }));
-  fireEvent.click(screen.getByLabelText("AI auto-captioning"));
+  fireEvent.click(screen.getByRole("switch", { name: "AI auto-captioning" }));
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(screen.getByRole("status").textContent).toContain("Saved"),
@@ -88,12 +88,12 @@ it("retains a failed draft and offers reload on a revision conflict", async () =
   render(<App />);
   await screen.findByRole("button", { name: /^Airtable/ });
   fireEvent.click(screen.getByRole("button", { name: "Documents" }));
-  fireEvent.click(screen.getByLabelText("AI auto-captioning"));
+  fireEvent.click(screen.getByRole("switch", { name: "AI auto-captioning" }));
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await screen.findByRole("button", { name: "Reload settings" });
   expect(
-    (screen.getByLabelText("AI auto-captioning") as HTMLInputElement).checked,
-  ).toBe(true);
+    screen.getByRole("switch", { name: "AI auto-captioning" }).getAttribute("aria-checked"),
+  ).toBe("true");
 });
 it("requires review of changed Airtable targets before saving", async () => {
   vi.stubGlobal(
@@ -146,10 +146,10 @@ it("retains edits and explains a network failure while saving", async () => {
   render(<App />);
   await screen.findByRole("button", { name: /^Airtable/ });
   fireEvent.click(screen.getByRole("button", { name: "Documents" }));
-  fireEvent.click(screen.getByLabelText("AI auto-captioning"));
+  fireEvent.click(screen.getByRole("switch", { name: "AI auto-captioning" }));
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await screen.findByText(/Could not save. Check your connection/);
-  expect((screen.getByLabelText("AI auto-captioning") as HTMLInputElement).checked).toBe(true);
+  expect(screen.getByRole("switch", { name: "AI auto-captioning" }).getAttribute("aria-checked")).toBe("true");
   expect((screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled).toBe(false);
 });
 
@@ -216,4 +216,46 @@ it("preserves an existing model outside the approved list without silently switc
   expect(select.selectedOptions[0]?.text).toContain("Current");
   expect(select.selectedOptions[0]?.disabled).toBe(true);
   expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+});
+
+it("keeps a provider draft through closing and reopening its disclosure", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ ok: true, value: sampleView() })));
+  render(<App />);
+  const trigger = await screen.findByRole("button", { name: /^Airtable/ });
+  fireEvent.click(trigger);
+  fireEvent.change(screen.getByLabelText("Airtable base"), { target: { value: "appDraft" } });
+  fireEvent.click(trigger);
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  fireEvent.click(trigger);
+  expect((screen.getByLabelText("Airtable base") as HTMLInputElement).value).toBe("appDraft");
+});
+
+it("cancels dirty reload without losing edits, then confirms the reload", async () => {
+  const fetcher = vi.fn(async (_url, init) => Response.json(init?.method === "PATCH"
+    ? { ok: false, code: "revision_conflict" }
+    : { ok: true, value: sampleView() }));
+  vi.stubGlobal("fetch", fetcher);
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Documents" }));
+  fireEvent.click(screen.getByRole("switch", { name: "AI auto-captioning" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  const reload = await screen.findByRole("button", { name: "Reload settings" });
+  fireEvent.click(reload);
+  expect(await screen.findByRole("alertdialog")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+  expect(screen.getByRole("switch", { name: "AI auto-captioning" }).getAttribute("aria-checked")).toBe("true");
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  reload.focus();
+  fireEvent.click(reload);
+  const dialog = await screen.findByRole("alertdialog");
+  fireEvent.keyDown(dialog, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(reload));
+  expect(screen.getByRole("switch", { name: "AI auto-captioning" }).getAttribute("aria-checked")).toBe("true");
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  fireEvent.click(reload);
+  fireEvent.click(screen.getByRole("button", { name: "Discard and reload" }));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
+  await waitFor(() => expect(screen.getByRole("switch", { name: "AI auto-captioning" }).getAttribute("aria-checked")).toBe("false"));
 });

@@ -1,4 +1,5 @@
 import React from "react";
+import { Button as BaseButton } from "@base-ui/react/button";
 import type { SettingsSection as SectionKey } from "../../../../src/settings/schema";
 
 export function Card({
@@ -88,13 +89,13 @@ export function Button({
   ...props
 }: ButtonProps) {
   return (
-    <button
+    <BaseButton
       type={type}
       className={`ui-btn ui-btn-${variant} ui-btn-${size} ${className}`.trim()}
       {...props}
     >
       {children}
-    </button>
+    </BaseButton>
   );
 }
 
