@@ -21,4 +21,22 @@
       "entrypoint": "SettingsService",
     },
   ],
+  "env": {
+    "production": {
+      "name": "snazzy-settings-production",
+      "account_id": "1faf55af4ab8b3f083d8aba5bd88f28a",
+      "vars": {
+        "ACCESS_TEAM_DOMAIN": "snazzybrandname-team.cloudflareaccess.com",
+        "ACCESS_AUD": "a960d81476296336f39511232390f51d30bc30fae6868f432564a48ee8c30304",
+        "SETTINGS_ORIGIN": "https://snazzy-settings-production.snazzybrandnamedev.workers.dev"
+      },
+      "services": [
+        {
+          "binding": "SETTINGS_SERVICE",
+          "service": "snazzy-automation-production",
+          "entrypoint": "SettingsService"
+        }
+      ]
+    }
+  },
 }

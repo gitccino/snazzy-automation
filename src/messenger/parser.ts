@@ -46,14 +46,14 @@ export function parseMessengerCommand(
   )
     return invalid;
   const schedules = Array.from(
-    body.matchAll(/แมสเลย(?:ค่า)?|วันนี้|พรุ่งนี้/g),
+    body.matchAll(/แมสเลย(?:ค่า)?|(?<!ค่า[ \t]*)แมสตอนนี้|วันนี้|พรุ่งนี้/g),
   );
   if (schedules.length > 1) return invalid;
   // Match standalone times so full phone numbers and dotted fragments are not time candidates.
   const times = Array.from(
     body.matchAll(/(?<!\S)([0-9]{1,2})[.:]([0-9]{2})(?!\S)/g),
   );
-  if (schedules[0]?.[0].startsWith("แมสเลย")) {
+  if (schedules[0]?.[0].startsWith("แมส")) {
     if (times.length) return invalid;
     return {
       ok: true,

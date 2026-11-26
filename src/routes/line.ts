@@ -138,7 +138,24 @@ export async function handleLineRoute(
       })));
       await env.LINE_COMMAND_WORKFLOW.createBatch(batch);
     }
-  } catch {
+  } catch (error) {
+    // Discover setup groups only before initialization; never authorize them here.
+    if (env.CONFIGURATION_MODE === "d1" && error instanceof Error && error.message === "settings_unavailable") {
+      try {
+        if (!(await env.DB.prepare("SELECT id FROM app_settings WHERE id = 1").first())) {
+          for (const event of events) {
+            if (!/^C[0-9a-f]{32}$/.test(event.source.groupId)) continue;
+            await env.DB.prepare(`INSERT OR IGNORE INTO audit_events
+              (id, correlation_id, actor, action, before_value, after_value, created_at)
+              VALUES (?, ?, 'line_webhook', 'line_setup_group_observed', NULL, ?, ?)`)
+              .bind(`line-setup:${event.webhookEventId}`, event.webhookEventId, event.source.groupId, receivedAt).run();
+          }
+          return new Response("ok");
+        }
+      } catch {
+        // Keep delivery retryable when setup storage is unavailable.
+      }
+    }
     return new Response("command persistence failed", { status: 503 });
   }
   return new Response("ok");
