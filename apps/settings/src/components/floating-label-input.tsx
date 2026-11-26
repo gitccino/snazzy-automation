@@ -46,7 +46,7 @@ export interface FloatingLabelSelectProps {
 
 export function FloatingLabelSelect({ id, label, value, onChange, options, disabled, ariaDescribedBy, ariaInvalid }: FloatingLabelSelectProps) {
   const fallbackId = useId();
-  return <select id={id ?? fallbackId} aria-label={label} value={String(value)} disabled={disabled}
+  return <div className="select-wrap"><select id={id ?? fallbackId} aria-label={label} value={String(value)} disabled={disabled}
     aria-describedby={ariaDescribedBy} aria-invalid={ariaInvalid} onChange={e => onChange(e.target.value)}>
     {options.filter(option => !option.group).map(option => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
     {[...new Set(options.flatMap(option => option.group ? [option.group] : []))].map(group =>
@@ -54,5 +54,7 @@ export function FloatingLabelSelect({ id, label, value, onChange, options, disab
         {options.filter(option => option.group === group).map(option => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
       </optgroup>
     )}
-  </select>;
+  </select>
+    <svg className="select-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+  </div>;
 }

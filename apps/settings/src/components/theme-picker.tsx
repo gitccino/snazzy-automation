@@ -7,9 +7,9 @@ export function ThemePicker() {
   const [theme, setTheme] = useState<Theme>(() => {
     try {
       const saved = localStorage.getItem(storageKey);
-      if (saved === "light" || saved === "dark") return saved;
+      if (saved === "light" || saved === "dark" || saved === "system") return saved;
     } catch { /* Appearance still works when storage is unavailable. */ }
-    return "system";
+    return "dark";
   });
 
   useEffect(() => {

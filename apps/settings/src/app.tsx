@@ -1,3 +1,6 @@
+import { Accordion } from "@base-ui/react/accordion";
+import { Switch } from "@base-ui/react/switch";
+import { AlertDialog } from "@base-ui/react/alert-dialog";
 import { ProductNumber } from "./components/product-number";
 import { ThemePicker } from "./components/theme-picker";
 import React, { useEffect, useRef, useState } from "react";
@@ -83,6 +86,8 @@ export function App() {
   const [ack, setAck] = useState(false);
   const [tests, setTests] = useState<Record<string, string>>({});
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [reloadOpen, setReloadOpen] = useState(false);
+  const reloadTriggerRef = useRef<HTMLElement | null>(null);
   const statusRef = useRef<HTMLParagraphElement>(null);
 
   async function reload() {
@@ -120,6 +125,15 @@ export function App() {
       );
 
   const anyDirty = numberDirty || (Object.keys(sections) as SettingsSection[]).some(dirty);
+
+  function requestReload() {
+    if (!anyDirty) {
+      void reload();
+      return;
+    }
+    reloadTriggerRef.current = document.activeElement as HTMLElement | null;
+    setReloadOpen(true);
+  }
 
   useEffect(() => {
     const handler = (e: BeforeUnloadEvent) => {
@@ -351,16 +365,16 @@ export function App() {
     if (typeof value === "boolean") {
       return (
         <div className="switch-control-row">
-          <input
+          <Switch.Root
             className="toggle"
-            type="checkbox"
-            role="switch"
             id={id}
             checked={value}
-            onChange={(e) => change(field.key, e.target.checked)}
+            onCheckedChange={(checked) => change(field.key, checked)}
             aria-describedby={describedBy}
             aria-invalid={!!fieldErrors[id]}
-          />
+          >
+            <Switch.Thumb className="toggle-thumb" />
+          </Switch.Root>
           <span className="switch-state" data-on={value}>
             {value ? "Enabled" : "Disabled"}
           </span>
@@ -461,16 +475,7 @@ export function App() {
           <div className="conflict-bar">
             <Button
               variant="primary"
-              onClick={() => {
-                if (
-                  !anyDirty ||
-                  window.confirm(
-                    "Reload settings and discard all unsaved changes?",
-                  )
-                ) {
-                  void reload();
-                }
-              }}
+              onClick={requestReload}
             >
               Reload settings
             </Button>
@@ -514,25 +519,26 @@ export function App() {
 
               <CardContent>
                 {s === "connections" && !search ? (
-                  <div className="provider-list">
+                  <Accordion.Root className="provider-list" multiple value={openConnections} onValueChange={setOpenConnections}>
                     {[
                       { id: "airtable", name: "Airtable", description: "Inventory base and product tables", prefix: "AIRTABLE_" },
                       { id: "google", name: "Google Drive & Docs", description: "Catalog folder and document template", prefix: "GOOGLE_" },
                     ].map((provider) => {
                       const expanded = openConnections.includes(provider.id);
                       const providerDirty = fields.some(f => f.key.startsWith(provider.prefix) && draft[f.key] !== view.record.settings[f.key]);
-                      return <div className="provider" key={provider.id}>
-                        <button className="provider-summary" aria-expanded={expanded} aria-controls={provider.id + "-fields"}
-                          onClick={() => setOpenConnections(current => expanded ? current.filter(id => id !== provider.id) : [...current, provider.id])}>
+                      return <Accordion.Item className="provider" key={provider.id} value={provider.id}>
+                        <Accordion.Header className="provider-heading">
+                        <Accordion.Trigger className="provider-summary">
                           <span className="provider-mark" aria-hidden="true">{provider.id === "airtable" ? <svg viewBox="0 0 24 24" fill="none"><path d="m12 3 9 5-9 5-9-5 9-5Z" fill="currentColor"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5" stroke="currentColor" strokeWidth="1.5"/></svg> : <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M7 3h7l4 4v14H7zM14 3v5h4M10 12h5M10 16h5"/></svg>}</span>
                           <span className="provider-copy"><strong>{provider.name}</strong><span>{provider.description}</span></span>
                           {providerDirty && <span className="dirty-dot" aria-label="Unsaved changes" />}
                           <svg className="chevron" data-open={expanded} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
-                        </button>
-                        {expanded && <div id={provider.id + "-fields"} className="provider-fields">{matching.filter(f => f.key.startsWith(provider.prefix)).map(renderField)}</div>}
-                      </div>;
+                        </Accordion.Trigger>
+                        </Accordion.Header>
+                        <Accordion.Panel className="provider-fields">{matching.filter(f => f.key.startsWith(provider.prefix)).map(renderField)}</Accordion.Panel>
+                      </Accordion.Item>;
                     })}
-                  </div>
+                  </Accordion.Root>
                 ) : matching.filter(f => f.section === s).map(renderField)}
 
                 {s === "connections" && changedAirtable && (
@@ -673,7 +679,7 @@ export function App() {
           <ProductNumber key={reloadGeneration} current={view.nextProductNumber} revision={view.record.revision}
             onDirty={setNumberDirty}
             onSaved={value => setView(current => current ? { ...current, nextProductNumber: value } : current)}
-            onReload={() => { if (!anyDirty || window.confirm("Reload settings and discard all unsaved changes?")) void reload(); }} />
+            onReload={requestReload} />
         </div>}
 
         {view && showSystem && (
@@ -712,6 +718,21 @@ export function App() {
         )}
       </main>
       </div>
+      <AlertDialog.Root open={reloadOpen} onOpenChange={setReloadOpen}>
+        <AlertDialog.Portal>
+          <AlertDialog.Backdrop className="dialog-backdrop" />
+          <AlertDialog.Popup className="reload-dialog" finalFocus={reloadTriggerRef}>
+            <AlertDialog.Title className="dialog-title">Discard unsaved changes?</AlertDialog.Title>
+            <AlertDialog.Description className="dialog-description">
+              Reloading replaces all unsaved edits with the latest saved settings, including product numbering.
+            </AlertDialog.Description>
+            <div className="dialog-actions">
+              <AlertDialog.Close render={<Button />}>Keep editing</AlertDialog.Close>
+              <Button variant="danger" onClick={() => { setReloadOpen(false); void reload(); }}>Discard and reload</Button>
+            </div>
+          </AlertDialog.Popup>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
     </div>
   );
 }

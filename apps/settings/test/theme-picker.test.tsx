@@ -14,6 +14,7 @@ it("follows system changes, supports an explicit override, and restores the save
   const media = new EventTarget() as EventTarget & { matches: boolean };
   media.matches = true;
   vi.stubGlobal("matchMedia", () => media);
+  localStorage.setItem("snazzy-settings-theme", "system");
   const { unmount } = render(<ThemePicker />);
   expect(document.documentElement.dataset.theme).toBe("dark");
   media.matches = false;
@@ -27,5 +28,21 @@ it("follows system changes, supports an explicit override, and restores the save
   render(<ThemePicker />);
   expect(screen.getByDisplayValue("Dark")).toBeTruthy();
   fireEvent.change(screen.getByLabelText("Appearance"), { target: { value: "system" } });
+  expect(document.documentElement.dataset.theme).toBe("light");
+});
+
+for (const preference of [null, "invalid"]) {
+  it(`defaults to dark for ${preference ?? "absent"} appearance preference`, () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+    if (preference) localStorage.setItem("snazzy-settings-theme", preference);
+    render(<ThemePicker />);
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(screen.getByDisplayValue("Dark")).toBeTruthy();
+  });
+}
+
+it("restores a stored light preference", () => {
+  localStorage.setItem("snazzy-settings-theme", "light");
+  render(<ThemePicker />);
   expect(document.documentElement.dataset.theme).toBe("light");
 });
